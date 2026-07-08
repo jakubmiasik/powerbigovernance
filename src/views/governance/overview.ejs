@@ -36,7 +36,7 @@
     <% cards.forEach(function(card) { %>
       <div class="col-sm-6 col-md-4 col-xl-2">
         <a href="<%= card.href %>" class="text-decoration-none text-reset">
-          <div class="card text-center h-100 border-<%= card.color %> stat-card">
+          <div class="card text-center h-100 stat-card">
             <div class="card-body py-3">
               <div class="text-<%= card.color %> mb-2"><i class="bi bi-<%= card.icon %>"></i></div>
               <div class="fs-3 fw-bold text-<%= card.color %>"><%= card.count %></div>
