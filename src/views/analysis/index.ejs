@@ -1,0 +1,174 @@
+<%- include('../layout', { body: `
+<div class="row">
+  <div class="col-lg-10 mx-auto">
+    <h2><i class="bi bi-play-circle me-2"></i>Run Analysis</h2>
+    <p class="text-muted">Scan your Power BI tenant and save results to the database.</p>
+
+    <!-- Run Section -->
+    <div class="card mb-4">
+      <div class="card-header"><i class="bi bi-rocket me-2"></i>New Analysis</div>
+      <div class="card-body">
+        ${servicePrincipals.length === 0 ? 
+          '<div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle me-2"></i>No service principals configured. <a href="/settings">Add one in Settings</a> first.</div>' :
+          `<div class="row align-items-end">
+            <div class="col-md-6">
+              <label for="spSelect" class="form-label">Select Tenant / Service Principal</label>
+              <select class="form-select" id="spSelect">
+                ${servicePrincipals.map(sp => '<option value="' + sp.id + '">' + sp.name + ' (' + sp.tenant_id + ')</option>').join('')}
+              </select>
+            </div>
+            <div class="col-md-3">
+              <button class="btn btn-primary w-100" onclick="startAnalysis()">
+                <i class="bi bi-play-fill me-1"></i>Run Analysis
+              </button>
+            </div>
+          </div>`
+        }
+      </div>
+    </div>
+
+    <!-- Previous Runs -->
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-clock-history me-2"></i>Previous Runs (${runs.length})</span>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-hover table-sm mb-0">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Tenant</th>
+              <th>Status</th>
+              <th>Workspaces</th>
+              <th>Reports</th>
+              <th>Datasets</th>
+              <th>Dashboards</th>
+              <th>Users</th>
+              <th>Date</th>
+              <th>By</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${runs.length === 0 ? '<tr><td colspan="11" class="text-center text-muted py-3">No analysis runs yet</td></tr>' : ''}
+            ${runs.map(r => 
+              '<tr>' +
+              '<td>' + r.id + '</td>' +
+              '<td><strong>' + (r.sp_name || '-') + '</strong></td>' +
+              '<td><span class="badge bg-' + (r.status === 'completed' ? 'success' : r.status === 'running' ? 'primary' : 'danger') + '">' + r.status + '</span></td>' +
+              '<td>' + (r.total_workspaces || 0) + '</td>' +
+              '<td>' + (r.total_reports || 0) + '</td>' +
+              '<td>' + (r.total_datasets || 0) + '</td>' +
+              '<td>' + (r.total_dashboards || 0) + '</td>' +
+              '<td>' + (r.total_users || 0) + '</td>' +
+              '<td><small>' + new Date(r.started_at).toLocaleString() + '</small></td>' +
+              '<td><small>' + (r.run_by || '-') + '</small></td>' +
+              '<td>' +
+                (r.status === 'completed' ? '<a href="/analysis/results/' + r.id + '" class="btn btn-sm btn-outline-primary"><i class="bi bi-eye me-1"></i>View</a>' : '') +
+                ' <button class="btn btn-sm btn-outline-danger" onclick="deleteRun(' + r.id + ')"><i class="bi bi-trash"></i></button>' +
+              '</td>' +
+              '</tr>'
+            ).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Progress Modal -->
+<div class="modal fade" id="progressModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-hourglass-split me-2"></i>Analysis in Progress</h5>
+      </div>
+      <div class="modal-body text-center">
+        <div class="spinner-border text-primary mb-3" role="status" id="analysisSpinner">
+          <span class="visually-hidden">Loading...</span>
+        </div>
+        <div class="progress mb-3" style="height: 25px;">
+          <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" id="progressBar" style="width: 0%">0%</div>
+        </div>
+        <p class="text-muted" id="progressMessage">Starting analysis...</p>
+        <p class="small text-muted" id="progressDetail"></p>
+      </div>
+      <div class="modal-footer" id="progressFooter" style="display:none;">
+        <a href="#" class="btn btn-primary" id="viewResultsBtn"><i class="bi bi-eye me-1"></i>View Results</a>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let progressInterval = null;
+
+async function startAnalysis() {
+  const spId = document.getElementById('spSelect').value;
+  const modal = new bootstrap.Modal(document.getElementById('progressModal'));
+  modal.show();
+  
+  document.getElementById('progressBar').style.width = '0%';
+  document.getElementById('progressBar').textContent = '0%';
+  document.getElementById('progressMessage').textContent = 'Starting analysis...';
+  document.getElementById('progressDetail').textContent = '';
+  document.getElementById('progressFooter').style.display = 'none';
+  document.getElementById('analysisSpinner').style.display = '';
+
+  try {
+    const response = await fetch('/analysis/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ spId }),
+    });
+    const data = await response.json();
+    
+    if (!data.success) {
+      document.getElementById('progressMessage').textContent = 'Error: ' + data.message;
+      document.getElementById('analysisSpinner').style.display = 'none';
+      return;
+    }
+
+    // Poll for progress
+    progressInterval = setInterval(() => pollProgress(data.runId), 2000);
+  } catch (err) {
+    document.getElementById('progressMessage').textContent = 'Error: ' + err.message;
+    document.getElementById('analysisSpinner').style.display = 'none';
+  }
+}
+
+async function pollProgress(runId) {
+  try {
+    const response = await fetch('/analysis/progress/' + runId);
+    const data = await response.json();
+    
+    document.getElementById('progressBar').style.width = data.progress + '%';
+    document.getElementById('progressBar').textContent = data.progress + '%';
+    document.getElementById('progressMessage').textContent = data.message;
+    if (data.current && data.total) {
+      document.getElementById('progressDetail').textContent = data.current + ' / ' + data.total + ' workspaces';
+    }
+
+    if (data.status === 'completed' || data.status === 'failed') {
+      clearInterval(progressInterval);
+      document.getElementById('analysisSpinner').style.display = 'none';
+      
+      if (data.status === 'completed') {
+        document.getElementById('progressFooter').style.display = '';
+        document.getElementById('viewResultsBtn').href = '/analysis/results/' + runId;
+        document.getElementById('progressBar').classList.remove('progress-bar-animated');
+      }
+    }
+  } catch { /* ignore polling errors */ }
+}
+
+async function deleteRun(runId) {
+  if (!confirm('Delete this analysis run?')) return;
+  try {
+    await fetch('/analysis/delete/' + runId, { method: 'POST' });
+    location.reload();
+  } catch { /* ignore */ }
+}
+</script>
+` }) %>

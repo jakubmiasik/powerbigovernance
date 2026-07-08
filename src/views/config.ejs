@@ -2,110 +2,127 @@
 <div class="row">
   <div class="col-lg-8 mx-auto">
     <h2><i class="bi bi-gear me-2"></i>Settings</h2>
-    <p class="text-muted">Configure your Power BI and Entra ID connection details.</p>
+    <p class="text-muted">Manage service principals for Power BI API access.</p>
 
-    <div id="flash-messages"></div>
+    <div id="flash-messages">
+      ${(success && success.length) ? success.map(m => '<div class="alert alert-success alert-dismissible fade show"><i class="bi bi-check-circle me-2"></i>' + m + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>').join('') : ''}
+      ${(error && error.length) ? error.map(m => '<div class="alert alert-danger alert-dismissible fade show"><i class="bi bi-x-circle me-2"></i>' + m + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>').join('') : ''}
+    </div>
+
+    <!-- Add New SP Button -->
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h5 class="mb-0"><i class="bi bi-key me-2"></i>Service Principals (${servicePrincipals.length})</h5>
+      <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#spModal" onclick="openSpForm()">
+        <i class="bi bi-plus-lg me-1"></i>Add Service Principal
+      </button>
+    </div>
+
+    <!-- SP List -->
+    ${servicePrincipals.length === 0 ? '<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i>No service principals configured. Add one to start using Power BI API.</div>' : ''}
+
+    ${servicePrincipals.map(sp => `
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <h6 class="mb-1"><i class="bi bi-key me-2"></i>${sp.name}</h6>
+            <div class="text-muted small">
+              <span class="me-3"><strong>Tenant:</strong> ${sp.tenant_id}</span>
+              <span><strong>Client ID:</strong> ${sp.client_id}</span>
+            </div>
+          </div>
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-secondary" onclick="testSP(${sp.id})">
+              <i class="bi bi-plug me-1"></i>Test
+            </button>
+            <button class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#spModal"
+              onclick="editSP(${sp.id}, '${sp.name.replace(/'/g, "\\\\'")}', '${sp.tenant_id}', '${sp.client_id}')">
+              <i class="bi bi-pencil me-1"></i>Edit
+            </button>
+            <form method="POST" action="/settings/sp/delete/${sp.id}" style="display:inline;" onsubmit="return confirm('Delete this service principal?')">
+              <button type="submit" class="btn btn-outline-danger">
+                <i class="bi bi-trash me-1"></i>Delete
+              </button>
+            </form>
+          </div>
+        </div>
+        <div id="test-result-${sp.id}" class="mt-2" style="display:none;"></div>
+      </div>
+    </div>
+    `).join('')}
   </div>
 </div>
 
-<div class="row mt-3">
-  <div class="col-lg-8 mx-auto">
-
-    <!-- Power BI Service Principal -->
-    <div class="card mb-4">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span><i class="bi bi-key me-2"></i>Power BI Service Principal</span>
-        ${isPowerBIConfigured
-          ? '<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Configured</span>'
-          : '<span class="badge bg-warning text-dark"><i class="bi bi-exclamation-triangle me-1"></i>Not Configured</span>'}
-      </div>
-      <div class="card-body">
-        <p class="text-muted small">Used to authenticate with the Power BI REST API via client credentials flow.</p>
-        <form method="POST" action="/settings/powerbi">
+<!-- SP Modal -->
+<div class="modal fade" id="spModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="POST" action="/settings/sp/save">
+        <div class="modal-header">
+          <h5 class="modal-title" id="spModalTitle">Add Service Principal</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" name="id" id="spId">
           <div class="mb-3">
-            <label for="pbiTenantId" class="form-label">Tenant ID</label>
-            <input type="text" class="form-control" id="pbiTenantId" name="tenantId"
-              value="${config.powerbi.tenantId}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
+            <label for="spName" class="form-label">Name</label>
+            <input type="text" class="form-control" id="spName" name="name" placeholder="e.g. Production Tenant" required>
           </div>
           <div class="mb-3">
-            <label for="pbiClientId" class="form-label">Client ID (Application ID)</label>
-            <input type="text" class="form-control" id="pbiClientId" name="clientId"
-              value="${config.powerbi.clientId}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
+            <label for="spTenantId" class="form-label">Tenant ID</label>
+            <input type="text" class="form-control" id="spTenantId" name="tenantId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
           </div>
           <div class="mb-3">
-            <label for="pbiClientSecret" class="form-label">Client Secret</label>
-            <input type="password" class="form-control" id="pbiClientSecret" name="clientSecret"
-              value="${config.powerbi.clientSecret}" placeholder="Enter client secret" required>
+            <label for="spClientId" class="form-label">Client ID (Application ID)</label>
+            <input type="text" class="form-control" id="spClientId" name="clientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
           </div>
-          <div class="d-flex gap-2">
-            <button type="submit" class="btn btn-primary">
-              <i class="bi bi-save me-1"></i>Save
-            </button>
-            <button type="button" class="btn btn-outline-secondary" onclick="testConnection()">
-              <i class="bi bi-plug me-1"></i>Test Connection
-            </button>
+          <div class="mb-3">
+            <label for="spClientSecret" class="form-label">Client Secret</label>
+            <input type="password" class="form-control" id="spClientSecret" name="clientSecret" placeholder="Enter client secret" required>
           </div>
-        </form>
-        <div id="test-result" class="mt-3" style="display:none;"></div>
-      </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i>Save</button>
+        </div>
+      </form>
     </div>
-
-    <!-- Entra ID Web App -->
-    <div class="card mb-4">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span><i class="bi bi-shield-lock me-2"></i>Entra ID (Web App Authentication)</span>
-        ${isEntraConfigured
-          ? '<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Configured</span>'
-          : '<span class="badge bg-secondary"><i class="bi bi-dash-circle me-1"></i>Optional</span>'}
-      </div>
-      <div class="card-body">
-        <p class="text-muted small">Used to protect this web app with Microsoft Entra ID sign-in. Optional for development.</p>
-        <form method="POST" action="/settings/entra">
-          <div class="mb-3">
-            <label for="entraTenantId" class="form-label">Tenant ID</label>
-            <input type="text" class="form-control" id="entraTenantId" name="tenantId"
-              value="${config.entra.tenantId}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
-          </div>
-          <div class="mb-3">
-            <label for="entraClientId" class="form-label">Client ID (Application ID)</label>
-            <input type="text" class="form-control" id="entraClientId" name="clientId"
-              value="${config.entra.clientId}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
-          </div>
-          <div class="mb-3">
-            <label for="entraClientSecret" class="form-label">Client Secret</label>
-            <input type="password" class="form-control" id="entraClientSecret" name="clientSecret"
-              value="${config.entra.clientSecret}" placeholder="Enter client secret" required>
-          </div>
-          <div class="alert alert-info small mb-3">
-            <i class="bi bi-info-circle me-1"></i>
-            Set the redirect URI in your app registration to: <code>http://localhost:${config.port}/auth/callback</code>
-          </div>
-          <button type="submit" class="btn btn-primary">
-            <i class="bi bi-save me-1"></i>Save
-          </button>
-        </form>
-      </div>
-    </div>
-
   </div>
 </div>
 
 <script>
-async function testConnection() {
-  const resultDiv = document.getElementById('test-result');
-  resultDiv.style.display = 'block';
-  resultDiv.innerHTML = '<div class="alert alert-info"><i class="bi bi-hourglass-split me-2"></i>Testing connection...</div>';
+function openSpForm() {
+  document.getElementById('spModalTitle').textContent = 'Add Service Principal';
+  document.getElementById('spId').value = '';
+  document.getElementById('spName').value = '';
+  document.getElementById('spTenantId').value = '';
+  document.getElementById('spClientId').value = '';
+  document.getElementById('spClientSecret').value = '';
+}
 
+function editSP(id, name, tenantId, clientId) {
+  document.getElementById('spModalTitle').textContent = 'Edit Service Principal';
+  document.getElementById('spId').value = id;
+  document.getElementById('spName').value = name;
+  document.getElementById('spTenantId').value = tenantId;
+  document.getElementById('spClientId').value = clientId;
+  document.getElementById('spClientSecret').value = '';
+}
+
+async function testSP(id) {
+  const resultDiv = document.getElementById('test-result-' + id);
+  resultDiv.style.display = 'block';
+  resultDiv.innerHTML = '<div class="alert alert-info py-1 small"><i class="bi bi-hourglass-split me-2"></i>Testing connection...</div>';
   try {
-    const response = await fetch('/settings/test-connection', { method: 'POST' });
+    const response = await fetch('/settings/sp/test/' + id, { method: 'POST' });
     const data = await response.json();
     if (data.success) {
-      resultDiv.innerHTML = '<div class="alert alert-success"><i class="bi bi-check-circle me-2"></i>' + data.message + '</div>';
+      resultDiv.innerHTML = '<div class="alert alert-success py-1 small"><i class="bi bi-check-circle me-2"></i>' + data.message + '</div>';
     } else {
-      resultDiv.innerHTML = '<div class="alert alert-danger"><i class="bi bi-x-circle me-2"></i>' + data.message + '</div>';
+      resultDiv.innerHTML = '<div class="alert alert-danger py-1 small"><i class="bi bi-x-circle me-2"></i>' + data.message + '</div>';
     }
   } catch (err) {
-    resultDiv.innerHTML = '<div class="alert alert-danger"><i class="bi bi-x-circle me-2"></i>Connection test failed: ' + err.message + '</div>';
+    resultDiv.innerHTML = '<div class="alert alert-danger py-1 small"><i class="bi bi-x-circle me-2"></i>Test failed: ' + err.message + '</div>';
   }
 }
 </script>

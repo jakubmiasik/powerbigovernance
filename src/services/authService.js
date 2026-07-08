@@ -1,41 +1,38 @@
 const msal = require('@azure/msal-node');
-const { getConfig } = require('../config/settings');
 
-let cachedApp = null;
-let cachedConfigHash = '';
+// Cache MSAL apps by config hash to support multiple SPs
+const appCache = new Map();
 
 function getConfigHash(cfg) {
   return `${cfg.clientId}|${cfg.clientSecret}|${cfg.tenantId}`;
 }
 
-function getConfidentialClient() {
-  const config = getConfig();
-  const pbiConfig = config.powerbi;
-  const hash = getConfigHash(pbiConfig);
-
-  if (cachedApp && cachedConfigHash === hash) {
-    return cachedApp;
+function getConfidentialClient(spConfig) {
+  if (!spConfig || !spConfig.client_id || !spConfig.client_secret || !spConfig.tenant_id) {
+    throw new Error('Service principal is not configured. Go to Settings to add one.');
   }
 
-  if (!pbiConfig.clientId || !pbiConfig.clientSecret || !pbiConfig.tenantId) {
-    throw new Error('Power BI service principal is not configured. Go to Settings to configure it.');
+  const hash = getConfigHash({ clientId: spConfig.client_id, clientSecret: spConfig.client_secret, tenantId: spConfig.tenant_id });
+
+  if (appCache.has(hash)) {
+    return appCache.get(hash);
   }
 
   const msalConfig = {
     auth: {
-      clientId: pbiConfig.clientId,
-      clientSecret: pbiConfig.clientSecret,
-      authority: `https://login.microsoftonline.com/${pbiConfig.tenantId}`,
+      clientId: spConfig.client_id,
+      clientSecret: spConfig.client_secret,
+      authority: `https://login.microsoftonline.com/${spConfig.tenant_id}`,
     },
   };
 
-  cachedApp = new msal.ConfidentialClientApplication(msalConfig);
-  cachedConfigHash = hash;
-  return cachedApp;
+  const app = new msal.ConfidentialClientApplication(msalConfig);
+  appCache.set(hash, app);
+  return app;
 }
 
-async function getAccessToken() {
-  const app = getConfidentialClient();
+async function getAccessTokenForSP(spConfig) {
+  const app = getConfidentialClient(spConfig);
 
   const result = await app.acquireTokenByClientCredential({
     scopes: ['https://analysis.windows.net/powerbi/api/.default'],
@@ -48,10 +45,8 @@ async function getAccessToken() {
   return result.accessToken;
 }
 
-// Invalidate cache when config changes
 function resetAuthCache() {
-  cachedApp = null;
-  cachedConfigHash = '';
+  appCache.clear();
 }
 
-module.exports = { getAccessToken, resetAuthCache };
+module.exports = { getAccessTokenForSP, resetAuthCache };

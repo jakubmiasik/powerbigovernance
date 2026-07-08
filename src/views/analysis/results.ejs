@@ -1,0 +1,175 @@
+<%- include('../layout', { body: `
+<div class="row">
+  <div class="col-lg-12">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <div>
+        <h2><i class="bi bi-bar-chart me-2"></i>Analysis Results</h2>
+        <p class="text-muted mb-0">
+          <strong>${run.sp_name}</strong> &mdash; 
+          ${new Date(run.started_at).toLocaleString()}
+          ${run.completed_at ? ' &mdash; completed ' + new Date(run.completed_at).toLocaleString() : ''}
+        </p>
+      </div>
+      <a href="/analysis" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+    </div>
+
+    ${results ? `
+    <!-- Summary Cards -->
+    <div class="row g-3 mb-4">
+      <div class="col-sm-2">
+        <div class="card text-center bg-primary text-white">
+          <div class="card-body py-2">
+            <div class="display-6 fw-bold">${results.summary.totalWorkspaces}</div>
+            <div class="small">Workspaces</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-sm-2">
+        <div class="card text-center bg-success text-white">
+          <div class="card-body py-2">
+            <div class="display-6 fw-bold">${results.summary.totalReports}</div>
+            <div class="small">Reports</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-sm-2">
+        <div class="card text-center bg-info text-white">
+          <div class="card-body py-2">
+            <div class="display-6 fw-bold">${results.summary.totalDatasets}</div>
+            <div class="small">Datasets</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-sm-2">
+        <div class="card text-center bg-warning">
+          <div class="card-body py-2">
+            <div class="display-6 fw-bold">${results.summary.totalDashboards}</div>
+            <div class="small">Dashboards</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-sm-2">
+        <div class="card text-center bg-secondary text-white">
+          <div class="card-body py-2">
+            <div class="display-6 fw-bold">${results.summary.totalDataflows}</div>
+            <div class="small">Dataflows</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-sm-2">
+        <div class="card text-center bg-dark text-white">
+          <div class="card-body py-2">
+            <div class="display-6 fw-bold">${results.summary.totalUsers}</div>
+            <div class="small">Unique Users</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Capacity & Distribution -->
+    <div class="row g-4 mb-4">
+      <div class="col-md-4">
+        <div class="card h-100">
+          <div class="card-header"><i class="bi bi-pie-chart me-2"></i>Workspace States</div>
+          <div class="card-body">
+            <table class="table table-sm mb-0">
+              <thead><tr><th>State</th><th>Count</th><th>%</th></tr></thead>
+              <tbody>
+                ${Object.entries(results.summary.workspacesByState || {}).map(([state, count]) =>
+                  '<tr><td><span class="badge bg-' + (state === 'Active' ? 'success' : state === 'Deleted' ? 'danger' : 'warning') + '">' + state + '</span></td>' +
+                  '<td>' + count + '</td>' +
+                  '<td>' + Math.round(count / results.summary.totalWorkspaces * 100) + '%</td></tr>'
+                ).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="card h-100">
+          <div class="card-header"><i class="bi bi-diagram-2 me-2"></i>Workspace Types</div>
+          <div class="card-body">
+            <table class="table table-sm mb-0">
+              <thead><tr><th>Type</th><th>Count</th><th>%</th></tr></thead>
+              <tbody>
+                ${Object.entries(results.summary.workspacesByType || {}).map(([type, count]) =>
+                  '<tr><td><span class="badge bg-secondary">' + type + '</span></td>' +
+                  '<td>' + count + '</td>' +
+                  '<td>' + Math.round(count / results.summary.totalWorkspaces * 100) + '%</td></tr>'
+                ).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="card h-100">
+          <div class="card-header"><i class="bi bi-lightning me-2"></i>Capacity</div>
+          <div class="card-body">
+            <table class="table table-sm mb-0">
+              <tbody>
+                <tr><td>On dedicated capacity</td><td><strong>${results.summary.workspacesOnCapacity}</strong></td></tr>
+                <tr><td>On shared capacity</td><td><strong>${results.summary.workspacesOnSharedCapacity}</strong></td></tr>
+                <tr><td>Fabric detected</td><td>${results.summary.hasFabric ? '<span class="badge bg-success">Yes</span>' : '<span class="badge bg-secondary">No</span>'}</td></tr>
+              </tbody>
+            </table>
+            ${(results.summary.capacities || []).length > 0 ? '<hr><h6 class="small">Capacities</h6><table class="table table-sm mb-0"><thead><tr><th>Name</th><th>SKU</th><th>Region</th></tr></thead><tbody>' +
+              results.summary.capacities.map(c => '<tr><td>' + (c.displayName || '-') + '</td><td><code>' + (c.sku || '-') + '</code></td><td>' + (c.region || '-') + '</td></tr>').join('') +
+              '</tbody></table>' : ''}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Workspace Details Table -->
+    <div class="card mb-4">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-table me-2"></i>All Workspaces (${results.workspaces.length})</span>
+        <input type="text" class="form-control form-control-sm" style="width: 250px;" placeholder="Filter workspaces..." id="wsFilter" oninput="filterWorkspaces()">
+      </div>
+      <div class="table-responsive">
+        <table class="table table-hover table-sm mb-0" id="wsTable">
+          <thead>
+            <tr>
+              <th>Workspace</th>
+              <th>State</th>
+              <th>Type</th>
+              <th>Reports</th>
+              <th>Datasets</th>
+              <th>Dashboards</th>
+              <th>Dataflows</th>
+              <th>Users</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${results.workspaces.map(ws =>
+              '<tr class="ws-row" data-name="' + (ws.name || '').toLowerCase() + '">' +
+              '<td><strong>' + (ws.name || 'Unnamed') + '</strong>' + (ws.error ? ' <span class="badge bg-danger">Error</span>' : '') + '</td>' +
+              '<td><span class="badge bg-' + (ws.state === 'Active' ? 'success' : 'warning') + '">' + (ws.state || '-') + '</span></td>' +
+              '<td><span class="badge bg-secondary">' + (ws.type || '-') + '</span></td>' +
+              '<td>' + (ws.reportCount || 0) + '</td>' +
+              '<td>' + (ws.datasetCount || 0) + '</td>' +
+              '<td>' + (ws.dashboardCount || 0) + '</td>' +
+              '<td>' + (ws.dataflowCount || 0) + '</td>' +
+              '<td>' + (ws.userCount || 0) + '</td>' +
+              '<td><a href="/workspaces/' + ws.id + '" class="btn btn-sm btn-outline-primary">Details</a></td>' +
+              '</tr>'
+            ).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    ` : '<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i>No results data available for this run.</div>'}
+  </div>
+</div>
+
+<script>
+function filterWorkspaces() {
+  const filter = document.getElementById('wsFilter').value.toLowerCase();
+  document.querySelectorAll('.ws-row').forEach(row => {
+    row.style.display = row.dataset.name.includes(filter) ? '' : 'none';
+  });
+}
+</script>
+` }) %>

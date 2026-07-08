@@ -75,11 +75,13 @@ const indexRoutes = require('./routes/index');
 const configRoutes = require('./routes/config');
 const workspaceRoutes = require('./routes/workspaces');
 const governanceRoutes = require('./routes/governance');
+const analysisRoutes = require('./routes/analysis');
 
 app.use('/', indexRoutes);
 app.use('/settings', configRoutes);
 app.use('/workspaces', workspaceRoutes);
 app.use('/governance', governanceRoutes);
+app.use('/analysis', analysisRoutes);
 
 // Error handler
 app.use((err, req, res, _next) => {

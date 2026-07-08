@@ -8,6 +8,7 @@
     "dev": "node --watch src/server.js"
   },
   "dependencies": {
+    "@azure/identity": "^4.13.1",
     "@azure/msal-node": "^2.16.0",
     "axios": "^1.7.0",
     "connect-flash": "^0.1.1",
@@ -15,7 +16,8 @@
     "dotenv": "^16.4.0",
     "ejs": "^3.1.10",
     "express": "^4.21.0",
-    "express-session": "^1.18.0"
+    "express-session": "^1.18.0",
+    "tedious": "^20.0.0"
   },
   "engines": {
     "node": ">=18.0.0"

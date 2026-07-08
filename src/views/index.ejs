@@ -1,76 +1,61 @@
 <%- include('layout', { body: `
 <div class="row">
-  <div class="col-lg-8 mx-auto">
+  <div class="col-lg-10 mx-auto">
     <div class="text-center mb-5">
       <h1 class="display-5 fw-bold">
         <i class="bi bi-bar-chart-line-fill text-primary me-2"></i>Power BI Governance
       </h1>
-      <p class="lead text-muted">Investigate and govern your Power BI tenant — workspaces, reports, datasets, and more.</p>
+      <p class="lead text-muted">Investigate and govern your Power BI tenant &mdash; workspaces, reports, datasets, and more.</p>
     </div>
 
-    ${isPowerBIConfigured ? `
     <div class="row g-4">
-      <div class="col-md-4">
+      <div class="col-md-3">
         <div class="card h-100 border-primary">
           <div class="card-body text-center">
-            <i class="bi bi-collection display-4 text-primary"></i>
+            <i class="bi bi-play-circle display-4 text-primary"></i>
+            <h5 class="card-title mt-3">Run Analysis</h5>
+            <p class="card-text text-muted">Scan your entire tenant, save results to database.</p>
+            <a href="/analysis" class="btn btn-primary">
+              <i class="bi bi-arrow-right me-1"></i>Run
+            </a>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card h-100 border-info">
+          <div class="card-body text-center">
+            <i class="bi bi-collection display-4 text-info"></i>
             <h5 class="card-title mt-3">Workspaces</h5>
-            <p class="card-text text-muted">Browse all workspaces, reports, datasets, dashboards, and dataflows.</p>
-            <a href="/workspaces" class="btn btn-primary">
+            <p class="card-text text-muted">Browse all workspaces, reports, datasets, dashboards.</p>
+            <a href="/workspaces" class="btn btn-info">
               <i class="bi bi-arrow-right me-1"></i>Explore
             </a>
           </div>
         </div>
       </div>
-      <div class="col-md-4">
+      <div class="col-md-3">
         <div class="card h-100 border-success">
           <div class="card-body text-center">
             <i class="bi bi-shield-check display-4 text-success"></i>
             <h5 class="card-title mt-3">Governance</h5>
-            <p class="card-text text-muted">Overview of tenant health, access, capacity, and refresh status.</p>
+            <p class="card-text text-muted">Overview of tenant health, access, capacity metrics.</p>
             <a href="/governance" class="btn btn-success">
               <i class="bi bi-arrow-right me-1"></i>Review
             </a>
           </div>
         </div>
       </div>
-      <div class="col-md-4">
+      <div class="col-md-3">
         <div class="card h-100 border-secondary">
           <div class="card-body text-center">
             <i class="bi bi-gear display-4 text-secondary"></i>
             <h5 class="card-title mt-3">Settings</h5>
-            <p class="card-text text-muted">Configure service principal, tenant, and Entra ID authentication.</p>
+            <p class="card-text text-muted">Configure service principals for Power BI API access.</p>
             <a href="/settings" class="btn btn-secondary">
               <i class="bi bi-arrow-right me-1"></i>Configure
             </a>
           </div>
         </div>
-      </div>
-    </div>
-    ` : `
-    <div class="alert alert-warning d-flex align-items-center" role="alert">
-      <i class="bi bi-exclamation-triangle-fill me-3 fs-4"></i>
-      <div>
-        <h5 class="alert-heading mb-1">Configuration Required</h5>
-        <p class="mb-2">You need to configure a Power BI service principal before you can start exploring.</p>
-        <a href="/settings" class="btn btn-warning btn-sm">
-          <i class="bi bi-gear me-1"></i>Go to Settings
-        </a>
-      </div>
-    </div>
-    `}
-
-    <div class="card mt-5">
-      <div class="card-header"><i class="bi bi-info-circle me-2"></i>Getting Started</div>
-      <div class="card-body">
-        <ol class="mb-0">
-          <li class="mb-2"><strong>Register an Entra ID app</strong> for this web app (optional, for user authentication).</li>
-          <li class="mb-2"><strong>Register a separate Entra ID app</strong> as a service principal for Power BI API access.</li>
-          <li class="mb-2"><strong>Grant API permissions</strong>: <code>Tenant.Read.All</code> or <code>Tenant.ReadWrite.All</code> under Power BI Service.</li>
-          <li class="mb-2"><strong>Add the service principal</strong> to a security group and enable it in the Power BI Admin Portal under <em>Tenant Settings &gt; Developer settings</em>.</li>
-          <li class="mb-2"><strong>Configure the connection</strong> in <a href="/settings">Settings</a>.</li>
-          <li><strong>Explore</strong> your workspaces and governance metrics!</li>
-        </ol>
       </div>
     </div>
   </div>
