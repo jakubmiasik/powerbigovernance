@@ -5,7 +5,7 @@ router.get('/', (req, res) => {
   if (!req.user) {
     return res.render('landing', { title: 'Power BI Governance' });
   }
-  res.redirect('/governance');
+  res.render('home', { title: 'Home', user: req.user });
 });
 
 module.exports = router;

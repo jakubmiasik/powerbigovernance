@@ -11,6 +11,14 @@
     });
   }
 
+  function filterCapacities(input) {
+    var filter = (input.value || '').toLowerCase();
+    document.querySelectorAll('.cap-filter-table tbody tr').forEach(function(row) {
+      var text = (row.getAttribute('data-filter') || row.textContent || '').toLowerCase();
+      row.style.display = text.includes(filter) ? '' : 'none';
+    });
+  }
+
   // Sortable table headers — add class "sortable" to any <table> to enable
   document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('table').forEach(function(table) {

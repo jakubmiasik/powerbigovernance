@@ -107,32 +107,59 @@
       <div class="card h-100">
         <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
           <span><i class="bi bi-lightning me-2"></i>Capacities</span>
-          <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter..." oninput="filterTable(this, 'governance-capacity-table')">
+          <input type="text" class="form-control form-control-sm" style="max-width: 180px;" placeholder="Filter..." oninput="filterCapacities(this)">
         </div>
-        <div class="table-responsive">
-          <table class="table table-sm mb-0" id="governance-capacity-table">
-           <thead><tr><th>Name</th><th>SKU</th><th>License</th><th>State</th><th>Region</th><th>Admins</th></tr></thead>
-            <tbody>
-              <% if (governanceSummary.capacities && governanceSummary.capacities.length) { %>
-               <% governanceSummary.capacities.forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared'; var licColor = licType === 'Fabric' ? 'success' : licType === 'Premium' ? 'warning' : licType === 'PPU' ? 'info' : 'secondary'; var adminNames = (cap.admins || []).map(function(a){ return a.displayName || a.emailAddress || a.principalName || '-'; }).join(', '); %>
-                 <tr data-filter="<%= [cap.displayName || '', cap.sku || '', licType, cap.state || '', cap.region || '', adminNames].join(' ').toLowerCase() %>">
-                    <td><strong><%= cap.displayName || 'Unnamed' %></strong></td>
-                    <td><code><%= cap.sku || '-' %></code></td>
-                    <td><span class="badge bg-<%= licColor %>"><%= licType %></span></td>
-                    <td><span class="badge bg-<%= cap.state === 'Active' ? 'success' : 'warning' %>"><%= cap.state || '-' %></span></td>
-                    <td class="small"><%= cap.region || '-' %></td>
-                   <td class="small"><%= adminNames || '-' %></td>
-                 </tr>
-               <% }) %>
-             <% } else { %>
-               <tr data-filter="no capacities"><td colspan="6" class="text-muted small">No dedicated capacities found.</td></tr>
-             <% } %>
-             <tr data-filter="summary dedicated shared">
-               <td colspan="3" class="small fw-bold">Summary</td>
-               <td colspan="3" class="small">Dedicated: <strong><%= governanceSummary.workspacesOnCapacity || 0 %></strong> workspaces | Shared: <strong><%= governanceSummary.workspacesOnSharedCapacity || 0 %></strong> workspaces</td>
-             </tr>
-            </tbody>
-          </table>
+        <%
+          var allCaps = governanceSummary.capacities || [];
+          var capStates = {};
+          allCaps.forEach(function(c) { var s = c.state || 'Unknown'; if (!capStates[s]) capStates[s] = []; capStates[s].push(c); });
+          var capStateKeys = Object.keys(capStates).sort(function(a,b){ return a === 'Active' ? -1 : b === 'Active' ? 1 : a.localeCompare(b); });
+        %>
+        <% if (allCaps.length) { %>
+          <ul class="nav nav-tabs px-3 pt-2" role="tablist" style="border-bottom: none;">
+            <li class="nav-item" role="presentation">
+              <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#cap-tab-all" type="button" style="font-size:0.8rem;">All (<%= allCaps.length %>)</button>
+            </li>
+            <% capStateKeys.forEach(function(state, si) { var stateColor = state === 'Active' ? 'success' : 'warning'; %>
+              <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#cap-tab-<%= si %>" type="button" style="font-size:0.8rem;">
+                  <span class="badge bg-<%= stateColor %> me-1"><%= capStates[state].length %></span><%= state %>
+                </button>
+              </li>
+            <% }) %>
+          </ul>
+          <div class="tab-content">
+            <%
+              var capTabSets = [{ id: 'all', caps: allCaps }];
+              capStateKeys.forEach(function(state, si) { capTabSets.push({ id: String(si), caps: capStates[state] }); });
+            %>
+            <% capTabSets.forEach(function(tabSet, ti) { %>
+              <div class="tab-pane fade <%= ti === 0 ? 'show active' : '' %>" id="cap-tab-<%= tabSet.id %>" role="tabpanel">
+                <div class="table-responsive">
+                  <table class="table table-sm mb-0 cap-filter-table">
+                    <thead><tr><th>Name</th><th>SKU</th><th>License</th><th>State</th><th>Region</th><th>Admins</th></tr></thead>
+                    <tbody>
+                      <% tabSet.caps.forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared'; var licColor = licType === 'Fabric' ? 'success' : licType === 'Premium' ? 'warning' : licType === 'PPU' ? 'info' : 'secondary'; var adminNames = (cap.admins || []).map(function(a){ return a.displayName || a.emailAddress || a.principalName || '-'; }).join(', '); %>
+                        <tr data-filter="<%= [cap.displayName || '', cap.sku || '', licType, cap.state || '', cap.region || '', adminNames].join(' ').toLowerCase() %>">
+                          <td><strong><%= cap.displayName || 'Unnamed' %></strong></td>
+                          <td><code><%= cap.sku || '-' %></code></td>
+                          <td><span class="badge bg-<%= licColor %>"><%= licType %></span></td>
+                          <td><span class="badge bg-<%= cap.state === 'Active' ? 'success' : 'warning' %>"><%= cap.state || '-' %></span></td>
+                          <td class="small"><%= cap.region || '-' %></td>
+                          <td class="small"><%= adminNames || '-' %></td>
+                        </tr>
+                      <% }) %>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            <% }) %>
+          </div>
+        <% } else { %>
+          <div class="card-body text-muted small">No dedicated capacities found.</div>
+        <% } %>
+        <div class="card-footer small" style="background: var(--color-surface-offset);">
+          Dedicated: <strong><%= governanceSummary.workspacesOnCapacity || 0 %></strong> workspaces | Shared: <strong><%= governanceSummary.workspacesOnSharedCapacity || 0 %></strong> workspaces
         </div>
       </div>
     </div>
