@@ -2,49 +2,54 @@ const axios = require('axios');
 const { getAccessTokenForSP } = require('./authService');
 
 const PBI_BASE = 'https://api.powerbi.com/v1.0/myorg';
-const PBI_ADMIN = `${PBI_BASE}/admin`;
+const PBI_ADMIN = PBI_BASE + '/admin';
 const FABRIC_ADMIN = 'https://api.fabric.microsoft.com/v1/admin';
 
-function createClient(token, baseURL, timeout = 30000) {
-  return axios.create({
-    baseURL,
-    headers: { Authorization: 'Bearer ' + token },
-    timeout,
-  });
-}
-
-async function safeRequest(client, url, params = {}) {
+async function safeGet(token, url, params = {}) {
   try {
-    const response = await client.get(url, { params });
+    const response = await axios.get(url, {
+      headers: { Authorization: 'Bearer ' + token },
+      params,
+      timeout: 60000,
+    });
     return response.data;
   } catch (err) {
     const status = err.response?.status;
     const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-    throw new Error(`API error (${status || 'unknown'}): ${message}`);
+    throw new Error('API error (' + (status || 'unknown') + '): ' + message);
   }
 }
 
-// Paginate Fabric Admin endpoints that use continuationToken/continuationUri
-async function fetchAllFabricItems(client, url, params = {}) {
+async function safePost(token, url, body, params = {}) {
+  try {
+    const response = await axios.post(url, body, {
+      headers: { Authorization: 'Bearer ' + token },
+      params,
+      timeout: 60000,
+    });
+    return response.data;
+  } catch (err) {
+    const status = err.response?.status;
+    const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+    throw new Error('API error (' + (status || 'unknown') + '): ' + message);
+  }
+}
+
+// Paginate Fabric Admin endpoints using continuationUri
+async function fetchAllPaged(token, url, params = {}) {
   const allItems = [];
   let nextUrl = url;
   let nextParams = params;
 
   while (nextUrl) {
-    const data = await safeRequest(client, nextUrl, nextParams);
+    const data = await safeGet(token, nextUrl, nextParams);
     const items = data.itemEntities || data.value || [];
     allItems.push(...items);
 
     if (data.continuationUri) {
-      // continuationUri is a full URL, extract path
-      try {
-        const parsed = new URL(data.continuationUri);
-        nextUrl = parsed.pathname + parsed.search;
-        nextParams = {};
-      } catch {
-        nextUrl = data.continuationUri;
-        nextParams = {};
-      }
+      // continuationUri is an absolute URL
+      nextUrl = data.continuationUri;
+      nextParams = {};
     } else if (data.continuationToken) {
       nextParams = { ...params, continuationToken: data.continuationToken };
     } else {
@@ -65,148 +70,125 @@ function createPowerBIService(spConfig) {
     return tokenPromise;
   }
 
-  async function pbiClient() {
-    return createClient(await getToken(), PBI_BASE);
-  }
-
-  async function pbiAdminClient() {
-    return createClient(await getToken(), PBI_ADMIN, 60000);
-  }
-
-  async function fabricAdminClient() {
-    return createClient(await getToken(), FABRIC_ADMIN, 60000);
-  }
-
-  // ── Workspaces (Fabric Admin API) ──
+  // ── Workspaces: Fabric Admin API ──
+  // GET https://api.fabric.microsoft.com/v1/admin/workspaces
   async function getWorkspaces() {
-    const client = await fabricAdminClient();
-    const data = await safeRequest(client, '/workspaces');
+    const token = await getToken();
+    const data = await safeGet(token, FABRIC_ADMIN + '/workspaces');
     return data.workspaces || data.value || [];
   }
 
-  // ── Items via Fabric Admin API ──
-  async function getItemsByWorkspace(workspaceId) {
-    const client = await fabricAdminClient();
-    return fetchAllFabricItems(client, '/items', { workspaceId });
-  }
-
-  async function getItemsByType(type) {
-    const client = await fabricAdminClient();
-    return fetchAllFabricItems(client, '/items', { type });
-  }
-
-  async function getAllItems() {
-    const client = await fabricAdminClient();
-    return fetchAllFabricItems(client, '/items');
-  }
-
-  // ── Workspace users (Fabric Admin API) ──
-  async function getWorkspaceUsers(workspaceId) {
-    try {
-      const client = await pbiAdminClient();
-      const data = await safeRequest(client, `/groups/${workspaceId}/users`);
-      return data.value || [];
-    } catch {
-      return [];
-    }
-  }
-
-  // ── Workspace detail (Fabric Admin) ──
+  // ── Single workspace detail ──
+  // GET https://api.fabric.microsoft.com/v1/admin/workspaces/{id}
   async function getWorkspaceById(workspaceId) {
+    const token = await getToken();
     try {
-      const client = await fabricAdminClient();
-      return await safeRequest(client, `/workspaces/${workspaceId}`);
+      return await safeGet(token, FABRIC_ADMIN + '/workspaces/' + workspaceId);
     } catch {
-      // Fallback to PBI API
-      try {
-        return await safeRequest(await pbiClient(), `/groups/${workspaceId}`);
-      } catch {
-        return { id: workspaceId, name: 'Workspace' };
-      }
+      return { id: workspaceId, name: 'Workspace' };
     }
   }
 
-  // ── Dataset details (still via PBI API) ──
-  async function getDatasetRefreshHistory(workspaceId, datasetId, top = 20) {
+  // ── Items by workspace: Fabric Admin API (paginated) ──
+  // GET https://api.fabric.microsoft.com/v1/admin/items?workspaceId={id}
+  async function getItemsByWorkspace(workspaceId) {
+    const token = await getToken();
+    return fetchAllPaged(token, FABRIC_ADMIN + '/items', { workspaceId });
+  }
+
+  // ── Items by type: Fabric Admin API (paginated) ──
+  // GET https://api.fabric.microsoft.com/v1/admin/items?type={type}
+  async function getItemsByType(type) {
+    const token = await getToken();
+    return fetchAllPaged(token, FABRIC_ADMIN + '/items', { type });
+  }
+
+  // ── All items: Fabric Admin API (paginated) ──
+  // GET https://api.fabric.microsoft.com/v1/admin/items
+  async function getAllItems() {
+    const token = await getToken();
+    return fetchAllPaged(token, FABRIC_ADMIN + '/items');
+  }
+
+  // ── Workspace users: PBI Admin API ──
+  // GET https://api.powerbi.com/v1.0/myorg/admin/groups/{id}/users
+  async function getWorkspaceUsers(workspaceId) {
+    const token = await getToken();
     try {
-      const data = await safeRequest(
-        await pbiClient(),
-        `/groups/${workspaceId}/datasets/${datasetId}/refreshes`,
-        { $top: top }
-      );
+      const data = await safeGet(token, PBI_ADMIN + '/groups/' + workspaceId + '/users');
       return data.value || [];
     } catch {
       return [];
     }
   }
 
+  // ── Dataset refresh history: PBI API ──
+  async function getDatasetRefreshHistory(workspaceId, datasetId, top) {
+    const token = await getToken();
+    try {
+      const data = await safeGet(token,
+        PBI_BASE + '/groups/' + workspaceId + '/datasets/' + datasetId + '/refreshes',
+        { $top: top || 20 });
+      return data.value || [];
+    } catch { return []; }
+  }
+
+  // ── Dataset datasources: PBI API ──
   async function getDatasetDatasources(workspaceId, datasetId) {
+    const token = await getToken();
     try {
-      const data = await safeRequest(
-        await pbiClient(),
-        `/groups/${workspaceId}/datasets/${datasetId}/datasources`
-      );
+      const data = await safeGet(token,
+        PBI_BASE + '/groups/' + workspaceId + '/datasets/' + datasetId + '/datasources');
       return data.value || [];
-    } catch {
-      return [];
-    }
+    } catch { return []; }
   }
 
+  // ── Dataset parameters: PBI API ──
   async function getDatasetParameters(workspaceId, datasetId) {
+    const token = await getToken();
     try {
-      const data = await safeRequest(
-        await pbiClient(),
-        `/groups/${workspaceId}/datasets/${datasetId}/parameters`
-      );
+      const data = await safeGet(token,
+        PBI_BASE + '/groups/' + workspaceId + '/datasets/' + datasetId + '/parameters');
       return data.value || [];
-    } catch {
-      return [];
-    }
+    } catch { return []; }
   }
 
-  // ── Dashboard tiles (still PBI API) ──
+  // ── Dashboard tiles: PBI API ──
   async function getDashboardTiles(workspaceId, dashboardId) {
+    const token = await getToken();
     try {
-      const data = await safeRequest(
-        await pbiClient(),
-        `/groups/${workspaceId}/dashboards/${dashboardId}/tiles`
-      );
+      const data = await safeGet(token,
+        PBI_BASE + '/groups/' + workspaceId + '/dashboards/' + dashboardId + '/tiles');
       return data.value || [];
-    } catch {
-      return [];
-    }
+    } catch { return []; }
   }
 
-  // ── Capacities ──
+  // ── Capacities: PBI API ──
+  // GET https://api.powerbi.com/v1.0/myorg/capacities
   async function getCapacities() {
+    const token = await getToken();
     try {
-      const data = await safeRequest(await pbiClient(), '/capacities');
+      const data = await safeGet(token, PBI_BASE + '/capacities');
       return data.value || [];
-    } catch {
-      return [];
-    }
+    } catch { return []; }
   }
 
-  // ── Admin scanner (PBI Admin API) ──
+  // ── Admin scanner: PBI Admin API ──
   async function scanWorkspaces(workspaceIds) {
-    const client = await pbiAdminClient();
-    const body = { workspaces: workspaceIds };
-    const params = {
-      datasetExpressions: true,
-      datasetSchema: true,
-      datasourceDetails: true,
-      getArtifactUsers: true,
-    };
-    const response = await client.post('/workspaces/getInfo', body, { params });
-    return response.data;
+    const token = await getToken();
+    return safePost(token, PBI_ADMIN + '/workspaces/getInfo',
+      { workspaces: workspaceIds },
+      { datasetExpressions: true, datasetSchema: true, datasourceDetails: true, getArtifactUsers: true });
   }
 
   async function getScanStatus(scanId) {
-    return safeRequest(await pbiAdminClient(), `/workspaces/scanStatus/${scanId}`);
+    const token = await getToken();
+    return safeGet(token, PBI_ADMIN + '/workspaces/scanStatus/' + scanId);
   }
 
   async function getScanResult(scanId) {
-    return safeRequest(await pbiAdminClient(), `/workspaces/scanResult/${scanId}`);
+    const token = await getToken();
+    return safeGet(token, PBI_ADMIN + '/workspaces/scanResult/' + scanId);
   }
 
   return {
