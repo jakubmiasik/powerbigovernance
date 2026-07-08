@@ -222,25 +222,19 @@ function createPowerBIService(spConfig) {
   }
 
   // ── Workspace role assignments for migration ──
-  // Add SP as Admin to workspace before migration
-  async function addWorkspaceRoleAssignment(workspaceId, principalId, principalType, role) {
-    const token = await getFabricToken();
+  // Add SP as Admin to workspace using Power BI Admin API (doesn't require existing membership)
+  async function addWorkspaceAdmin(workspaceId, principalId, principalType) {
+    const token = await getToken();
     return safePost(token,
-      'https://api.fabric.microsoft.com/v1/workspaces/' + workspaceId + '/roleAssignments',
-      { principal: { id: principalId, type: principalType }, role: role || 'Admin' });
+      PBI_ADMIN + '/groups/' + workspaceId + '/users',
+      { identifier: principalId, groupUserAccessRight: 'Admin', principalType: principalType || 'App' });
   }
 
-  // Get workspace role assignments to find assignment to remove
-  async function getWorkspaceRoleAssignments(workspaceId) {
-    const token = await getFabricToken();
-    return safeGet(token, 'https://api.fabric.microsoft.com/v1/workspaces/' + workspaceId + '/roleAssignments');
-  }
-
-  // Remove SP from workspace after migration
-  async function deleteWorkspaceRoleAssignment(workspaceId, roleAssignmentId) {
-    const token = await getFabricToken();
+  // Remove SP from workspace using Power BI Admin API
+  async function removeWorkspaceUser(workspaceId, principalId) {
+    const token = await getToken();
     return safeDelete(token,
-      'https://api.fabric.microsoft.com/v1/workspaces/' + workspaceId + '/roleAssignments/' + roleAssignmentId);
+      PBI_ADMIN + '/groups/' + workspaceId + '/users/' + principalId);
   }
 
   // ── Assign workspace to capacity: Fabric Core API ──
@@ -278,9 +272,8 @@ function createPowerBIService(spConfig) {
     getScanResult,
     assignToCapacity,
     unassignFromCapacity,
-    addWorkspaceRoleAssignment,
-    getWorkspaceRoleAssignments,
-    deleteWorkspaceRoleAssignment,
+    addWorkspaceAdmin,
+    removeWorkspaceUser,
   };
 }
 

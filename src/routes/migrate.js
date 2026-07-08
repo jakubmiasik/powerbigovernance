@@ -94,14 +94,14 @@ router.post('/execute', async (req, res) => {
       const wsName = wsMap.get(wsId) || wsId;
       let spWasAdded = false;
       try {
-        // Step 1: Add SP as workspace Admin
+        // Step 1: Add SP as workspace Admin via Power BI Admin API
         try {
-          await pbi.addWorkspaceRoleAssignment(wsId, spClientId, 'ServicePrincipal', 'Admin');
+          await pbi.addWorkspaceAdmin(wsId, spClientId, 'App');
           spWasAdded = true;
         } catch (addErr) {
-          // If SP is already an admin, continue (409 Conflict or similar)
-          if (addErr.message && (addErr.message.includes('409') || addErr.message.includes('already exists') || addErr.message.includes('conflict'))) {
-            spWasAdded = false; // Don't remove if it was already there
+          // If SP is already an admin, continue without flagging for removal
+          if (addErr.message && (addErr.message.includes('400') || addErr.message.includes('409') || addErr.message.includes('already'))) {
+            spWasAdded = false;
           } else {
             throw new Error('Failed to add SP as workspace admin: ' + addErr.message);
           }
@@ -117,16 +117,8 @@ router.post('/execute', async (req, res) => {
         // Step 3: Remove SP from workspace after successful migration
         if (spWasAdded) {
           try {
-            const roles = await pbi.getWorkspaceRoleAssignments(wsId);
-            const assignments = roles.value || roles || [];
-            const spAssignment = assignments.find(a =>
-              a.principal && a.principal.id && a.principal.id.toLowerCase() === spClientId.toLowerCase()
-            );
-            if (spAssignment) {
-              await pbi.deleteWorkspaceRoleAssignment(wsId, spAssignment.id);
-            }
+            await pbi.removeWorkspaceUser(wsId, spClientId);
           } catch (removeErr) {
-            // Non-fatal: migration succeeded but cleanup failed
             migrationResults.push({ id: wsId, name: wsName, status: 'success', message: 'Migrated successfully (note: SP cleanup failed - ' + removeErr.message + ')' });
             continue;
           }
@@ -136,16 +128,7 @@ router.post('/execute', async (req, res) => {
       } catch (err) {
         // If migration failed but SP was added, try to clean up
         if (spWasAdded) {
-          try {
-            const roles = await pbi.getWorkspaceRoleAssignments(wsId);
-            const assignments = roles.value || roles || [];
-            const spAssignment = assignments.find(a =>
-              a.principal && a.principal.id && a.principal.id.toLowerCase() === spClientId.toLowerCase()
-            );
-            if (spAssignment) {
-              await pbi.deleteWorkspaceRoleAssignment(wsId, spAssignment.id);
-            }
-          } catch (_) { /* best effort cleanup */ }
+          try { await pbi.removeWorkspaceUser(wsId, spClientId); } catch (_) { /* best effort */ }
         }
         migrationResults.push({ id: wsId, name: wsName, status: 'error', message: err.message });
       }
