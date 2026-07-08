@@ -45,8 +45,23 @@ async function getAccessTokenForSP(spConfig) {
   return result.accessToken;
 }
 
+// Fabric Core API requires its own scope for write operations (e.g. assignToCapacity)
+async function getFabricTokenForSP(spConfig) {
+  const app = getConfidentialClient(spConfig);
+
+  const result = await app.acquireTokenByClientCredential({
+    scopes: ['https://api.fabric.microsoft.com/.default'],
+  });
+
+  if (!result || !result.accessToken) {
+    throw new Error('Failed to acquire Fabric API access token');
+  }
+
+  return result.accessToken;
+}
+
 function resetAuthCache() {
   appCache.clear();
 }
 
-module.exports = { getAccessTokenForSP, resetAuthCache };
+module.exports = { getAccessTokenForSP, getFabricTokenForSP, resetAuthCache };

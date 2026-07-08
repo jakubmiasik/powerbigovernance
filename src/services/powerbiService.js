@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { getAccessTokenForSP } = require('./authService');
+const { getAccessTokenForSP, getFabricTokenForSP } = require('./authService');
 
 const PBI_BASE = 'https://api.powerbi.com/v1.0/myorg';
 const PBI_ADMIN = PBI_BASE + '/admin';
@@ -61,6 +61,7 @@ async function fetchAllPaged(token, url, params = {}) {
 
 function createPowerBIService(spConfig) {
   let tokenPromise = null;
+  let fabricTokenPromise = null;
 
   async function getToken() {
     if (!tokenPromise) {
@@ -68,6 +69,15 @@ function createPowerBIService(spConfig) {
       setTimeout(() => { tokenPromise = null; }, 50 * 60 * 1000);
     }
     return tokenPromise;
+  }
+
+  // Separate token for Fabric Core API write operations (migration)
+  async function getFabricToken() {
+    if (!fabricTokenPromise) {
+      fabricTokenPromise = getFabricTokenForSP(spConfig);
+      setTimeout(() => { fabricTokenPromise = null; }, 50 * 60 * 1000);
+    }
+    return fabricTokenPromise;
   }
 
   // ── Workspaces: Fabric Admin API ──
@@ -200,7 +210,7 @@ function createPowerBIService(spConfig) {
   // ── Assign workspace to capacity: Fabric Core API ──
   // POST https://api.fabric.microsoft.com/v1/workspaces/{workspaceId}/assignToCapacity
   async function assignToCapacity(workspaceId, capacityId) {
-    const token = await getToken();
+    const token = await getFabricToken();
     return safePost(token,
       'https://api.fabric.microsoft.com/v1/workspaces/' + workspaceId + '/assignToCapacity',
       { capacityId });
@@ -209,7 +219,7 @@ function createPowerBIService(spConfig) {
   // ── Unassign workspace from capacity (move to shared/Pro) ──
   // POST https://api.fabric.microsoft.com/v1/workspaces/{workspaceId}/unassignFromCapacity
   async function unassignFromCapacity(workspaceId) {
-    const token = await getToken();
+    const token = await getFabricToken();
     return safePost(token,
       'https://api.fabric.microsoft.com/v1/workspaces/' + workspaceId + '/unassignFromCapacity',
       {});
