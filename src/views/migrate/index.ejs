@@ -107,38 +107,51 @@
 </div>
 
 <!-- Workspace Table -->
-<div class="card mb-4">
+<div class="card mb-4" id="workspaceCard">
   <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-    <span><i class="bi bi-table me-2"></i>Workspaces (<span id="visibleCount"><%= workspaces.length %></span> of <%= workspaces.length %>)</span>
+    <div class="d-flex align-items-center gap-2">
+      <button class="btn btn-sm btn-primary" id="refreshBtn" onclick="refreshWorkspaces()">
+        <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+      </button>
+      <span><i class="bi bi-table me-2"></i>Workspaces (<span id="visibleCount"><%= workspaces.length %></span> of <%= workspaces.length %>)</span>
+    </div>
     <span class="badge bg-primary" id="selectionBadge">0 selected</span>
   </div>
-  <div class="table-responsive">
-    <table class="table table-hover table-sm mb-0" id="migrate-table">
-      <thead>
-        <tr>
-          <th style="width: 40px;"><input type="checkbox" class="form-check-input" id="selectAllCheckbox" onchange="toggleSelectAll(this)"></th>
-          <th>Workspace</th>
-          <th>License</th>
-          <th>SKU</th>
-          <th>State</th>
-          <th>Items</th>
-          <th>Capacity ID</th>
-        </tr>
-      </thead>
-      <tbody>
-        <% workspaces.sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); }).forEach(function(ws) { var license = ws.licenseType || 'Pro'; var sku = ws.capacitySku || ''; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
-          <tr class="ws-row" data-ws-id="<%= ws.id %>" data-ws-name="<%= ws.name || 'Unnamed' %>" data-license="<%= license %>" data-sku="<%= sku || 'none' %>" data-state="<%= ws.state || 'Active' %>">
-            <td><input type="checkbox" class="form-check-input ws-checkbox" value="<%= ws.id %>" onchange="updateSelectionCount()"></td>
-            <td class="small"><%= ws.name || 'Unnamed' %></td>
-            <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
-            <td><code><%= sku || '-' %></code></td>
-            <td><span class="badge bg-<%= (ws.state || 'Active') === 'Active' ? 'success' : 'warning' %>"><%= ws.state || 'Active' %></span></td>
-            <td><%= ws.totalItems || 0 %></td>
-            <td class="small text-muted"><%= ws.capacityId ? ws.capacityId.substring(0,8) + '...' : '-' %></td>
+  <div style="position: relative;">
+    <div id="workspaceOverlay" style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(255,255,255,0.7);z-index:10;display:flex;align-items:center;justify-content:center;">
+      <div class="text-center">
+        <i class="bi bi-arrow-clockwise fs-3" style="color:var(--color-primary);"></i>
+        <p class="mt-2 fw-bold small" style="color:var(--color-primary);">Click <strong>Refresh</strong> to load the latest workspace data</p>
+      </div>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-hover table-sm mb-0" id="migrate-table">
+        <thead>
+          <tr>
+            <th style="width: 40px;"><input type="checkbox" class="form-check-input" id="selectAllCheckbox" onchange="toggleSelectAll(this)" disabled></th>
+            <th>Workspace</th>
+            <th>License</th>
+            <th>SKU</th>
+            <th>State</th>
+            <th>Items</th>
+            <th>Capacity ID</th>
           </tr>
-        <% }) %>
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          <% workspaces.sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); }).forEach(function(ws) { var license = ws.licenseType || 'Pro'; var sku = ws.capacitySku || ''; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
+            <tr class="ws-row" data-ws-id="<%= ws.id %>" data-ws-name="<%= ws.name || 'Unnamed' %>" data-license="<%= license %>" data-sku="<%= sku || 'none' %>" data-state="<%= ws.state || 'Active' %>">
+              <td><input type="checkbox" class="form-check-input ws-checkbox" value="<%= ws.id %>" onchange="updateSelectionCount()" disabled></td>
+              <td class="small"><%= ws.name || 'Unnamed' %></td>
+              <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
+              <td><code><%= sku || '-' %></code></td>
+              <td><span class="badge bg-<%= (ws.state || 'Active') === 'Active' ? 'success' : 'warning' %>"><%= ws.state || 'Active' %></span></td>
+              <td><%= ws.totalItems || 0 %></td>
+              <td class="small text-muted"><%= ws.capacityId ? ws.capacityId.substring(0,8) + '...' : '-' %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -207,6 +220,56 @@
 </div>
 
 <script>
+var workspacesReady = false;
+
+function refreshWorkspaces() {
+  var btn = document.getElementById('refreshBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Refreshing...';
+
+  fetch('/migrate/refresh')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data.success) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Refresh';
+        return showAlert(data.message || 'Failed to refresh.');
+      }
+      // Rebuild table with fresh data
+      var tbody = document.querySelector('#migrate-table tbody');
+      tbody.innerHTML = '';
+      (data.workspaces || []).sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); }).forEach(function(ws) {
+        var license = ws.licenseType || 'Pro';
+        var sku = ws.capacitySku || '';
+        var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary';
+        var stateColor = (ws.state || 'Active') === 'Active' ? 'success' : 'warning';
+        var capShort = ws.capacityId ? ws.capacityId.substring(0,8) + '...' : '-';
+        tbody.innerHTML +=
+          '<tr class="ws-row" data-ws-id="' + ws.id + '" data-ws-name="' + (ws.name||'Unnamed') + '" data-license="' + license + '" data-sku="' + (sku||'none') + '" data-state="' + (ws.state||'Active') + '">' +
+          '<td><input type="checkbox" class="form-check-input ws-checkbox" value="' + ws.id + '" onchange="updateSelectionCount()"></td>' +
+          '<td class="small">' + (ws.name||'Unnamed') + '</td>' +
+          '<td><span class="badge bg-' + licColor + '">' + license + '</span></td>' +
+          '<td><code>' + (sku||'-') + '</code></td>' +
+          '<td><span class="badge bg-' + stateColor + '">' + (ws.state||'Active') + '</span></td>' +
+          '<td>' + (ws.totalItems||0) + '</td>' +
+          '<td class="small text-muted">' + capShort + '</td></tr>';
+      });
+      document.getElementById('visibleCount').textContent = (data.workspaces || []).length;
+      // Remove overlay, enable checkboxes
+      document.getElementById('workspaceOverlay').style.display = 'none';
+      document.getElementById('selectAllCheckbox').disabled = false;
+      workspacesReady = true;
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Refresh';
+      updateSelectionCount();
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Refresh';
+      showAlert('Refresh failed: ' + err.message);
+    });
+}
+
 function checkCapacityState() {
   var sel = document.getElementById('targetCapacity');
   var opt = sel.selectedOptions[0];
@@ -317,6 +380,7 @@ function showConfirm(msg, onOk) {
 }
 
 function executeMigration() {
+  if (!workspacesReady) return showAlert('Please click Refresh first to load the latest workspace data.');
   var ids = getSelectedIds();
   if (ids.length === 0) return showAlert('No workspaces selected.');
 

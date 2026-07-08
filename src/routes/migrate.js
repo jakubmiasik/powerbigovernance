@@ -34,6 +34,20 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Refresh workspace data from saved analysis (returns fresh JSON)
+router.get('/refresh', async (req, res) => {
+  try {
+    const results = await loadMigrationData(res);
+    if (!results) {
+      return res.json({ success: false, message: 'No analysis data available.' });
+    }
+    const workspaces = results.workspaces || [];
+    res.json({ success: true, workspaces });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
 // Execute migration for selected workspaces
 router.post('/execute', async (req, res) => {
   try {

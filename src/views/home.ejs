@@ -55,7 +55,7 @@
                 <li>The SP must be a <strong>Capacity Admin</strong> on the target capacity (add it in Power BI Admin Portal → Capacity settings → Capacity admins)</li>
                 <li>The SP must be a <strong>Workspace Admin</strong> on each workspace being migrated</li>
                 <li>Enable <strong>"Service principals can use Fabric APIs"</strong> in the Power BI Admin Portal → Tenant settings</li>
-                <li>The Entra ID app registration needs <strong>Microsoft Fabric API</strong> permissions (<code>Capacity.ReadWrite.All</code>, <code>Workspace.ReadWrite.All</code>)</li>
+                <li>The SP must be a <strong>Workspace Admin</strong> on each workspace being migrated (the app handles this automatically — it adds the SP as admin before migration and removes it after)</li>
                 <li>The token scope for migration uses <code>https://api.fabric.microsoft.com/.default</code> (handled automatically by the app)</li>
               </ul>
             </div>
