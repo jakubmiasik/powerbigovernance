@@ -35,6 +35,20 @@ async function safePost(token, url, body, params = {}) {
   }
 }
 
+async function safeDelete(token, url) {
+  try {
+    const response = await axios.delete(url, {
+      headers: { Authorization: 'Bearer ' + token },
+      timeout: 60000,
+    });
+    return response.data;
+  } catch (err) {
+    const status = err.response?.status;
+    const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+    throw new Error('API error (' + (status || 'unknown') + '): ' + message);
+  }
+}
+
 // Paginate Fabric Admin endpoints using continuationUri
 async function fetchAllPaged(token, url, params = {}) {
   const allItems = [];
@@ -207,6 +221,28 @@ function createPowerBIService(spConfig) {
     return safeGet(token, PBI_ADMIN + '/workspaces/scanResult/' + scanId);
   }
 
+  // ── Workspace role assignments for migration ──
+  // Add SP as Admin to workspace before migration
+  async function addWorkspaceRoleAssignment(workspaceId, principalId, principalType, role) {
+    const token = await getFabricToken();
+    return safePost(token,
+      'https://api.fabric.microsoft.com/v1/workspaces/' + workspaceId + '/roleAssignments',
+      { principal: { id: principalId, type: principalType }, role: role || 'Admin' });
+  }
+
+  // Get workspace role assignments to find assignment to remove
+  async function getWorkspaceRoleAssignments(workspaceId) {
+    const token = await getFabricToken();
+    return safeGet(token, 'https://api.fabric.microsoft.com/v1/workspaces/' + workspaceId + '/roleAssignments');
+  }
+
+  // Remove SP from workspace after migration
+  async function deleteWorkspaceRoleAssignment(workspaceId, roleAssignmentId) {
+    const token = await getFabricToken();
+    return safeDelete(token,
+      'https://api.fabric.microsoft.com/v1/workspaces/' + workspaceId + '/roleAssignments/' + roleAssignmentId);
+  }
+
   // ── Assign workspace to capacity: Fabric Core API ──
   // POST https://api.fabric.microsoft.com/v1/workspaces/{workspaceId}/assignToCapacity
   async function assignToCapacity(workspaceId, capacityId) {
@@ -242,6 +278,9 @@ function createPowerBIService(spConfig) {
     getScanResult,
     assignToCapacity,
     unassignFromCapacity,
+    addWorkspaceRoleAssignment,
+    getWorkspaceRoleAssignments,
+    deleteWorkspaceRoleAssignment,
   };
 }
 
