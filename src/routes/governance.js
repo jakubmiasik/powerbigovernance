@@ -98,24 +98,20 @@ router.get('/', async (req, res) => {
       return res.render('governance/overview', {
         title: 'Governance Overview', user: req.user,
         governance: null, workspaces: [], run: null,
-        page: 1, pageSize: 50, totalPages: 1, noData: true,
+        noData: true,
         creatorCount: 0, explorerCount: 0,
       });
     }
 
-    const page = parseInt(req.query.page, 10) || 1;
-    const pageSize = parseInt(req.query.pageSize, 10) || 50;
     const allWorkspaces = results.workspaces || [];
     const users = buildUser360(allWorkspaces);
     const creatorCount = users.filter(u => (u.items || []).length > 0).length;
     const explorerCount = users.length - creatorCount;
-    const totalPages = Math.max(1, Math.ceil(allWorkspaces.length / pageSize));
-    const pagedWorkspaces = allWorkspaces.slice((page - 1) * pageSize, page * pageSize);
 
     res.render('governance/overview', {
       title: 'Governance Overview', user: req.user,
-      governance: results.summary, workspaces: pagedWorkspaces, run,
-      page, pageSize, totalPages, noData: false,
+      governance: results.summary, workspaces: allWorkspaces, run,
+      noData: false,
       creatorCount, explorerCount,
     });
   } catch (err) {

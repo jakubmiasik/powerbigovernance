@@ -107,6 +107,7 @@ body {
 .table td {
   border-bottom-color: var(--color-divider);
   vertical-align: middle;
+  font-size: 0.85rem;
 }
 
 /* ──── Badges — teal primary ──── */

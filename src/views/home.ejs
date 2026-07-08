@@ -48,7 +48,17 @@
           <div class="d-flex align-items-center justify-content-center rounded-circle flex-shrink-0" style="width:40px;height:40px;background:var(--color-primary-soft);color:var(--color-primary);font-weight:700;">6</div>
           <div>
             <h6 class="mb-1">Migrate Workspaces</h6>
-            <p class="mb-0 small" style="color:var(--color-text-muted);">Go to <a href="/migrate"><i class="bi bi-arrow-left-right me-1"></i>Migrate</a> to move workspaces between capacity types. Filter by license type, SKU, or state, then select workspaces individually or in batch. Assign them to a Fabric, Premium, or PPU capacity, or unassign to move back to shared (Pro). The Service Principal must have <strong>Capacity Admin</strong> and <strong>Workspace Admin</strong> roles for migration.</p>
+            <p class="mb-0 small" style="color:var(--color-text-muted);">Go to <a href="/migrate"><i class="bi bi-arrow-left-right me-1"></i>Migrate</a> to move workspaces between capacity types. Filter by license type, SKU, or state, then select workspaces individually or in batch. Assign them to a Fabric, Premium, or PPU capacity, or unassign to move back to shared (Pro).</p>
+            <div class="alert alert-info mt-2 mb-0 py-2 px-3" style="font-size: 0.8rem;">
+              <strong><i class="bi bi-key me-1"></i>Service Principal requirements for migration:</strong>
+              <ul class="mb-0 mt-1 ps-3">
+                <li>The SP must be a <strong>Capacity Admin</strong> on the target capacity (add it in Power BI Admin Portal → Capacity settings → Capacity admins)</li>
+                <li>The SP must be a <strong>Workspace Admin</strong> on each workspace being migrated</li>
+                <li>Enable <strong>"Service principals can use Fabric APIs"</strong> in the Power BI Admin Portal → Tenant settings</li>
+                <li>The Entra ID app registration needs <strong>Microsoft Fabric API</strong> permissions (<code>Capacity.ReadWrite.All</code>, <code>Workspace.ReadWrite.All</code>)</li>
+                <li>The token scope for migration uses <code>https://api.fabric.microsoft.com/.default</code> (handled automatically by the app)</li>
+              </ul>
+            </div>
           </div>
         </div>
       </div>
@@ -94,6 +104,10 @@
           <li class="list-group-item d-flex align-items-start gap-2 py-2">
             <i class="bi bi-check-circle text-success mt-1"></i>
             <span class="small">Scan history with Save &amp; Load for comparison over time</span>
+          </li>
+          <li class="list-group-item d-flex align-items-start gap-2 py-2">
+            <i class="bi bi-check-circle text-success mt-1"></i>
+            <span class="small">Workspace migration between capacities (Fabric, Premium, PPU, Pro)</span>
           </li>
         </ul>
       </div>

@@ -17,9 +17,6 @@
     { label: 'Warehouses', count: governanceSummary.totalWarehouses || 0, color: 'secondary', icon: 'building', href: '/governance/artifacts?type=Warehouse' + (runId ? '&runId=' + runId : '') },
     { label: 'Unique Users', count: governanceSummary.totalUsers || 0, color: 'secondary', icon: 'people', href: '/governance/users' + (runId ? '?runId=' + runId : ''), sub: '(' + (typeof creatorCount !== 'undefined' ? creatorCount : 0) + ' Creators / ' + (typeof explorerCount !== 'undefined' ? explorerCount : 0) + ' Explorers)' }
   ];
-  var pageWindowStart = Math.max(1, page - 4);
-  var pageWindowEnd = Math.min(totalPages, pageWindowStart + 9);
-  var querySuffix = runId ? '&runId=' + runId : '';
 %>
 <div class="mb-3">
   <h2><i class="bi bi-shield-check me-2"></i>Governance Overview</h2>
@@ -141,7 +138,7 @@
                     <tbody>
                       <% tabSet.caps.forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared'; var licColor = licType === 'Fabric' ? 'success' : licType === 'Premium' ? 'warning' : licType === 'PPU' ? 'info' : 'secondary'; %>
                         <tr data-filter="<%= [cap.displayName || '', cap.sku || '', licType, cap.state || '', cap.region || ''].join(' ').toLowerCase() %>">
-                          <td><strong><%= cap.displayName || 'Unnamed' %></strong></td>
+                          <td class="small"><%= cap.displayName || 'Unnamed' %></td>
                           <td><code><%= cap.sku || '-' %></code></td>
                           <td><span class="badge bg-<%= licColor %>"><%= licType %></span></td>
                           <td><span class="badge bg-<%= cap.state === 'Active' ? 'success' : 'warning' %>"><%= cap.state || '-' %></span></td>
@@ -166,7 +163,7 @@
 
   <div class="card mb-4" id="workspace-governance-card">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-      <span><i class="bi bi-table me-2"></i>All Workspaces (page <%= page %> of <%= totalPages %>)</span>
+      <span><i class="bi bi-table me-2"></i>All Workspaces (<%= workspaces.length %>)</span>
       <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter workspaces..." oninput="filterTable(this, 'governance-workspaces-table')">
     </div>
     <div class="table-responsive">
@@ -192,7 +189,7 @@
         <tbody>
           <% workspaces.forEach(function(ws) { var license = ws.licenseType || 'Pro'; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
             <tr data-filter="<%= [ws.name || '', license, ws.state || ''].join(' ').toLowerCase() %>">
-              <td><strong><%= ws.name || 'Unnamed' %></strong></td>
+              <td class="small"><%= ws.name || 'Unnamed' %></td>
               <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
               <td><span class="badge bg-<%= ws.state === 'Active' ? 'success' : 'warning' %>"><%= ws.state || '-' %></span></td>
               <td><%= ws.totalItems || 0 %></td>
@@ -211,27 +208,6 @@
         </tbody>
       </table>
     </div>
-    <% if (totalPages > 1) { %>
-      <div class="card-footer">
-        <nav>
-          <ul class="pagination pagination-sm mb-0 justify-content-center flex-wrap">
-            <% if (page > 1) { %>
-              <li class="page-item"><a class="page-link" href="/governance?page=<%= page - 1 %>&pageSize=<%= pageSize %><%= querySuffix %>">&laquo; Previous</a></li>
-            <% } else { %>
-              <li class="page-item disabled"><span class="page-link">&laquo; Previous</span></li>
-            <% } %>
-            <% for (var p = pageWindowStart; p <= pageWindowEnd; p += 1) { %>
-              <li class="page-item <%= p === page ? 'active' : '' %>"><a class="page-link" href="/governance?page=<%= p %>&pageSize=<%= pageSize %><%= querySuffix %>"><%= p %></a></li>
-            <% } %>
-            <% if (page < totalPages) { %>
-              <li class="page-item"><a class="page-link" href="/governance?page=<%= page + 1 %>&pageSize=<%= pageSize %><%= querySuffix %>">Next &raquo;</a></li>
-            <% } else { %>
-              <li class="page-item disabled"><span class="page-link">Next &raquo;</span></li>
-            <% } %>
-          </ul>
-        </nav>
-      </div>
-    <% } %>
   </div>
 
   <div class="alert alert-info small">

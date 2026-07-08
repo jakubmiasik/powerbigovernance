@@ -81,7 +81,7 @@
         <tbody>
           <% workspaces.forEach(function(ws) { var wsName = ws.displayName || ws.name || 'Unnamed'; var license = ws.licenseType || 'Pro'; var sku = ws.capacitySku || '-'; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
             <tr data-filter="<%= [wsName, license, sku, ws.state || ''].join(' ').toLowerCase() %>">
-              <td><i class="bi bi-folder2 me-2 text-primary"></i><strong><%= wsName %></strong></td>
+              <td class="small"><i class="bi bi-folder2 me-2 text-primary"></i><%= wsName %></td>
               <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
               <td><code><%= sku %></code></td>
               <td>

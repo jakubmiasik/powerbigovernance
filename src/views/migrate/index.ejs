@@ -129,7 +129,7 @@
         <% workspaces.sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); }).forEach(function(ws) { var license = ws.licenseType || 'Pro'; var sku = ws.capacitySku || ''; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
           <tr class="ws-row" data-ws-id="<%= ws.id %>" data-ws-name="<%= ws.name || 'Unnamed' %>" data-license="<%= license %>" data-sku="<%= sku || 'none' %>" data-state="<%= ws.state || 'Active' %>">
             <td><input type="checkbox" class="form-check-input ws-checkbox" value="<%= ws.id %>" onchange="updateSelectionCount()"></td>
-            <td><strong><%= ws.name || 'Unnamed' %></strong></td>
+            <td class="small"><%= ws.name || 'Unnamed' %></td>
             <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
             <td><code><%= sku || '-' %></code></td>
             <td><span class="badge bg-<%= (ws.state || 'Active') === 'Active' ? 'success' : 'warning' %>"><%= ws.state || 'Active' %></span></td>
