@@ -2,13 +2,11 @@ require('dotenv').config();
 
 const express = require('express');
 const session = require('express-session');
-const passport = require('passport');
-const { OIDCStrategy } = require('passport-azure-ad');
 const flash = require('connect-flash');
 const cookieParser = require('cookie-parser');
 const path = require('path');
-const { getConfig, isEntraConfigured } = require('./config/settings');
-const { ensureAuthenticated } = require('./middleware/auth');
+const { getConfig } = require('./config/settings');
+const { parseEasyAuthUser } = require('./middleware/auth');
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
@@ -45,43 +43,13 @@ app.use(
 );
 
 app.use(flash());
-app.use(passport.initialize());
-app.use(passport.session());
 
-// Passport serialization
-passport.serializeUser((user, done) => done(null, user));
-passport.deserializeUser((user, done) => done(null, user));
-
-// Configure Entra ID strategy if configured
-function setupPassportStrategy() {
-  if (isEntraConfigured()) {
-    const cfg = getConfig();
-    const strategy = new OIDCStrategy(
-      {
-        identityMetadata: `https://login.microsoftonline.com/${cfg.entra.tenantId}/v2.0/.well-known/openid-configuration`,
-        clientID: cfg.entra.clientId,
-        clientSecret: cfg.entra.clientSecret,
-        responseType: 'code',
-        responseMode: 'form_post',
-        redirectUrl: `http://localhost:${cfg.port}/auth/callback`,
-        allowHttpForRedirectUrl: true,
-        scope: ['openid', 'profile', 'email'],
-        passReqToCallback: false,
-      },
-      (iss, sub, profile, accessToken, refreshToken, done) => {
-        return done(null, profile);
-      }
-    );
-    passport.use(strategy);
-  }
-}
-
-setupPassportStrategy();
+// Parse EasyAuth user from headers (Azure App Service built-in auth)
+app.use(parseEasyAuthUser);
 
 // Make user available to all views
 app.use((req, res, next) => {
   res.locals.currentUser = req.user;
-  res.locals.isEntraConfigured = isEntraConfigured();
   next();
 });
 
@@ -90,18 +58,28 @@ app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
+// API endpoint for client-side auth detection (same pattern as sizing app)
+app.get('/api/user', (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  res.json({
+    name: req.user.name,
+    email: req.user.email,
+    authenticated: true,
+  });
+});
+
 // Routes
-const authRoutes = require('./routes/auth');
 const indexRoutes = require('./routes/index');
 const configRoutes = require('./routes/config');
 const workspaceRoutes = require('./routes/workspaces');
 const governanceRoutes = require('./routes/governance');
 
-app.use('/auth', authRoutes);
-app.use('/', ensureAuthenticated, indexRoutes);
-app.use('/settings', ensureAuthenticated, configRoutes);
-app.use('/workspaces', ensureAuthenticated, workspaceRoutes);
-app.use('/governance', ensureAuthenticated, governanceRoutes);
+app.use('/', indexRoutes);
+app.use('/settings', configRoutes);
+app.use('/workspaces', workspaceRoutes);
+app.use('/governance', governanceRoutes);
 
 // Error handler
 app.use((err, req, res, _next) => {

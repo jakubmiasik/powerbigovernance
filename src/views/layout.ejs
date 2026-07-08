@@ -33,22 +33,20 @@
           </li>
         </ul>
         <ul class="navbar-nav">
-          <% if (isEntraConfigured && currentUser) { %>
+          <% if (currentUser) { %>
             <li class="nav-item dropdown">
               <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
-                <i class="bi bi-person-circle me-1"></i><%= currentUser.displayName || currentUser._json?.name || 'User' %>
+                <i class="bi bi-person-circle me-1"></i><%= currentUser.name %>
               </a>
               <ul class="dropdown-menu dropdown-menu-end">
-                <li><a class="dropdown-item" href="/auth/logout"><i class="bi bi-box-arrow-right me-2"></i>Sign Out</a></li>
+                <li><span class="dropdown-item-text small text-muted"><%= currentUser.email %></span></li>
+                <li><hr class="dropdown-divider"></li>
+                <li><a class="dropdown-item" href="/.auth/logout?post_logout_redirect_uri=/"><i class="bi bi-box-arrow-right me-2"></i>Sign Out</a></li>
               </ul>
-            </li>
-          <% } else if (isEntraConfigured) { %>
-            <li class="nav-item">
-              <a class="nav-link" href="/auth/login"><i class="bi bi-box-arrow-in-right me-1"></i>Sign In</a>
             </li>
           <% } else { %>
             <li class="nav-item">
-              <span class="nav-link text-warning"><i class="bi bi-exclamation-triangle me-1"></i>Dev Mode</span>
+              <a class="nav-link" href="/.auth/login/aad?post_login_redirect_uri=<%= encodeURIComponent('/') %>"><i class="bi bi-box-arrow-in-right me-1"></i>Sign In</a>
             </li>
           <% } %>
         </ul>
