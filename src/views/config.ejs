@@ -1,0 +1,112 @@
+<%- include('layout', { body: `
+<div class="row">
+  <div class="col-lg-8 mx-auto">
+    <h2><i class="bi bi-gear me-2"></i>Settings</h2>
+    <p class="text-muted">Configure your Power BI and Entra ID connection details.</p>
+
+    <div id="flash-messages"></div>
+  </div>
+</div>
+
+<div class="row mt-3">
+  <div class="col-lg-8 mx-auto">
+
+    <!-- Power BI Service Principal -->
+    <div class="card mb-4">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-key me-2"></i>Power BI Service Principal</span>
+        ${isPowerBIConfigured
+          ? '<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Configured</span>'
+          : '<span class="badge bg-warning text-dark"><i class="bi bi-exclamation-triangle me-1"></i>Not Configured</span>'}
+      </div>
+      <div class="card-body">
+        <p class="text-muted small">Used to authenticate with the Power BI REST API via client credentials flow.</p>
+        <form method="POST" action="/settings/powerbi">
+          <div class="mb-3">
+            <label for="pbiTenantId" class="form-label">Tenant ID</label>
+            <input type="text" class="form-control" id="pbiTenantId" name="tenantId"
+              value="${config.powerbi.tenantId}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
+          </div>
+          <div class="mb-3">
+            <label for="pbiClientId" class="form-label">Client ID (Application ID)</label>
+            <input type="text" class="form-control" id="pbiClientId" name="clientId"
+              value="${config.powerbi.clientId}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
+          </div>
+          <div class="mb-3">
+            <label for="pbiClientSecret" class="form-label">Client Secret</label>
+            <input type="password" class="form-control" id="pbiClientSecret" name="clientSecret"
+              value="${config.powerbi.clientSecret}" placeholder="Enter client secret" required>
+          </div>
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-primary">
+              <i class="bi bi-save me-1"></i>Save
+            </button>
+            <button type="button" class="btn btn-outline-secondary" onclick="testConnection()">
+              <i class="bi bi-plug me-1"></i>Test Connection
+            </button>
+          </div>
+        </form>
+        <div id="test-result" class="mt-3" style="display:none;"></div>
+      </div>
+    </div>
+
+    <!-- Entra ID Web App -->
+    <div class="card mb-4">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-shield-lock me-2"></i>Entra ID (Web App Authentication)</span>
+        ${isEntraConfigured
+          ? '<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Configured</span>'
+          : '<span class="badge bg-secondary"><i class="bi bi-dash-circle me-1"></i>Optional</span>'}
+      </div>
+      <div class="card-body">
+        <p class="text-muted small">Used to protect this web app with Microsoft Entra ID sign-in. Optional for development.</p>
+        <form method="POST" action="/settings/entra">
+          <div class="mb-3">
+            <label for="entraTenantId" class="form-label">Tenant ID</label>
+            <input type="text" class="form-control" id="entraTenantId" name="tenantId"
+              value="${config.entra.tenantId}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
+          </div>
+          <div class="mb-3">
+            <label for="entraClientId" class="form-label">Client ID (Application ID)</label>
+            <input type="text" class="form-control" id="entraClientId" name="clientId"
+              value="${config.entra.clientId}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
+          </div>
+          <div class="mb-3">
+            <label for="entraClientSecret" class="form-label">Client Secret</label>
+            <input type="password" class="form-control" id="entraClientSecret" name="clientSecret"
+              value="${config.entra.clientSecret}" placeholder="Enter client secret" required>
+          </div>
+          <div class="alert alert-info small mb-3">
+            <i class="bi bi-info-circle me-1"></i>
+            Set the redirect URI in your app registration to: <code>http://localhost:${config.port}/auth/callback</code>
+          </div>
+          <button type="submit" class="btn btn-primary">
+            <i class="bi bi-save me-1"></i>Save
+          </button>
+        </form>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+async function testConnection() {
+  const resultDiv = document.getElementById('test-result');
+  resultDiv.style.display = 'block';
+  resultDiv.innerHTML = '<div class="alert alert-info"><i class="bi bi-hourglass-split me-2"></i>Testing connection...</div>';
+
+  try {
+    const response = await fetch('/settings/test-connection', { method: 'POST' });
+    const data = await response.json();
+    if (data.success) {
+      resultDiv.innerHTML = '<div class="alert alert-success"><i class="bi bi-check-circle me-2"></i>' + data.message + '</div>';
+    } else {
+      resultDiv.innerHTML = '<div class="alert alert-danger"><i class="bi bi-x-circle me-2"></i>' + data.message + '</div>';
+    }
+  } catch (err) {
+    resultDiv.innerHTML = '<div class="alert alert-danger"><i class="bi bi-x-circle me-2"></i>Connection test failed: ' + err.message + '</div>';
+  }
+}
+</script>
+` }) %>

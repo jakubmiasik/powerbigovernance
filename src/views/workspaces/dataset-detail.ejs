@@ -1,0 +1,65 @@
+<%- include('../layout', { body: `
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/workspaces">Workspaces</a></li>
+    <li class="breadcrumb-item"><a href="/workspaces/${workspaceId}">Workspace</a></li>
+    <li class="breadcrumb-item active">Dataset Details</li>
+  </ol>
+</nav>
+
+<h3><i class="bi bi-database me-2"></i>Dataset Details</h3>
+<p class="text-muted small">Dataset ID: <code>${datasetId}</code></p>
+
+<!-- Data Sources -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-plug me-2"></i>Data Sources (${datasources.length})</div>
+  ${datasources.length === 0 ? '<div class="card-body"><p class="text-muted mb-0">No data sources found.</p></div>' :
+  '<div class="table-responsive"><table class="table table-sm mb-0">' +
+  '<thead><tr><th>Type</th><th>Server</th><th>Database</th><th>Connection</th><th>Gateway</th></tr></thead><tbody>' +
+  datasources.map(ds =>
+    '<tr>' +
+    '<td><span class="badge bg-info">' + (ds.datasourceType || '-') + '</span></td>' +
+    '<td><code>' + (ds.connectionDetails?.server || '-') + '</code></td>' +
+    '<td>' + (ds.connectionDetails?.database || ds.connectionDetails?.path || ds.connectionDetails?.url || '-') + '</td>' +
+    '<td class="small">' + (ds.connectionString ? '<span title="' + ds.connectionString + '">Yes</span>' : '-') + '</td>' +
+    '<td class="small">' + (ds.gatewayId && ds.gatewayId !== '00000000-0000-0000-0000-000000000000' ? '<i class="bi bi-hdd-network text-success me-1"></i>Yes' : '-') + '</td>' +
+    '</tr>'
+  ).join('') +
+  '</tbody></table></div>'}
+</div>
+
+<!-- Parameters -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-sliders me-2"></i>Parameters (${parameters.length})</div>
+  ${parameters.length === 0 ? '<div class="card-body"><p class="text-muted mb-0">No parameters found.</p></div>' :
+  '<div class="table-responsive"><table class="table table-sm mb-0">' +
+  '<thead><tr><th>Name</th><th>Type</th><th>Current Value</th><th>Required</th></tr></thead><tbody>' +
+  parameters.map(p =>
+    '<tr>' +
+    '<td><strong>' + (p.name || '-') + '</strong></td>' +
+    '<td>' + (p.type || '-') + '</td>' +
+    '<td><code>' + (p.currentValue || '-') + '</code></td>' +
+    '<td>' + (p.isRequired ? 'Yes' : 'No') + '</td>' +
+    '</tr>'
+  ).join('') +
+  '</tbody></table></div>'}
+</div>
+
+<!-- Refresh History -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-arrow-repeat me-2"></i>Refresh History (last ${refreshHistory.length})</div>
+  ${refreshHistory.length === 0 ? '<div class="card-body"><p class="text-muted mb-0">No refresh history available.</p></div>' :
+  '<div class="table-responsive"><table class="table table-sm mb-0">' +
+  '<thead><tr><th>Status</th><th>Start Time</th><th>End Time</th><th>Type</th><th>Error</th></tr></thead><tbody>' +
+  refreshHistory.map(r =>
+    '<tr class="' + (r.status === 'Failed' ? 'table-danger' : r.status === 'Completed' ? 'table-success' : '') + '">' +
+    '<td><span class="badge bg-' + (r.status === 'Failed' ? 'danger' : r.status === 'Completed' ? 'success' : r.status === 'Unknown' ? 'secondary' : 'warning') + '">' + (r.status || '-') + '</span></td>' +
+    '<td class="small">' + (r.startTime ? new Date(r.startTime).toLocaleString() : '-') + '</td>' +
+    '<td class="small">' + (r.endTime ? new Date(r.endTime).toLocaleString() : '-') + '</td>' +
+    '<td>' + (r.refreshType || '-') + '</td>' +
+    '<td class="small text-danger">' + (r.serviceExceptionJson ? '<span title="' + r.serviceExceptionJson.replace(/"/g, '&quot;') + '">View</span>' : '-') + '</td>' +
+    '</tr>'
+  ).join('') +
+  '</tbody></table></div>'}
+</div>
+` }) %>

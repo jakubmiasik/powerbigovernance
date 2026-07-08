@@ -1,0 +1,141 @@
+<%- include('../layout', { body: `
+<h2><i class="bi bi-shield-check me-2"></i>Governance Overview</h2>
+<p class="text-muted">Tenant-wide Power BI governance metrics and insights.</p>
+
+<!-- Summary Cards -->
+<div class="row g-3 mb-4">
+  <div class="col-sm-3">
+    <div class="card text-center bg-primary text-white">
+      <div class="card-body">
+        <div class="display-6 fw-bold">${governance.totalWorkspaces}</div>
+        <div>Total Workspaces</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-3">
+    <div class="card text-center bg-success text-white">
+      <div class="card-body">
+        <div class="display-6 fw-bold">${governance.workspacesOnCapacity}</div>
+        <div>Premium/Capacity</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-3">
+    <div class="card text-center bg-warning">
+      <div class="card-body">
+        <div class="display-6 fw-bold">${governance.workspacesOnSharedCapacity}</div>
+        <div>Shared Capacity</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-3">
+    <div class="card text-center bg-info text-white">
+      <div class="card-body">
+        <div class="display-6 fw-bold">${governance.capacityCount}</div>
+        <div>Capacities</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Workspace State and Type Distribution -->
+<div class="row g-4 mb-4">
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header"><i class="bi bi-pie-chart me-2"></i>Workspace States</div>
+      <div class="card-body">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>State</th><th>Count</th><th>%</th></tr></thead>
+          <tbody>
+            ${Object.entries(governance.workspacesByState).map(([state, count]) =>
+              '<tr><td><span class="badge bg-' + (state === 'Active' ? 'success' : state === 'Deleted' ? 'danger' : 'warning') + '">' + state + '</span></td>' +
+              '<td>' + count + '</td>' +
+              '<td>' + (governance.totalWorkspaces > 0 ? Math.round(count / governance.totalWorkspaces * 100) : 0) + '%</td></tr>'
+            ).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header"><i class="bi bi-diagram-2 me-2"></i>Workspace Types</div>
+      <div class="card-body">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Type</th><th>Count</th><th>%</th></tr></thead>
+          <tbody>
+            ${Object.entries(governance.workspacesByType).map(([type, count]) =>
+              '<tr><td><span class="badge bg-secondary">' + type + '</span></td>' +
+              '<td>' + count + '</td>' +
+              '<td>' + (governance.totalWorkspaces > 0 ? Math.round(count / governance.totalWorkspaces * 100) : 0) + '%</td></tr>'
+            ).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Capacities -->
+${governance.capacities.length > 0 ? `
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-lightning me-2"></i>Capacities (${governance.capacities.length})</div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0">
+      <thead><tr><th>Display Name</th><th>SKU</th><th>State</th><th>Region</th><th>Admins</th></tr></thead>
+      <tbody>
+        ${governance.capacities.map(cap =>
+          '<tr>' +
+          '<td>' + (cap.displayName || '-') + '</td>' +
+          '<td><code>' + (cap.sku || '-') + '</code></td>' +
+          '<td><span class="badge bg-' + (cap.state === 'Active' ? 'success' : 'warning') + '">' + (cap.state || '-') + '</span></td>' +
+          '<td>' + (cap.region || '-') + '</td>' +
+          '<td>' + (cap.admins ? cap.admins.join(', ') : '-') + '</td>' +
+          '</tr>'
+        ).join('')}
+      </tbody>
+    </table>
+  </div>
+</div>` : ''}
+
+<!-- Detailed Workspace Analysis -->
+<div class="card mb-4">
+  <div class="card-header">
+    <i class="bi bi-search me-2"></i>Workspace Analysis (sample of ${governance.totalWorkspacesAnalyzed} workspaces)
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover table-sm mb-0">
+      <thead>
+        <tr>
+          <th>Workspace</th>
+          <th>Reports</th>
+          <th>Datasets</th>
+          <th>Users</th>
+          <th>Admins</th>
+          <th>Refresh Failures</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${governance.detailedWorkspaces.map(d =>
+          '<tr>' +
+          '<td><strong>' + (d.workspace.name || 'Unnamed') + '</strong></td>' +
+          '<td>' + d.reportCount + '</td>' +
+          '<td>' + d.datasetCount + '</td>' +
+          '<td>' + d.userCount + '</td>' +
+          '<td>' + (d.adminCount > 3 ? '<span class="badge bg-warning">' + d.adminCount + '</span>' : d.adminCount) + '</td>' +
+          '<td>' + (d.refreshFailures.length > 0 ? '<span class="badge bg-danger">' + d.refreshFailures.length + ' datasets</span>' : '<span class="text-success">OK</span>') + '</td>' +
+          '<td><a href="/workspaces/' + d.workspace.id + '" class="btn btn-sm btn-outline-primary">Details</a></td>' +
+          '</tr>'
+        ).join('')}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="alert alert-info">
+  <i class="bi bi-info-circle me-2"></i>
+  <strong>Note:</strong> The detailed analysis samples the first ${governance.totalWorkspacesAnalyzed} workspaces.
+  For a full tenant analysis, use the <a href="/workspaces?mode=admin">Admin Workspaces</a> view to browse all workspaces individually.
+</div>
+` }) %>

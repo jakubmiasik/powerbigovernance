@@ -1,0 +1,154 @@
+<%- include('../layout', { body: `
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/workspaces">Workspaces</a></li>
+    <li class="breadcrumb-item active">${workspace.name || 'Workspace'}</li>
+  </ol>
+</nav>
+
+<h2><i class="bi bi-folder2-open me-2"></i>${workspace.name || 'Workspace Details'}</h2>
+<p class="text-muted small">ID: <code>${workspace.id}</code>
+  ${workspace.capacityId ? ' &bull; Capacity: <code>' + workspace.capacityId + '</code>' : ''}
+  ${workspace.state ? ' &bull; State: <span class="badge bg-' + (workspace.state === 'Active' ? 'success' : 'warning') + '">' + workspace.state + '</span>' : ''}
+</p>
+
+<!-- Summary Cards -->
+<div class="row g-3 mb-4">
+  <div class="col-sm-2">
+    <div class="card text-center border-primary">
+      <div class="card-body py-2">
+        <div class="fs-4 fw-bold text-primary">${reports.length}</div>
+        <div class="text-muted small">Reports</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-2">
+    <div class="card text-center border-success">
+      <div class="card-body py-2">
+        <div class="fs-4 fw-bold text-success">${datasets.length}</div>
+        <div class="text-muted small">Datasets</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-2">
+    <div class="card text-center border-info">
+      <div class="card-body py-2">
+        <div class="fs-4 fw-bold text-info">${dashboards.length}</div>
+        <div class="text-muted small">Dashboards</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-2">
+    <div class="card text-center border-warning">
+      <div class="card-body py-2">
+        <div class="fs-4 fw-bold text-warning">${dataflows.length}</div>
+        <div class="text-muted small">Dataflows</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-2">
+    <div class="card text-center border-secondary">
+      <div class="card-body py-2">
+        <div class="fs-4 fw-bold text-secondary">${users.length}</div>
+        <div class="text-muted small">Users</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Tabs -->
+<ul class="nav nav-tabs" role="tablist">
+  <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-reports"><i class="bi bi-file-earmark-bar-graph me-1"></i>Reports</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-datasets"><i class="bi bi-database me-1"></i>Datasets</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-dashboards"><i class="bi bi-grid-1x2 me-1"></i>Dashboards</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-dataflows"><i class="bi bi-diagram-3 me-1"></i>Dataflows</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-users"><i class="bi bi-people me-1"></i>Users</a></li>
+</ul>
+
+<div class="tab-content mt-3">
+
+  <!-- Reports Tab -->
+  <div class="tab-pane fade show active" id="tab-reports">
+    ${reports.length === 0 ? '<p class="text-muted">No reports in this workspace.</p>' :
+    '<div class="table-responsive"><table class="table table-hover table-sm">' +
+    '<thead><tr><th>Name</th><th>Report Type</th><th>Web URL</th><th>Dataset ID</th></tr></thead><tbody>' +
+    reports.map(r =>
+      '<tr>' +
+      '<td><i class="bi bi-file-earmark-bar-graph text-primary me-1"></i>' + (r.name || 'Unnamed') + '</td>' +
+      '<td>' + (r.reportType || '-') + '</td>' +
+      '<td>' + (r.webUrl ? '<a href="' + r.webUrl + '" target="_blank" class="btn btn-sm btn-outline-primary"><i class="bi bi-box-arrow-up-right"></i></a>' : '-') + '</td>' +
+      '<td><code class="small">' + (r.datasetId || '-') + '</code></td>' +
+      '</tr>'
+    ).join('') +
+    '</tbody></table></div>'}
+  </div>
+
+  <!-- Datasets Tab -->
+  <div class="tab-pane fade" id="tab-datasets">
+    ${datasets.length === 0 ? '<p class="text-muted">No datasets in this workspace.</p>' :
+    '<div class="table-responsive"><table class="table table-hover table-sm">' +
+    '<thead><tr><th>Name</th><th>Configured By</th><th>Is Refreshable</th><th>Target Storage</th><th>Details</th></tr></thead><tbody>' +
+    datasets.map(ds =>
+      '<tr>' +
+      '<td><i class="bi bi-database text-success me-1"></i>' + (ds.name || 'Unnamed') + '</td>' +
+      '<td>' + (ds.configuredBy || '-') + '</td>' +
+      '<td>' + (ds.isRefreshable ? '<span class="badge bg-success">Yes</span>' : '<span class="badge bg-secondary">No</span>') + '</td>' +
+      '<td>' + (ds.targetStorageMode || '-') + '</td>' +
+      '<td><a href="/workspaces/' + workspace.id + '/datasets/' + ds.id + '" class="btn btn-sm btn-outline-success"><i class="bi bi-search me-1"></i>Inspect</a></td>' +
+      '</tr>'
+    ).join('') +
+    '</tbody></table></div>'}
+  </div>
+
+  <!-- Dashboards Tab -->
+  <div class="tab-pane fade" id="tab-dashboards">
+    ${dashboards.length === 0 ? '<p class="text-muted">No dashboards in this workspace.</p>' :
+    '<div class="table-responsive"><table class="table table-hover table-sm">' +
+    '<thead><tr><th>Name</th><th>Web URL</th><th>Is Read Only</th><th>Tiles</th></tr></thead><tbody>' +
+    dashboards.map(db =>
+      '<tr>' +
+      '<td><i class="bi bi-grid-1x2 text-info me-1"></i>' + (db.displayName || 'Unnamed') + '</td>' +
+      '<td>' + (db.webUrl ? '<a href="' + db.webUrl + '" target="_blank" class="btn btn-sm btn-outline-info"><i class="bi bi-box-arrow-up-right"></i></a>' : '-') + '</td>' +
+      '<td>' + (db.isReadOnly ? 'Yes' : 'No') + '</td>' +
+      '<td><a href="/workspaces/' + workspace.id + '/dashboards/' + db.id + '" class="btn btn-sm btn-outline-info"><i class="bi bi-search me-1"></i>Tiles</a></td>' +
+      '</tr>'
+    ).join('') +
+    '</tbody></table></div>'}
+  </div>
+
+  <!-- Dataflows Tab -->
+  <div class="tab-pane fade" id="tab-dataflows">
+    ${dataflows.length === 0 ? '<p class="text-muted">No dataflows in this workspace.</p>' :
+    '<div class="table-responsive"><table class="table table-hover table-sm">' +
+    '<thead><tr><th>Name</th><th>Description</th><th>Configured By</th></tr></thead><tbody>' +
+    dataflows.map(df =>
+      '<tr>' +
+      '<td><i class="bi bi-diagram-3 text-warning me-1"></i>' + (df.name || 'Unnamed') + '</td>' +
+      '<td>' + (df.description || '-') + '</td>' +
+      '<td>' + (df.configuredBy || '-') + '</td>' +
+      '</tr>'
+    ).join('') +
+    '</tbody></table></div>'}
+  </div>
+
+  <!-- Users Tab -->
+  <div class="tab-pane fade" id="tab-users">
+    ${users.length === 0 ? '<p class="text-muted">No users found for this workspace.</p>' :
+    '<div class="table-responsive"><table class="table table-hover table-sm">' +
+    '<thead><tr><th>Name</th><th>Email</th><th>Type</th><th>Access</th></tr></thead><tbody>' +
+    users.map(u =>
+      '<tr>' +
+      '<td><i class="bi bi-person me-1"></i>' + (u.displayName || u.identifier || 'Unknown') + '</td>' +
+      '<td>' + (u.emailAddress || u.identifier || '-') + '</td>' +
+      '<td><span class="badge bg-secondary">' + (u.principalType || '-') + '</span></td>' +
+      '<td><span class="badge bg-' +
+        (u.groupUserAccessRight === 'Admin' ? 'danger' :
+         u.groupUserAccessRight === 'Member' ? 'primary' :
+         u.groupUserAccessRight === 'Contributor' ? 'success' : 'secondary') + '">' +
+        (u.groupUserAccessRight || '-') + '</span></td>' +
+      '</tr>'
+    ).join('') +
+    '</tbody></table></div>'}
+  </div>
+</div>
+` }) %>

@@ -1,0 +1,25 @@
+{
+  "name": "powerbi-governance",
+  "version": "1.0.0",
+  "description": "Power BI Governance Web App - Investigate workspaces, reports, datasets, and metadata via Power BI REST API",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "@azure/msal-node": "^2.16.0",
+    "axios": "^1.7.0",
+    "connect-flash": "^0.1.1",
+    "cookie-parser": "^1.4.6",
+    "dotenv": "^16.4.0",
+    "ejs": "^3.1.10",
+    "express": "^4.21.0",
+    "express-session": "^1.18.0",
+    "passport": "^0.7.0",
+    "passport-azure-ad": "^4.3.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

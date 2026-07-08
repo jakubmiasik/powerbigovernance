@@ -1,0 +1,78 @@
+<%- include('../layout', { body: `
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h2><i class="bi bi-collection me-2"></i>Workspaces</h2>
+    <p class="text-muted mb-0">Browse Power BI workspaces in your tenant.</p>
+  </div>
+  <div class="btn-group">
+    <a href="/workspaces" class="btn btn-${useAdmin ? 'outline-' : ''}primary btn-sm">
+      <i class="bi bi-person me-1"></i>My Workspaces
+    </a>
+    <a href="/workspaces?mode=admin" class="btn btn-${useAdmin ? '' : 'outline-'}primary btn-sm">
+      <i class="bi bi-people me-1"></i>All (Admin)
+    </a>
+  </div>
+</div>
+
+<!-- Stats -->
+<div class="row g-3 mb-4">
+  <div class="col-sm-3">
+    <div class="card text-center">
+      <div class="card-body">
+        <div class="display-6 fw-bold text-primary">${stats.total}</div>
+        <div class="text-muted small">Total Workspaces</div>
+      </div>
+    </div>
+  </div>
+  ${Object.entries(stats.byState).map(([state, count]) =>
+    '<div class="col-sm-3"><div class="card text-center"><div class="card-body">' +
+    '<div class="display-6 fw-bold">' + count + '</div>' +
+    '<div class="text-muted small">' + state + '</div>' +
+    '</div></div></div>'
+  ).join('')}
+</div>
+
+<!-- Filter -->
+<div class="mb-3">
+  <input type="text" id="workspaceFilter" class="form-control" placeholder="Filter workspaces by name...">
+</div>
+
+<!-- Workspace Table -->
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-hover table-striped mb-0">
+      <thead class="table-dark">
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>State</th>
+          <th>Capacity</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="workspaceTable">
+        ${workspaces.length === 0
+          ? '<tr><td colspan="5" class="text-center text-muted py-4">No workspaces found.</td></tr>'
+          : workspaces.map(ws =>
+            '<tr class="workspace-row" data-name="' + (ws.name || '').toLowerCase() + '">' +
+            '<td><i class="bi bi-folder2 me-2 text-primary"></i><strong>' + (ws.name || 'Unnamed') + '</strong></td>' +
+            '<td><span class="badge bg-secondary">' + (ws.type || 'Workspace') + '</span></td>' +
+            '<td><span class="badge bg-' + (ws.state === 'Active' ? 'success' : ws.state === 'Deleted' ? 'danger' : 'warning') + '">' + (ws.state || 'Unknown') + '</span></td>' +
+            '<td class="small">' + (ws.capacityId && ws.capacityId !== '00000000-0000-0000-0000-000000000000' ? '<i class="bi bi-lightning-fill text-warning me-1"></i>Premium' : '<i class="bi bi-cloud me-1"></i>Shared') + '</td>' +
+            '<td><a href="/workspaces/' + ws.id + '" class="btn btn-sm btn-outline-primary"><i class="bi bi-eye me-1"></i>Details</a></td>' +
+            '</tr>'
+          ).join('')}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+document.getElementById('workspaceFilter')?.addEventListener('input', function() {
+  const filter = this.value.toLowerCase();
+  document.querySelectorAll('.workspace-row').forEach(row => {
+    row.style.display = row.dataset.name.includes(filter) ? '' : 'none';
+  });
+});
+</script>
+` }) %>
