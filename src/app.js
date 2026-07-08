@@ -11,6 +11,12 @@ const { getConfig, isEntraConfigured } = require('./config/settings');
 const { ensureAuthenticated } = require('./middleware/auth');
 
 const app = express();
+const isProduction = process.env.NODE_ENV === 'production';
+
+// Trust Azure load balancer
+if (isProduction) {
+  app.set('trust proxy', 1);
+}
 
 // View engine
 app.set('views', path.join(__dirname, 'views'));
@@ -29,7 +35,12 @@ app.use(
     secret: config.session.secret,
     resave: false,
     saveUninitialized: false,
-    cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 },
+    cookie: {
+      secure: isProduction,
+      sameSite: 'lax',
+      httpOnly: true,
+      maxAge: 24 * 60 * 60 * 1000,
+    },
   })
 );
 
@@ -72,6 +83,11 @@ app.use((req, res, next) => {
   res.locals.currentUser = req.user;
   res.locals.isEntraConfigured = isEntraConfigured();
   next();
+});
+
+// Health check endpoint (Azure App Service)
+app.get('/health', (_req, res) => {
+  res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
 // Routes
