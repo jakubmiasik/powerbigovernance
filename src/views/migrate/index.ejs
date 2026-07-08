@@ -169,6 +169,39 @@
   </div>
 </div>
 
+<!-- Alert Modal -->
+<div class="modal fade" id="alertModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title"><i class="bi bi-exclamation-triangle me-2"></i>Warning</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="alertModalBody"></div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-primary btn-sm" data-bs-dismiss="modal">OK</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Modal -->
+<div class="modal fade" id="confirmModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title"><i class="bi bi-question-circle me-2"></i>Confirm Migration</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="confirmModalBody"></div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary btn-sm" id="confirmModalOk">Confirm</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 function toggleCapacitySelect() {
   var action = document.getElementById('migrationAction').value;
@@ -249,15 +282,33 @@ function resetFilters() {
   applyFilters();
 }
 
+function showAlert(msg) {
+  document.getElementById('alertModalBody').textContent = msg;
+  new bootstrap.Modal(document.getElementById('alertModal')).show();
+}
+
+function showConfirm(msg, onOk) {
+  document.getElementById('confirmModalBody').textContent = msg;
+  var modal = new bootstrap.Modal(document.getElementById('confirmModal'));
+  var okBtn = document.getElementById('confirmModalOk');
+  var handler = function() {
+    okBtn.removeEventListener('click', handler);
+    modal.hide();
+    onOk();
+  };
+  okBtn.addEventListener('click', handler);
+  modal.show();
+}
+
 function executeMigration() {
   var ids = getSelectedIds();
-  if (ids.length === 0) return alert('No workspaces selected.');
+  if (ids.length === 0) return showAlert('No workspaces selected.');
 
   var action = document.getElementById('migrationAction').value;
   var targetCapacityId = document.getElementById('targetCapacity').value;
 
   if (action === 'assign' && !targetCapacityId) {
-    return alert('Please select a target capacity.');
+    return showAlert('Please select a target capacity.');
   }
 
   var targetLabel = '';
@@ -268,7 +319,7 @@ function executeMigration() {
     targetLabel = 'Shared (Pro)';
   }
 
-  if (!confirm('Migrate ' + ids.length + ' workspace(s) to ' + targetLabel + '?\n\nThis action will change capacity assignments.')) return;
+  showConfirm('Migrate ' + ids.length + ' workspace(s) to ' + targetLabel + '? This action will change capacity assignments.', function() {
 
   // Show progress modal
   var modal = new bootstrap.Modal(document.getElementById('migrationResultsModal'));
@@ -318,6 +369,7 @@ function executeMigration() {
     document.getElementById('migrationResultsContent').style.display = '';
     document.getElementById('resultsModalBody').innerHTML = '<div class="alert alert-danger">Request failed: ' + err.message + '</div>';
   });
+  }); // end showConfirm callback
 }
 </script>
 

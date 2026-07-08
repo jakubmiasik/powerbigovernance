@@ -177,7 +177,7 @@ async function updateAnalysisRun(id, data) {
 async function getAnalysisRuns() {
   const conn = await getConnection();
   try {
-    return await execSql(conn, 'SELECT id, sp_name, tenant_id, status, total_workspaces, total_reports, total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by FROM analysis_runs ORDER BY started_at DESC');
+    return await execSql(conn, 'SELECT id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports, total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by FROM analysis_runs ORDER BY started_at DESC');
   } finally {
     conn.close();
   }
