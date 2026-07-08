@@ -83,6 +83,7 @@
     <li class="nav-item" role="presentation"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-fabric" type="button">Fabric Items</button></li>
   <% } %>
   <li class="nav-item" role="presentation"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-users" type="button">Users (<%= users.length %>)</button></li>
+  <li class="nav-item" role="presentation"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-security" type="button"><i class="bi bi-shield-lock me-1"></i>Security</button></li>
 </ul>
 
 <div class="tab-content mt-3">
@@ -282,7 +283,7 @@
     <% } else { %>
       <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-          <span>Workspace Users</span>
+          <span>Workspace Users (<%= users.length %>)</span>
           <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter users..." oninput="filterTable(this, 'workspace-users-table')">
         </div>
         <div class="table-responsive">
@@ -290,19 +291,22 @@
             <thead>
               <tr>
                 <th>Name</th>
-                <th>Email</th>
-                <th>Type</th>
-                <th>Access</th>
+                <th>Email / UPN</th>
+                <th>Principal Type</th>
+                <th>Access Level</th>
               </tr>
             </thead>
             <tbody>
-              <% users.forEach(function(user) { %>
-                <tr data-filter="<%= [user.displayName || user.identifier || '', user.emailAddress || user.identifier || '', user.principalType || '', user.groupUserAccessRight || ''].join(' ').toLowerCase() %>">
-                  <td><i class="bi bi-person me-1"></i><%= user.displayName || user.identifier || 'Unknown' %></td>
-                  <td><%= user.emailAddress || user.identifier || '-' %></td>
-                  <td><span class="badge bg-secondary"><%= user.principalType || '-' %></span></td>
+              <% users.forEach(function(u) { var uName = u.displayName || u.name || u.identifier || 'Unknown'; var uEmail = u.emailAddress || u.email || u.identifier || '-'; var uType = u.principalType || u.type || '-'; var uAccess = u.groupUserAccessRight || u.role || '-'; %>
+                <tr data-filter="<%= [uName, uEmail, uType, uAccess].join(' ').toLowerCase() %>">
                   <td>
-                    <span class="badge bg-<%= user.groupUserAccessRight === 'Admin' ? 'danger' : user.groupUserAccessRight === 'Member' ? 'primary' : user.groupUserAccessRight === 'Contributor' ? 'success' : 'secondary' %>"><%= user.groupUserAccessRight || '-' %></span>
+                    <i class="bi bi-<%= uType === 'Group' ? 'people-fill' : uType === 'App' || uType === 'ServicePrincipal' ? 'gear-fill' : 'person-fill' %> me-1"></i>
+                    <%= uName %>
+                  </td>
+                  <td><%= uEmail %></td>
+                  <td><span class="badge bg-<%= uType === 'Group' ? 'info' : uType === 'App' || uType === 'ServicePrincipal' ? 'dark' : 'secondary' %>"><%= uType %></span></td>
+                  <td>
+                    <span class="badge bg-<%= uAccess === 'Admin' ? 'danger' : uAccess === 'Member' ? 'primary' : uAccess === 'Contributor' ? 'success' : uAccess === 'Viewer' ? 'warning' : 'secondary' %>"><%= uAccess %></span>
                   </td>
                 </tr>
               <% }) %>
@@ -310,6 +314,101 @@
           </table>
         </div>
       </div>
+    <% } %>
+  </div>
+
+  <div class="tab-pane fade" id="tab-security" role="tabpanel">
+    <%
+      // Categorize users by principal type
+      var secUsers = [], secGroups = [], secApps = [];
+      users.forEach(function(u) {
+        var uType = (u.principalType || u.type || '').toLowerCase();
+        if (uType === 'group') secGroups.push(u);
+        else if (uType === 'app' || uType === 'serviceprincipal' || uType === 'service') secApps.push(u);
+        else secUsers.push(u);
+      });
+    %>
+    <div class="row g-3 mb-3">
+      <div class="col-sm-4">
+        <div class="card text-center border-primary">
+          <div class="card-body py-3">
+            <i class="bi bi-person-fill text-primary fs-4"></i>
+            <div class="fs-4 fw-bold text-primary"><%= secUsers.length %></div>
+            <div class="text-muted small">Individual Accounts</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-sm-4">
+        <div class="card text-center border-info">
+          <div class="card-body py-3">
+            <i class="bi bi-people-fill text-info fs-4"></i>
+            <div class="fs-4 fw-bold text-info"><%= secGroups.length %></div>
+            <div class="text-muted small">Security Groups</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-sm-4">
+        <div class="card text-center border-dark">
+          <div class="card-body py-3">
+            <i class="bi bi-gear-fill text-dark fs-4"></i>
+            <div class="fs-4 fw-bold"><%= secApps.length %></div>
+            <div class="text-muted small">Service Principals / Apps</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <% var secAccessCounts = {}; users.forEach(function(u) { var a = u.groupUserAccessRight || u.role || 'Unknown'; secAccessCounts[a] = (secAccessCounts[a] || 0) + 1; }); %>
+    <div class="row g-3 mb-3">
+      <% Object.keys(secAccessCounts).forEach(function(role) { %>
+        <div class="col-sm-3">
+          <div class="card text-center">
+            <div class="card-body py-2">
+              <div class="fw-bold"><%= secAccessCounts[role] %></div>
+              <div class="small"><span class="badge bg-<%= role === 'Admin' ? 'danger' : role === 'Member' ? 'primary' : role === 'Contributor' ? 'success' : role === 'Viewer' ? 'warning' : 'secondary' %>"><%= role %></span></div>
+            </div>
+          </div>
+        </div>
+      <% }) %>
+    </div>
+
+    <% [
+      { label: 'Individual Accounts', icon: 'person-fill', color: 'primary', list: secUsers },
+      { label: 'Security Groups', icon: 'people-fill', color: 'info', list: secGroups },
+      { label: 'Service Principals / Apps', icon: 'gear-fill', color: 'dark', list: secApps }
+    ].forEach(function(section) { %>
+      <% if (section.list.length) { %>
+        <div class="card mb-3">
+          <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <span><i class="bi bi-<%= section.icon %> text-<%= section.color %> me-1"></i><%= section.label %> (<%= section.list.length %>)</span>
+            <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter..." oninput="filterTable(this, 'sec-<%= section.label.toLowerCase().replace(/[^a-z]/g, '') %>-table')">
+          </div>
+          <div class="table-responsive">
+            <table class="table table-hover table-sm mb-0" id="sec-<%= section.label.toLowerCase().replace(/[^a-z]/g, '') %>-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Email / Identifier</th>
+                  <th>Access Level</th>
+                </tr>
+              </thead>
+              <tbody>
+                <% section.list.forEach(function(u) { var uName = u.displayName || u.name || u.identifier || 'Unknown'; var uEmail = u.emailAddress || u.email || u.identifier || '-'; var uAccess = u.groupUserAccessRight || u.role || '-'; %>
+                  <tr data-filter="<%= [uName, uEmail, uAccess].join(' ').toLowerCase() %>">
+                    <td><i class="bi bi-<%= section.icon %> text-<%= section.color %> me-1"></i><%= uName %></td>
+                    <td><%= uEmail %></td>
+                    <td><span class="badge bg-<%= uAccess === 'Admin' ? 'danger' : uAccess === 'Member' ? 'primary' : uAccess === 'Contributor' ? 'success' : uAccess === 'Viewer' ? 'warning' : 'secondary' %>"><%= uAccess %></span></td>
+                  </tr>
+                <% }) %>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      <% } %>
+    <% }) %>
+
+    <% if (!users.length) { %>
+      <div class="alert alert-info"><i class="bi bi-info-circle me-2"></i>No security information available for this workspace.</div>
     <% } %>
   </div>
 </div>
