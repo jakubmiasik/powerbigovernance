@@ -1,38 +1,39 @@
-<%- include('../layout', { body: `
+<%- include('../partials/header') %>
 <div class="d-flex justify-content-between align-items-center mb-4">
   <div>
     <h2><i class="bi bi-collection me-2"></i>Workspaces</h2>
-    <p class="text-muted mb-0">Browse all Power BI / Fabric workspaces in your tenant.</p>
+    <p class="text-muted mb-0">Browse all Power BI and Fabric workspaces in your tenant.</p>
   </div>
 </div>
 
-<!-- Stats -->
 <div class="row g-3 mb-4">
   <div class="col-sm-3">
-    <div class="card text-center">
+    <div class="card text-center h-100">
       <div class="card-body">
-        <div class="display-6 fw-bold text-primary">${stats.total}</div>
+        <div class="display-6 fw-bold text-primary"><%= stats.total %></div>
         <div class="text-muted small">Total Workspaces</div>
       </div>
     </div>
   </div>
-  ${Object.entries(stats.byState).map(([state, count]) =>
-    '<div class="col-sm-3"><div class="card text-center"><div class="card-body">' +
-    '<div class="display-6 fw-bold">' + count + '</div>' +
-    '<div class="text-muted small">' + state + '</div>' +
-    '</div></div></div>'
-  ).join('')}
+  <% Object.entries(stats.byState || {}).forEach(function(entry) { var state = entry[0]; var count = entry[1]; %>
+    <div class="col-sm-3">
+      <div class="card text-center h-100">
+        <div class="card-body">
+          <div class="display-6 fw-bold"><%= count %></div>
+          <div class="text-muted small"><%= state %></div>
+        </div>
+      </div>
+    </div>
+  <% }) %>
 </div>
 
-<!-- Filter -->
-<div class="mb-3">
-  <input type="text" id="workspaceFilter" class="form-control" placeholder="Filter workspaces by name...">
-</div>
-
-<!-- Workspace Table -->
 <div class="card">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-table me-2"></i>Workspace Inventory</span>
+    <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter workspaces..." oninput="filterTable(this, 'workspace-list-table')">
+  </div>
   <div class="table-responsive">
-    <table class="table table-hover table-striped mb-0">
+    <table class="table table-hover table-striped mb-0" id="workspace-list-table">
       <thead class="table-dark">
         <tr>
           <th>Name</th>
@@ -42,30 +43,31 @@
           <th>Actions</th>
         </tr>
       </thead>
-      <tbody id="workspaceTable">
-        ${workspaces.length === 0
-          ? '<tr><td colspan="5" class="text-center text-muted py-4">No workspaces found.</td></tr>'
-          : workspaces.map(ws => {
-            const wsName = ws.displayName || ws.name || 'Unnamed';
-            return '<tr class="workspace-row" data-name="' + wsName.toLowerCase() + '">' +
-            '<td><i class="bi bi-folder2 me-2 text-primary"></i><strong>' + wsName + '</strong></td>' +
-            '<td><span class="badge bg-secondary">' + (ws.type || 'Workspace') + '</span></td>' +
-            '<td><span class="badge bg-' + (ws.state === 'Active' ? 'success' : ws.state === 'Deleted' ? 'danger' : 'warning') + '">' + (ws.state || 'Unknown') + '</span></td>' +
-            '<td class="small">' + (ws.capacityId && ws.capacityId !== '00000000-0000-0000-0000-000000000000' ? '<i class="bi bi-lightning-fill text-warning me-1"></i>Dedicated' : '<i class="bi bi-cloud me-1"></i>Shared') + '</td>' +
-            '<td><a href="/workspaces/' + ws.id + '" class="btn btn-sm btn-outline-primary"><i class="bi bi-eye me-1"></i>Details</a></td>' +
-            '</tr>';
-          }).join('')}
+      <tbody>
+        <% if (!workspaces.length) { %>
+          <tr data-filter="no workspaces">
+            <td colspan="5" class="text-center text-muted py-4">No workspaces found.</td>
+          </tr>
+        <% } %>
+        <% workspaces.forEach(function(ws) { var wsName = ws.displayName || ws.name || 'Unnamed'; var isDedicated = ws.capacityId && ws.capacityId !== '00000000-0000-0000-0000-000000000000'; %>
+          <tr data-filter="<%= [wsName, ws.type || 'Workspace', ws.state || 'Unknown', isDedicated ? 'Dedicated' : 'Shared'].join(' ').toLowerCase() %>">
+            <td><i class="bi bi-folder2 me-2 text-primary"></i><strong><%= wsName %></strong></td>
+            <td><span class="badge bg-secondary"><%= ws.type || 'Workspace' %></span></td>
+            <td>
+              <span class="badge bg-<%= ws.state === 'Active' ? 'success' : ws.state === 'Deleted' ? 'danger' : 'warning' %>"><%= ws.state || 'Unknown' %></span>
+            </td>
+            <td class="small">
+              <% if (isDedicated) { %>
+                <i class="bi bi-lightning-fill text-warning me-1"></i>Dedicated
+              <% } else { %>
+                <i class="bi bi-cloud me-1"></i>Shared
+              <% } %>
+            </td>
+            <td><a href="/workspaces/<%= ws.id %>" class="btn btn-sm btn-outline-primary"><i class="bi bi-eye me-1"></i>Details</a></td>
+          </tr>
+        <% }) %>
       </tbody>
     </table>
   </div>
 </div>
-
-<script>
-document.getElementById('workspaceFilter')?.addEventListener('input', function() {
-  const filter = this.value.toLowerCase();
-  document.querySelectorAll('.workspace-row').forEach(row => {
-    row.style.display = row.dataset.name.includes(filter) ? '' : 'none';
-  });
-});
-</script>
-` }) %>
+<%- include('../partials/footer') %>

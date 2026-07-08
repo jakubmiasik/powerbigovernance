@@ -1,0 +1,53 @@
+<%- include('../partials/header') %>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-boxes me-2"></i><%= artifactType %> Artifacts</h2>
+    <p class="text-muted mb-0"><%= totalCount %> artifacts in analysis run #<%= run.id %>.</p>
+  </div>
+  <a href="/governance<%= run && run.id ? '?runId=' + run.id : '' %>" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<div class="card">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-table me-2"></i>Artifacts</span>
+    <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter artifacts..." oninput="filterTable(this, 'governance-artifacts-table')">
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover table-sm mb-0" id="governance-artifacts-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Workspace</th>
+          <th>Creator</th>
+          <th>Last Updated</th>
+          <th>Description / State</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% if (!artifacts.length) { %>
+          <tr data-filter="no artifacts"><td colspan="5" class="text-center text-muted py-3">No matching artifacts found.</td></tr>
+        <% } %>
+        <% artifacts.forEach(function(artifact) { %>
+          <tr data-filter="<%= [artifact.name || '', artifact.workspace || '', (artifact.creator && artifact.creator.name ? artifact.creator.name : artifact.creator || ''), artifact.type || '', artifact.description || '', artifact.state || ''].join(' ').toLowerCase() %>">
+            <td>
+              <strong><%= artifact.name || 'Unnamed' %></strong>
+              <% if (artifact.type && artifactType === 'All') { %>
+                <div><span class="badge bg-secondary mt-1"><%= artifact.type %></span></div>
+              <% } %>
+            </td>
+            <td><%= artifact.workspace || '-' %></td>
+            <td><%= artifact.creator && artifact.creator.name ? artifact.creator.name : (artifact.creator || '-') %></td>
+            <td><small><%= artifact.lastUpdated ? new Date(artifact.lastUpdated).toLocaleString() : '-' %></small></td>
+            <td>
+              <div class="small text-muted"><%= artifact.description || '-' %></div>
+              <% if (artifact.state) { %>
+                <span class="badge bg-light text-dark border"><%= artifact.state %></span>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+<%- include('../partials/footer') %>

@@ -1,60 +1,83 @@
-<%- include('layout', { body: `
+<%- include('partials/header') %>
 <div class="row">
   <div class="col-lg-8 mx-auto">
     <h2><i class="bi bi-gear me-2"></i>Settings</h2>
     <p class="text-muted">Manage service principals for Power BI API access.</p>
 
     <div id="flash-messages">
-      ${(success && success.length) ? success.map(m => '<div class="alert alert-success alert-dismissible fade show"><i class="bi bi-check-circle me-2"></i>' + m + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>').join('') : ''}
-      ${(error && error.length) ? error.map(m => '<div class="alert alert-danger alert-dismissible fade show"><i class="bi bi-x-circle me-2"></i>' + m + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>').join('') : ''}
+      <% if (success && success.length) { %>
+        <% success.forEach(function(message) { %>
+          <div class="alert alert-success alert-dismissible fade show">
+            <i class="bi bi-check-circle me-2"></i><%= message %>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+          </div>
+        <% }) %>
+      <% } %>
+      <% if (error && error.length) { %>
+        <% error.forEach(function(message) { %>
+          <div class="alert alert-danger alert-dismissible fade show">
+            <i class="bi bi-x-circle me-2"></i><%= message %>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+          </div>
+        <% }) %>
+      <% } %>
     </div>
 
-    <!-- Add New SP Button -->
     <div class="d-flex justify-content-between align-items-center mb-3">
-      <h5 class="mb-0"><i class="bi bi-key me-2"></i>Service Principals (${servicePrincipals.length})</h5>
+      <h5 class="mb-0"><i class="bi bi-key me-2"></i>Service Principals (<%= servicePrincipals.length %>)</h5>
       <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#spModal" onclick="openSpForm()">
         <i class="bi bi-plus-lg me-1"></i>Add Service Principal
       </button>
     </div>
 
-    <!-- SP List -->
-    ${servicePrincipals.length === 0 ? '<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i>No service principals configured. Add one to start using Power BI API.</div>' : ''}
+    <% if (!servicePrincipals.length) { %>
+      <div class="alert alert-warning">
+        <i class="bi bi-exclamation-triangle me-2"></i>No service principals configured. Add one to start using the Power BI API.
+      </div>
+    <% } %>
 
-    ${servicePrincipals.map(sp => `
-    <div class="card mb-3">
-      <div class="card-body">
-        <div class="d-flex justify-content-between align-items-start">
-          <div>
-            <h6 class="mb-1"><i class="bi bi-key me-2"></i>${sp.name}</h6>
-            <div class="text-muted small">
-              <span class="me-3"><strong>Tenant:</strong> ${sp.tenant_id}</span>
-              <span><strong>Client ID:</strong> ${sp.client_id}</span>
+    <% servicePrincipals.forEach(function(sp) { %>
+      <div class="card mb-3">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
+            <div>
+              <h6 class="mb-1"><i class="bi bi-key me-2"></i><%= sp.name %></h6>
+              <div class="text-muted small">
+                <span class="me-3"><strong>Tenant:</strong> <%= sp.tenant_id %></span>
+                <span><strong>Client ID:</strong> <%= sp.client_id %></span>
+              </div>
+            </div>
+            <div class="btn-group btn-group-sm">
+              <button class="btn btn-outline-secondary" onclick="testSP(<%= sp.id %>)">
+                <i class="bi bi-plug me-1"></i>Test
+              </button>
+              <button
+                class="btn btn-outline-primary"
+                data-bs-toggle="modal"
+                data-bs-target="#spModal"
+                data-sp-id="<%= sp.id %>"
+                data-sp-name="<%= sp.name %>"
+                data-sp-tenant-id="<%= sp.tenant_id %>"
+                data-sp-client-id="<%= sp.client_id %>"
+                onclick="openSpForm(this)"
+              >
+                <i class="bi bi-pencil me-1"></i>Edit
+              </button>
+              <form method="POST" action="/settings/sp/delete/<%= sp.id %>" style="display:inline;" onsubmit="return confirm('Delete this service principal?')">
+                <button type="submit" class="btn btn-outline-danger">
+                  <i class="bi bi-trash me-1"></i>Delete
+                </button>
+              </form>
             </div>
           </div>
-          <div class="btn-group btn-group-sm">
-            <button class="btn btn-outline-secondary" onclick="testSP(${sp.id})">
-              <i class="bi bi-plug me-1"></i>Test
-            </button>
-            <button class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#spModal"
-              onclick="editSP(${sp.id}, '${sp.name.replace(/'/g, "\\\\'")}', '${sp.tenant_id}', '${sp.client_id}')">
-              <i class="bi bi-pencil me-1"></i>Edit
-            </button>
-            <form method="POST" action="/settings/sp/delete/${sp.id}" style="display:inline;" onsubmit="return confirm('Delete this service principal?')">
-              <button type="submit" class="btn btn-outline-danger">
-                <i class="bi bi-trash me-1"></i>Delete
-              </button>
-            </form>
-          </div>
+          <div id="test-result-<%= sp.id %>" class="mt-2" style="display:none;"></div>
         </div>
-        <div id="test-result-${sp.id}" class="mt-2" style="display:none;"></div>
       </div>
-    </div>
-    `).join('')}
+    <% }) %>
   </div>
 </div>
 
-<!-- SP Modal -->
-<div class="modal fade" id="spModal" tabindex="-1">
+<div class="modal fade" id="spModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content">
       <form method="POST" action="/settings/sp/save">
@@ -91,31 +114,23 @@
 </div>
 
 <script>
-function openSpForm() {
-  document.getElementById('spModalTitle').textContent = 'Add Service Principal';
-  document.getElementById('spId').value = '';
-  document.getElementById('spName').value = '';
-  document.getElementById('spTenantId').value = '';
-  document.getElementById('spClientId').value = '';
-  document.getElementById('spClientSecret').value = '';
-}
-
-function editSP(id, name, tenantId, clientId) {
-  document.getElementById('spModalTitle').textContent = 'Edit Service Principal';
-  document.getElementById('spId').value = id;
-  document.getElementById('spName').value = name;
-  document.getElementById('spTenantId').value = tenantId;
-  document.getElementById('spClientId').value = clientId;
+function openSpForm(button) {
+  var isEdit = !!button;
+  document.getElementById('spModalTitle').textContent = isEdit ? 'Edit Service Principal' : 'Add Service Principal';
+  document.getElementById('spId').value = isEdit ? button.getAttribute('data-sp-id') || '' : '';
+  document.getElementById('spName').value = isEdit ? button.getAttribute('data-sp-name') || '' : '';
+  document.getElementById('spTenantId').value = isEdit ? button.getAttribute('data-sp-tenant-id') || '' : '';
+  document.getElementById('spClientId').value = isEdit ? button.getAttribute('data-sp-client-id') || '' : '';
   document.getElementById('spClientSecret').value = '';
 }
 
 async function testSP(id) {
-  const resultDiv = document.getElementById('test-result-' + id);
+  var resultDiv = document.getElementById('test-result-' + id);
   resultDiv.style.display = 'block';
   resultDiv.innerHTML = '<div class="alert alert-info py-1 small"><i class="bi bi-hourglass-split me-2"></i>Testing connection...</div>';
   try {
-    const response = await fetch('/settings/sp/test/' + id, { method: 'POST' });
-    const data = await response.json();
+    var response = await fetch('/settings/sp/test/' + id, { method: 'POST' });
+    var data = await response.json();
     if (data.success) {
       resultDiv.innerHTML = '<div class="alert alert-success py-1 small"><i class="bi bi-check-circle me-2"></i>' + data.message + '</div>';
     } else {
@@ -126,4 +141,4 @@ async function testSP(id) {
   }
 }
 </script>
-` }) %>
+<%- include('partials/footer') %>

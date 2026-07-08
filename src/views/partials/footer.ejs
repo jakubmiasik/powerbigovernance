@@ -1,0 +1,17 @@
+</main>
+  <footer class="text-center text-muted py-3 border-top mt-4">
+    <small>Power BI Governance App &copy; <%= new Date().getFullYear() %></small>
+  </footer>
+  <script>
+  function filterTable(input, tableId) {
+    var filter = (input.value || '').toLowerCase();
+    document.querySelectorAll('#' + tableId + ' tbody tr').forEach(function(row) {
+      var text = (row.getAttribute('data-filter') || row.textContent || '').toLowerCase();
+      row.style.display = text.includes(filter) ? '' : 'none';
+    });
+  }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

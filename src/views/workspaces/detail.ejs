@@ -1,211 +1,314 @@
-<%- include('../layout', { body: `
+<%- include('../partials/header') %>
+<%
+  var summaryCards = [
+    { key: 'total', label: 'Total Items', count: items.length, color: 'dark', icon: 'collection', always: true },
+    { key: 'reports', label: 'Reports', count: reports.length, color: 'primary', icon: 'file-earmark-bar-graph' },
+    { key: 'datasets', label: 'Semantic Models', count: datasets.length, color: 'success', icon: 'database' },
+    { key: 'dashboards', label: 'Dashboards', count: dashboards.length, color: 'info', icon: 'grid-1x2' },
+    { key: 'dataflows', label: 'Dataflows', count: dataflows.length, color: 'warning', icon: 'diagram-3' },
+    { key: 'lakehouses', label: 'Lakehouses', count: lakehouses.length, color: 'secondary', icon: 'boxes' },
+    { key: 'notebooks', label: 'Notebooks', count: notebooks.length, color: 'secondary', icon: 'journal-code' },
+    { key: 'pipelines', label: 'Pipelines', count: pipelines.length, color: 'secondary', icon: 'arrow-left-right' },
+    { key: 'warehouses', label: 'Warehouses', count: warehouses.length, color: 'secondary', icon: 'building' },
+    { key: 'others', label: 'Other', count: others.length, color: 'secondary', icon: 'question-circle' },
+    { key: 'users', label: 'Users', count: users.length, color: 'secondary', icon: 'people', always: true }
+  ].filter(function(card) { return card.always || card.count > 0; });
+  var hasFabricItems = dataflows.length + lakehouses.length + notebooks.length + pipelines.length + warehouses.length + others.length > 0;
+  var workspaceName = workspace.name || 'Workspace Details';
+%>
 <nav aria-label="breadcrumb" class="mb-3">
   <ol class="breadcrumb">
     <li class="breadcrumb-item"><a href="/workspaces">Workspaces</a></li>
-    <li class="breadcrumb-item active">${workspace.name || 'Workspace'}</li>
+    <li class="breadcrumb-item active" aria-current="page"><%= workspaceName %></li>
   </ol>
 </nav>
 
-<h2><i class="bi bi-folder2-open me-2"></i>${workspace.name || 'Workspace Details'}</h2>
-<p class="text-muted small">ID: <code>${workspace.id}</code>
-  ${workspace.capacityId ? ' &bull; Capacity: <code>' + workspace.capacityId + '</code>' : ''}
-  ${workspace.state ? ' &bull; State: <span class="badge bg-' + (workspace.state === 'Active' ? 'success' : 'warning') + '">' + workspace.state + '</span>' : ''}
-  ${workspace.type ? ' &bull; Type: <span class="badge bg-secondary">' + workspace.type + '</span>' : ''}
-</p>
-
-<!-- Summary Cards -->
-<div class="row g-3 mb-4">
-  <div class="col">
-    <div class="card text-center border-primary">
-      <div class="card-body py-2">
-        <div class="fs-4 fw-bold text-primary">${items.length}</div>
-        <div class="text-muted small">Total Items</div>
-      </div>
-    </div>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-folder2-open me-2"></i><%= workspaceName %></h2>
+    <p class="text-muted small mb-0">
+      ID: <code><%= workspace.id %></code>
+      <% if (workspace.capacityId) { %>
+        &bull; Capacity: <code><%= workspace.capacityId %></code>
+      <% } %>
+      <% if (workspace.state) { %>
+        &bull; State: <span class="badge bg-<%= workspace.state === 'Active' ? 'success' : 'warning' %>"><%= workspace.state %></span>
+      <% } %>
+      <% if (workspace.type) { %>
+        &bull; Type: <span class="badge bg-secondary"><%= workspace.type %></span>
+      <% } %>
+    </p>
   </div>
-  <div class="col">
-    <div class="card text-center border-success">
-      <div class="card-body py-2">
-        <div class="fs-4 fw-bold text-success">${reports.length}</div>
-        <div class="text-muted small">Reports</div>
-      </div>
-    </div>
-  </div>
-  <div class="col">
-    <div class="card text-center border-info">
-      <div class="card-body py-2">
-        <div class="fs-4 fw-bold text-info">${datasets.length}</div>
-        <div class="text-muted small">Semantic Models</div>
-      </div>
-    </div>
-  </div>
-  <div class="col">
-    <div class="card text-center border-warning">
-      <div class="card-body py-2">
-        <div class="fs-4 fw-bold text-warning">${dashboards.length}</div>
-        <div class="text-muted small">Dashboards</div>
-      </div>
-    </div>
-  </div>
-  <div class="col">
-    <div class="card text-center border-secondary">
-      <div class="card-body py-2">
-        <div class="fs-4 fw-bold text-secondary">${users.length}</div>
-        <div class="text-muted small">Users</div>
-      </div>
-    </div>
-  </div>
-  ${lakehouses.length > 0 ? '<div class="col"><div class="card text-center border-dark"><div class="card-body py-2"><div class="fs-4 fw-bold">' + lakehouses.length + '</div><div class="text-muted small">Lakehouses</div></div></div></div>' : ''}
-  ${notebooks.length > 0 ? '<div class="col"><div class="card text-center border-dark"><div class="card-body py-2"><div class="fs-4 fw-bold">' + notebooks.length + '</div><div class="text-muted small">Notebooks</div></div></div></div>' : ''}
-  ${pipelines.length > 0 ? '<div class="col"><div class="card text-center border-dark"><div class="card-body py-2"><div class="fs-4 fw-bold">' + pipelines.length + '</div><div class="text-muted small">Pipelines</div></div></div></div>' : ''}
-  ${warehouses.length > 0 ? '<div class="col"><div class="card text-center border-dark"><div class="card-body py-2"><div class="fs-4 fw-bold">' + warehouses.length + '</div><div class="text-muted small">Warehouses</div></div></div></div>' : ''}
+  <a href="/workspaces" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
 </div>
 
-<!-- Tabs -->
+<div class="row g-3 mb-4">
+  <% summaryCards.forEach(function(card) { %>
+    <div class="col-sm-6 col-md-4 col-xl-2">
+      <div class="card h-100 border-<%= card.color %>">
+        <div class="card-body text-center py-3">
+          <div class="text-<%= card.color %> mb-2"><i class="bi bi-<%= card.icon %>"></i></div>
+          <div class="fs-4 fw-bold text-<%= card.color %>"><%= card.count %></div>
+          <div class="text-muted small"><%= card.label %></div>
+        </div>
+      </div>
+    </div>
+  <% }) %>
+</div>
+
 <ul class="nav nav-tabs" role="tablist">
-  <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-all"><i class="bi bi-list me-1"></i>All Items (${items.length})</a></li>
-  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-reports"><i class="bi bi-file-earmark-bar-graph me-1"></i>Reports (${reports.length})</a></li>
-  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-datasets"><i class="bi bi-database me-1"></i>Semantic Models (${datasets.length})</a></li>
-  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-dashboards"><i class="bi bi-grid-1x2 me-1"></i>Dashboards (${dashboards.length})</a></li>
-  ${(lakehouses.length + notebooks.length + pipelines.length + warehouses.length + dataflows.length + others.length) > 0 ? '<li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-fabric"><i class="bi bi-diamond me-1"></i>Fabric Items</a></li>' : ''}
-  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-users"><i class="bi bi-people me-1"></i>Users (${users.length})</a></li>
+  <li class="nav-item" role="presentation"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-all" type="button">All Items (<%= items.length %>)</button></li>
+  <li class="nav-item" role="presentation"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-reports" type="button">Reports (<%= reports.length %>)</button></li>
+  <li class="nav-item" role="presentation"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-datasets" type="button">Semantic Models (<%= datasets.length %>)</button></li>
+  <li class="nav-item" role="presentation"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-dashboards" type="button">Dashboards (<%= dashboards.length %>)</button></li>
+  <% if (hasFabricItems) { %>
+    <li class="nav-item" role="presentation"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-fabric" type="button">Fabric Items</button></li>
+  <% } %>
+  <li class="nav-item" role="presentation"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-users" type="button">Users (<%= users.length %>)</button></li>
 </ul>
 
 <div class="tab-content mt-3">
-
-  <!-- All Items Tab -->
-  <div class="tab-pane fade show active" id="tab-all">
-    ${items.length === 0 ? '<p class="text-muted">No items in this workspace.</p>' :
-    '<div class="mb-2"><input type="text" class="form-control form-control-sm" style="width:300px;" placeholder="Filter items..." oninput="filterTable(this, \\'all-items-table\\')"></div>' +
-    '<div class="table-responsive"><table class="table table-hover table-sm" id="all-items-table">' +
-    '<thead><tr><th>Name</th><th>Type</th><th>State</th><th>Creator</th><th>Last Updated</th></tr></thead><tbody>' +
-    items.map(item =>
-      '<tr data-filter="' + ((item.name || '') + ' ' + (item.type || '')).toLowerCase() + '">' +
-      '<td><strong>' + (item.name || item.displayName || 'Unnamed') + '</strong></td>' +
-      '<td><span class="badge bg-' + ((t => { const l=(t||'').toLowerCase(); return l==='report'||l==='paginatedreport'?'primary':l==='semanticmodel'||l==='dataset'?'success':l==='dashboard'?'info':l.includes('dataflow')?'warning':'secondary'; })(item.type)) + '">' + (item.type || '-') + '</span></td>' +
-      '<td>' + (item.state || '-') + '</td>' +
-      '<td>' + (item.creatorPrincipal ? (item.creatorPrincipal.displayName || '-') : '-') + '</td>' +
-      '<td><small>' + (item.lastUpdatedDate ? new Date(item.lastUpdatedDate).toLocaleString() : '-') + '</small></td>' +
-      '</tr>'
-    ).join('') +
-    '</tbody></table></div>'}
+  <div class="tab-pane fade show active" id="tab-all" role="tabpanel">
+    <% if (!items.length) { %>
+      <p class="text-muted">No items in this workspace.</p>
+    <% } else { %>
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span>All Items</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter items..." oninput="filterTable(this, 'all-items-table')">
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover table-sm mb-0" id="all-items-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>State</th>
+                <th>Creator</th>
+                <th>Last Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% items.forEach(function(item) { var name = item.name || item.displayName || 'Unnamed'; var creator = item.creatorPrincipal && (item.creatorPrincipal.displayName || (item.creatorPrincipal.userDetails && item.creatorPrincipal.userDetails.userPrincipalName)) || '-'; %>
+                <tr data-filter="<%= [name, item.type || '', item.state || '', creator, item.description || ''].join(' ').toLowerCase() %>">
+                  <td><strong><%= name %></strong></td>
+                  <td><span class="badge item-type-badge" data-type="<%= item.type || '' %>"><%= item.type || '-' %></span></td>
+                  <td><%= item.state || '-' %></td>
+                  <td><%= creator %></td>
+                  <td><small><%= item.lastUpdatedDate ? new Date(item.lastUpdatedDate).toLocaleString() : '-' %></small></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    <% } %>
   </div>
 
-  <!-- Reports Tab -->
-  <div class="tab-pane fade" id="tab-reports">
-    ${reports.length === 0 ? '<p class="text-muted">No reports in this workspace.</p>' :
-    '<div class="table-responsive"><table class="table table-hover table-sm">' +
-    '<thead><tr><th>Name</th><th>Type</th><th>Creator</th><th>Last Updated</th><th>Description</th></tr></thead><tbody>' +
-    reports.map(r =>
-      '<tr>' +
-      '<td><i class="bi bi-file-earmark-bar-graph text-primary me-1"></i><strong>' + (r.name || 'Unnamed') + '</strong></td>' +
-      '<td><span class="badge bg-primary">' + (r.type || 'Report') + '</span></td>' +
-      '<td>' + (r.creatorPrincipal ? r.creatorPrincipal.displayName : '-') + '</td>' +
-      '<td><small>' + (r.lastUpdatedDate ? new Date(r.lastUpdatedDate).toLocaleString() : '-') + '</small></td>' +
-      '<td class="text-muted small">' + (r.description || '-') + '</td>' +
-      '</tr>'
-    ).join('') +
-    '</tbody></table></div>'}
+  <div class="tab-pane fade" id="tab-reports" role="tabpanel">
+    <% if (!reports.length) { %>
+      <p class="text-muted">No reports in this workspace.</p>
+    <% } else { %>
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span>Reports</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter reports..." oninput="filterTable(this, 'reports-table')">
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover table-sm mb-0" id="reports-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Creator</th>
+                <th>Last Updated</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% reports.forEach(function(report) { var creator = report.creatorPrincipal && (report.creatorPrincipal.displayName || (report.creatorPrincipal.userDetails && report.creatorPrincipal.userDetails.userPrincipalName)) || '-'; %>
+                <tr data-filter="<%= [report.name || '', report.type || '', creator, report.description || ''].join(' ').toLowerCase() %>">
+                  <td><i class="bi bi-file-earmark-bar-graph text-primary me-1"></i><strong><%= report.name || 'Unnamed' %></strong></td>
+                  <td><span class="badge item-type-badge" data-type="<%= report.type || 'Report' %>"><%= report.type || 'Report' %></span></td>
+                  <td><%= creator %></td>
+                  <td><small><%= report.lastUpdatedDate ? new Date(report.lastUpdatedDate).toLocaleString() : '-' %></small></td>
+                  <td class="text-muted small"><%= report.description || '-' %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    <% } %>
   </div>
 
-  <!-- Semantic Models Tab -->
-  <div class="tab-pane fade" id="tab-datasets">
-    ${datasets.length === 0 ? '<p class="text-muted">No semantic models in this workspace.</p>' :
-    '<div class="table-responsive"><table class="table table-hover table-sm">' +
-    '<thead><tr><th>Name</th><th>Creator</th><th>Last Updated</th><th>Description</th><th>Details</th></tr></thead><tbody>' +
-    datasets.map(ds =>
-      '<tr>' +
-      '<td><i class="bi bi-database text-success me-1"></i><strong>' + (ds.name || 'Unnamed') + '</strong></td>' +
-      '<td>' + (ds.creatorPrincipal ? ds.creatorPrincipal.displayName : '-') + '</td>' +
-      '<td><small>' + (ds.lastUpdatedDate ? new Date(ds.lastUpdatedDate).toLocaleString() : '-') + '</small></td>' +
-      '<td class="text-muted small">' + (ds.description || '-') + '</td>' +
-      '<td><a href="/workspaces/' + workspace.id + '/datasets/' + ds.id + '" class="btn btn-sm btn-outline-success"><i class="bi bi-search"></i></a></td>' +
-      '</tr>'
-    ).join('') +
-    '</tbody></table></div>'}
+  <div class="tab-pane fade" id="tab-datasets" role="tabpanel">
+    <% if (!datasets.length) { %>
+      <p class="text-muted">No semantic models in this workspace.</p>
+    <% } else { %>
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span>Semantic Models</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter semantic models..." oninput="filterTable(this, 'datasets-table')">
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover table-sm mb-0" id="datasets-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Creator</th>
+                <th>Last Updated</th>
+                <th>Description</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% datasets.forEach(function(dataset) { var creator = dataset.creatorPrincipal && (dataset.creatorPrincipal.displayName || (dataset.creatorPrincipal.userDetails && dataset.creatorPrincipal.userDetails.userPrincipalName)) || '-'; %>
+                <tr data-filter="<%= [dataset.name || '', creator, dataset.description || '', dataset.type || ''].join(' ').toLowerCase() %>">
+                  <td><i class="bi bi-database text-success me-1"></i><strong><%= dataset.name || 'Unnamed' %></strong></td>
+                  <td><%= creator %></td>
+                  <td><small><%= dataset.lastUpdatedDate ? new Date(dataset.lastUpdatedDate).toLocaleString() : '-' %></small></td>
+                  <td class="text-muted small"><%= dataset.description || '-' %></td>
+                  <td><a href="/workspaces/<%= workspace.id %>/datasets/<%= dataset.id %>" class="btn btn-sm btn-outline-success"><i class="bi bi-search"></i></a></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    <% } %>
   </div>
 
-  <!-- Dashboards Tab -->
-  <div class="tab-pane fade" id="tab-dashboards">
-    ${dashboards.length === 0 ? '<p class="text-muted">No dashboards in this workspace.</p>' :
-    '<div class="table-responsive"><table class="table table-hover table-sm">' +
-    '<thead><tr><th>Name</th><th>Creator</th><th>Last Updated</th><th>Tiles</th></tr></thead><tbody>' +
-    dashboards.map(d =>
-      '<tr>' +
-      '<td><i class="bi bi-grid-1x2 text-info me-1"></i><strong>' + (d.name || d.displayName || 'Unnamed') + '</strong></td>' +
-      '<td>' + (d.creatorPrincipal ? d.creatorPrincipal.displayName : '-') + '</td>' +
-      '<td><small>' + (d.lastUpdatedDate ? new Date(d.lastUpdatedDate).toLocaleString() : '-') + '</small></td>' +
-      '<td><a href="/workspaces/' + workspace.id + '/dashboards/' + d.id + '" class="btn btn-sm btn-outline-info"><i class="bi bi-search"></i></a></td>' +
-      '</tr>'
-    ).join('') +
-    '</tbody></table></div>'}
+  <div class="tab-pane fade" id="tab-dashboards" role="tabpanel">
+    <% if (!dashboards.length) { %>
+      <p class="text-muted">No dashboards in this workspace.</p>
+    <% } else { %>
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span>Dashboards</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter dashboards..." oninput="filterTable(this, 'dashboards-table')">
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover table-sm mb-0" id="dashboards-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Creator</th>
+                <th>Last Updated</th>
+                <th>Tiles</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% dashboards.forEach(function(dashboard) { var creator = dashboard.creatorPrincipal && (dashboard.creatorPrincipal.displayName || (dashboard.creatorPrincipal.userDetails && dashboard.creatorPrincipal.userDetails.userPrincipalName)) || '-'; %>
+                <tr data-filter="<%= [dashboard.name || dashboard.displayName || '', creator, dashboard.type || 'Dashboard'].join(' ').toLowerCase() %>">
+                  <td><i class="bi bi-grid-1x2 text-info me-1"></i><strong><%= dashboard.name || dashboard.displayName || 'Unnamed' %></strong></td>
+                  <td><%= creator %></td>
+                  <td><small><%= dashboard.lastUpdatedDate ? new Date(dashboard.lastUpdatedDate).toLocaleString() : '-' %></small></td>
+                  <td><a href="/workspaces/<%= workspace.id %>/dashboards/<%= dashboard.id %>" class="btn btn-sm btn-outline-info"><i class="bi bi-search"></i></a></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    <% } %>
   </div>
 
-  <!-- Fabric Items Tab -->
-  <div class="tab-pane fade" id="tab-fabric">
-    ${[
-      { label: 'Dataflows', items: dataflows, icon: 'diagram-3', color: 'warning' },
-      { label: 'Lakehouses', items: lakehouses, icon: 'box', color: 'dark' },
-      { label: 'Notebooks', items: notebooks, icon: 'journal-code', color: 'dark' },
-      { label: 'Data Pipelines', items: pipelines, icon: 'arrow-left-right', color: 'dark' },
-      { label: 'Warehouses', items: warehouses, icon: 'building', color: 'dark' },
-      { label: 'Other', items: others, icon: 'question-circle', color: 'secondary' },
-    ].filter(g => g.items.length > 0).map(g =>
-      '<h6 class="mt-3"><i class="bi bi-' + g.icon + ' me-1"></i>' + g.label + ' (' + g.items.length + ')</h6>' +
-      '<div class="table-responsive"><table class="table table-hover table-sm">' +
-      '<thead><tr><th>Name</th><th>Type</th><th>Creator</th><th>Last Updated</th></tr></thead><tbody>' +
-      g.items.map(item =>
-        '<tr>' +
-        '<td><strong>' + (item.name || 'Unnamed') + '</strong></td>' +
-        '<td><span class="badge bg-' + g.color + '">' + (item.type || '-') + '</span></td>' +
-        '<td>' + (item.creatorPrincipal ? item.creatorPrincipal.displayName : '-') + '</td>' +
-        '<td><small>' + (item.lastUpdatedDate ? new Date(item.lastUpdatedDate).toLocaleString() : '-') + '</small></td>' +
-        '</tr>'
-      ).join('') +
-      '</tbody></table></div>'
-    ).join('') || '<p class="text-muted">No Fabric-specific items in this workspace.</p>'}
-  </div>
+  <% if (hasFabricItems) { %>
+    <div class="tab-pane fade" id="tab-fabric" role="tabpanel">
+      <% [
+        { key: 'dataflows', label: 'Dataflows', icon: 'diagram-3', items: dataflows },
+        { key: 'lakehouses', label: 'Lakehouses', icon: 'boxes', items: lakehouses },
+        { key: 'notebooks', label: 'Notebooks', icon: 'journal-code', items: notebooks },
+        { key: 'pipelines', label: 'Data Pipelines', icon: 'arrow-left-right', items: pipelines },
+        { key: 'warehouses', label: 'Warehouses', icon: 'building', items: warehouses },
+        { key: 'others', label: 'Other', icon: 'question-circle', items: others }
+      ].forEach(function(group) { %>
+        <% if (group.items.length) { %>
+          <div class="card mb-3">
+            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <span><i class="bi bi-<%= group.icon %> me-1"></i><%= group.label %> (<%= group.items.length %>)</span>
+              <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter <%= group.label.toLowerCase() %>..." oninput="filterTable(this, '<%= group.key %>-table')">
+            </div>
+            <div class="table-responsive">
+              <table class="table table-hover table-sm mb-0" id="<%= group.key %>-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Creator</th>
+                    <th>Last Updated</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <% group.items.forEach(function(item) { var creator = item.creatorPrincipal && (item.creatorPrincipal.displayName || (item.creatorPrincipal.userDetails && item.creatorPrincipal.userDetails.userPrincipalName)) || '-'; %>
+                    <tr data-filter="<%= [item.name || '', item.type || '', creator, item.description || ''].join(' ').toLowerCase() %>">
+                      <td><strong><%= item.name || 'Unnamed' %></strong></td>
+                      <td><span class="badge item-type-badge" data-type="<%= item.type || '' %>"><%= item.type || '-' %></span></td>
+                      <td><%= creator %></td>
+                      <td><small><%= item.lastUpdatedDate ? new Date(item.lastUpdatedDate).toLocaleString() : '-' %></small></td>
+                    </tr>
+                  <% }) %>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        <% } %>
+      <% }) %>
+    </div>
+  <% } %>
 
-  <!-- Users Tab -->
-  <div class="tab-pane fade" id="tab-users">
-    ${users.length === 0 ? '<p class="text-muted">No users found for this workspace.</p>' :
-    '<div class="table-responsive"><table class="table table-hover table-sm">' +
-    '<thead><tr><th>Name</th><th>Email</th><th>Type</th><th>Access</th></tr></thead><tbody>' +
-    users.map(u =>
-      '<tr>' +
-      '<td><i class="bi bi-person me-1"></i>' + (u.displayName || u.identifier || 'Unknown') + '</td>' +
-      '<td>' + (u.emailAddress || u.identifier || '-') + '</td>' +
-      '<td><span class="badge bg-secondary">' + (u.principalType || '-') + '</span></td>' +
-      '<td><span class="badge bg-' +
-        (u.groupUserAccessRight === 'Admin' ? 'danger' :
-         u.groupUserAccessRight === 'Member' ? 'primary' :
-         u.groupUserAccessRight === 'Contributor' ? 'success' : 'secondary') + '">' +
-        (u.groupUserAccessRight || '-') + '</span></td>' +
-      '</tr>'
-    ).join('') +
-    '</tbody></table></div>'}
+  <div class="tab-pane fade" id="tab-users" role="tabpanel">
+    <% if (!users.length) { %>
+      <p class="text-muted">No users found for this workspace.</p>
+    <% } else { %>
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span>Workspace Users</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter users..." oninput="filterTable(this, 'workspace-users-table')">
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover table-sm mb-0" id="workspace-users-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Type</th>
+                <th>Access</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% users.forEach(function(user) { %>
+                <tr data-filter="<%= [user.displayName || user.identifier || '', user.emailAddress || user.identifier || '', user.principalType || '', user.groupUserAccessRight || ''].join(' ').toLowerCase() %>">
+                  <td><i class="bi bi-person me-1"></i><%= user.displayName || user.identifier || 'Unknown' %></td>
+                  <td><%= user.emailAddress || user.identifier || '-' %></td>
+                  <td><span class="badge bg-secondary"><%= user.principalType || '-' %></span></td>
+                  <td>
+                    <span class="badge bg-<%= user.groupUserAccessRight === 'Admin' ? 'danger' : user.groupUserAccessRight === 'Member' ? 'primary' : user.groupUserAccessRight === 'Contributor' ? 'success' : 'secondary' %>"><%= user.groupUserAccessRight || '-' %></span>
+                  </td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    <% } %>
   </div>
 </div>
 
 <script>
 function getTypeBadge(type) {
-  const t = (type || '').toLowerCase();
-  if (t === 'report' || t === 'paginatedreport') return 'primary';
-  if (t === 'semanticmodel' || t === 'dataset') return 'success';
-  if (t === 'dashboard') return 'info';
-  if (t.includes('dataflow')) return 'warning';
-  if (t === 'lakehouse') return 'dark';
-  if (t === 'notebook') return 'dark';
-  if (t === 'datapipeline') return 'dark';
-  return 'secondary';
+  var normalized = (type || '').toLowerCase();
+  if (normalized === 'report' || normalized === 'paginatedreport') return 'primary';
+  if (normalized === 'semanticmodel' || normalized === 'dataset') return 'success';
+  if (normalized === 'dashboard') return 'info';
+  if (normalized.indexOf('dataflow') !== -1 || normalized === 'datagen2') return 'warning';
+  if (normalized === 'lakehouse' || normalized === 'notebook' || normalized === 'datapipeline' || normalized === 'warehouse' || normalized === 'sqldatabase') return 'secondary';
+  return 'dark';
 }
 
-function filterTable(input, tableId) {
-  const filter = input.value.toLowerCase();
-  const rows = document.querySelectorAll('#' + tableId + ' tbody tr');
-  rows.forEach(row => {
-    row.style.display = (row.dataset.filter || '').includes(filter) ? '' : 'none';
-  });
-}
+document.querySelectorAll('.item-type-badge').forEach(function(badge) {
+  badge.classList.add('bg-' + getTypeBadge(badge.getAttribute('data-type')));
+});
 </script>
-` }) %>
+<%- include('../partials/footer') %>

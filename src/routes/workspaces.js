@@ -57,10 +57,32 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const pbi = await getDefaultPBI();
     const workspaceId = req.params.id;
 
-    // Fetch workspace info and all items via Fabric Admin API
+    // Try to use saved analysis data first
+    const runs = await db.getAnalysisRuns();
+    const latestRun = runs.find(r => r.status === 'completed');
+    if (latestRun) {
+      const fullRun = await db.getAnalysisRunById(latestRun.id);
+      try {
+        const results = JSON.parse(fullRun.results_json);
+        const savedWs = (results.workspaces || []).find(w => w.id === workspaceId);
+        if (savedWs) {
+          const categorized = categorizeItems(savedWs.items || []);
+          return res.render('workspaces/detail', {
+            title: savedWs.name || 'Workspace',
+            user: req.user,
+            workspace: savedWs,
+            items: savedWs.items || [],
+            ...categorized,
+            users: savedWs.users || [],
+          });
+        }
+      } catch { /* fall through to live API */ }
+    }
+
+    // Fallback: fetch live from API
+    const pbi = await getDefaultPBI();
     const [workspace, items, users] = await Promise.all([
       pbi.getWorkspaceById(workspaceId),
       pbi.getItemsByWorkspace(workspaceId),

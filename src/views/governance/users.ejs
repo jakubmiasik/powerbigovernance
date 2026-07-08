@@ -1,0 +1,99 @@
+<%- include('../partials/header') %>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-people me-2"></i>User 360</h2>
+    <p class="text-muted mb-0">Unique users across analysis run #<%= run.id %>.</p>
+  </div>
+  <a href="/governance<%= run && run.id ? '?runId=' + run.id : '' %>" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<div class="card">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-person-vcard me-2"></i>Total Users: <%= totalUsers %></span>
+    <input type="text" class="form-control form-control-sm" style="max-width: 320px;" id="usersFilter" placeholder="Filter users..." oninput="filterUsersTable()">
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover table-sm mb-0" id="governance-users-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th>Name</th>
+          <th>UPN / Email</th>
+          <th>Items Count</th>
+          <th>Workspaces Count</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% users.forEach(function(user, index) { var userItems = user.createdItems || user.items || []; var workspacesForUser = user.workspaceAccess || user.workspaces || []; %>
+          <tr class="user-summary-row" data-user-index="<%= index %>" data-filter="<%= [user.name || '', user.upn || '', userItems.length, workspacesForUser.length].join(' ').toLowerCase() %>">
+            <td>
+              <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#user-details-<%= index %>" aria-expanded="false" aria-controls="user-details-<%= index %>">
+                <i class="bi bi-chevron-down"></i>
+              </button>
+            </td>
+            <td><strong><%= user.name || 'Unknown' %></strong></td>
+            <td><%= user.upn || '-' %></td>
+            <td><span class="badge bg-primary"><%= userItems.length %></span></td>
+            <td><span class="badge bg-secondary"><%= workspacesForUser.length %></span></td>
+          </tr>
+          <tr class="user-detail-row collapse bg-body-tertiary" id="user-details-<%= index %>" data-parent-index="<%= index %>">
+            <td colspan="5">
+              <div class="row g-4 p-2">
+                <div class="col-lg-7">
+                  <h6 class="mb-2"><i class="bi bi-boxes me-1"></i>Created Items</h6>
+                  <% if (userItems.length) { %>
+                    <div class="list-group list-group-flush border rounded">
+                      <% userItems.forEach(function(item) { %>
+                        <div class="list-group-item">
+                          <div class="d-flex justify-content-between flex-wrap gap-2">
+                            <div>
+                              <strong><%= item.name || 'Unnamed' %></strong>
+                              <div class="small text-muted"><%= item.workspace || '-' %></div>
+                            </div>
+                            <span class="badge bg-secondary"><%= item.type || '-' %></span>
+                          </div>
+                        </div>
+                      <% }) %>
+                    </div>
+                  <% } else { %>
+                    <p class="text-muted mb-0">No created items recorded for this user.</p>
+                  <% } %>
+                </div>
+                <div class="col-lg-5">
+                  <h6 class="mb-2"><i class="bi bi-shield-lock me-1"></i>Workspace Access</h6>
+                  <% if (workspacesForUser.length) { %>
+                    <div class="list-group list-group-flush border rounded">
+                      <% workspacesForUser.forEach(function(wa) { %>
+                        <div class="list-group-item d-flex justify-content-between align-items-center gap-2">
+                          <span><%= wa.workspace || wa.name || '-' %></span>
+                          <span class="badge bg-<%= wa.role === 'Admin' ? 'danger' : wa.role === 'Member' ? 'primary' : wa.role === 'Contributor' ? 'success' : 'secondary' %>"><%= wa.role || 'Unknown' %></span>
+                        </div>
+                      <% }) %>
+                    </div>
+                  <% } else { %>
+                    <p class="text-muted mb-0">No workspace access information available.</p>
+                  <% } %>
+                </div>
+              </div>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+function filterUsersTable() {
+  var filter = (document.getElementById('usersFilter').value || '').toLowerCase();
+  document.querySelectorAll('#governance-users-table tbody .user-summary-row').forEach(function(row) {
+    var visible = (row.getAttribute('data-filter') || row.textContent || '').toLowerCase().includes(filter);
+    row.style.display = visible ? '' : 'none';
+    var detail = document.querySelector('#governance-users-table tbody .user-detail-row[data-parent-index="' + row.getAttribute('data-user-index') + '"]');
+    if (detail) {
+      detail.style.display = visible ? '' : 'none';
+    }
+  });
+}
+</script>
+<%- include('../partials/footer') %>

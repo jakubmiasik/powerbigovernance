@@ -1,63 +1,59 @@
-<%- include('layout', { body: `
+<%- include('partials/header') %>
 <div class="row">
   <div class="col-lg-10 mx-auto">
     <div class="text-center mb-5">
       <h1 class="display-5 fw-bold">
         <i class="bi bi-bar-chart-line-fill text-primary me-2"></i>Power BI Governance
       </h1>
-      <p class="lead text-muted">Investigate and govern your Power BI tenant &mdash; workspaces, reports, datasets, and more.</p>
+      <p class="lead text-muted">Investigate and govern your Power BI tenant — workspaces, reports, datasets, and more.</p>
     </div>
 
     <div class="row g-4">
-      <div class="col-md-3">
-        <div class="card h-100 border-primary">
-          <div class="card-body text-center">
-            <i class="bi bi-play-circle display-4 text-primary"></i>
-            <h5 class="card-title mt-3">Run Analysis</h5>
-            <p class="card-text text-muted">Scan your entire tenant, save results to database.</p>
-            <a href="/analysis" class="btn btn-primary">
-              <i class="bi bi-arrow-right me-1"></i>Run
-            </a>
+      <div class="col-md-6 col-xl-3">
+        <a href="/analysis" class="text-decoration-none text-reset">
+          <div class="card h-100 border-primary shadow-sm">
+            <div class="card-body text-center">
+              <i class="bi bi-play-circle display-4 text-primary"></i>
+              <h5 class="card-title mt-3">Run Analysis</h5>
+              <p class="card-text text-muted">Scan your tenant and persist governance data for review.</p>
+            </div>
           </div>
-        </div>
+        </a>
       </div>
-      <div class="col-md-3">
-        <div class="card h-100 border-info">
-          <div class="card-body text-center">
-            <i class="bi bi-collection display-4 text-info"></i>
-            <h5 class="card-title mt-3">Workspaces</h5>
-            <p class="card-text text-muted">Browse all workspaces, reports, datasets, dashboards.</p>
-            <a href="/workspaces" class="btn btn-info">
-              <i class="bi bi-arrow-right me-1"></i>Explore
-            </a>
+      <div class="col-md-6 col-xl-3">
+        <a href="/workspaces" class="text-decoration-none text-reset">
+          <div class="card h-100 border-info shadow-sm">
+            <div class="card-body text-center">
+              <i class="bi bi-collection display-4 text-info"></i>
+              <h5 class="card-title mt-3">Workspaces</h5>
+              <p class="card-text text-muted">Explore workspaces, items, dashboards, users, and Fabric assets.</p>
+            </div>
           </div>
-        </div>
+        </a>
       </div>
-      <div class="col-md-3">
-        <div class="card h-100 border-success">
-          <div class="card-body text-center">
-            <i class="bi bi-shield-check display-4 text-success"></i>
-            <h5 class="card-title mt-3">Governance</h5>
-            <p class="card-text text-muted">Overview of tenant health, access, capacity metrics.</p>
-            <a href="/governance" class="btn btn-success">
-              <i class="bi bi-arrow-right me-1"></i>Review
-            </a>
+      <div class="col-md-6 col-xl-3">
+        <a href="/governance" class="text-decoration-none text-reset">
+          <div class="card h-100 border-success shadow-sm">
+            <div class="card-body text-center">
+              <i class="bi bi-shield-check display-4 text-success"></i>
+              <h5 class="card-title mt-3">Governance</h5>
+              <p class="card-text text-muted">Review tenant-wide health, distribution, users, and artifacts.</p>
+            </div>
           </div>
-        </div>
+        </a>
       </div>
-      <div class="col-md-3">
-        <div class="card h-100 border-secondary">
-          <div class="card-body text-center">
-            <i class="bi bi-gear display-4 text-secondary"></i>
-            <h5 class="card-title mt-3">Settings</h5>
-            <p class="card-text text-muted">Configure service principals for Power BI API access.</p>
-            <a href="/settings" class="btn btn-secondary">
-              <i class="bi bi-arrow-right me-1"></i>Configure
-            </a>
+      <div class="col-md-6 col-xl-3">
+        <a href="/settings" class="text-decoration-none text-reset">
+          <div class="card h-100 border-secondary shadow-sm">
+            <div class="card-body text-center">
+              <i class="bi bi-gear display-4 text-secondary"></i>
+              <h5 class="card-title mt-3">Settings</h5>
+              <p class="card-text text-muted">Manage service principals used for Power BI API access.</p>
+            </div>
           </div>
-        </div>
+        </a>
       </div>
     </div>
   </div>
 </div>
-` }) %>
+<%- include('partials/footer') %>

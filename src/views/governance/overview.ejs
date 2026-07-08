@@ -1,173 +1,186 @@
-<%- include('../layout', { body: `
+<%- include('../partials/header') %>
+<%
+  var governanceSummary = governance || {};
+  var runId = run && run.id ? run.id : '';
+  var cards = [
+    { label: 'Workspaces', count: governanceSummary.totalWorkspaces || 0, color: 'primary', icon: 'collection', href: '#workspace-governance-card' },
+    { label: 'Total Items', count: governanceSummary.totalItems || 0, color: 'dark', icon: 'boxes', href: '/governance/artifacts?type=all' + (runId ? '&runId=' + runId : '') },
+    { label: 'Reports', count: governanceSummary.totalReports || 0, color: 'primary', icon: 'file-earmark-bar-graph', href: '/governance/artifacts?type=Report' + (runId ? '&runId=' + runId : '') },
+    { label: 'Semantic Models', count: governanceSummary.totalDatasets || 0, color: 'success', icon: 'database', href: '/governance/artifacts?type=SemanticModel' + (runId ? '&runId=' + runId : '') },
+    { label: 'Dashboards', count: governanceSummary.totalDashboards || 0, color: 'info', icon: 'grid-1x2', href: '/governance/artifacts?type=Dashboard' + (runId ? '&runId=' + runId : '') },
+    { label: 'Dataflows', count: governanceSummary.totalDataflows || 0, color: 'warning', icon: 'diagram-3', href: '/governance/artifacts?type=Dataflow' + (runId ? '&runId=' + runId : '') },
+    { label: 'Lakehouses', count: governanceSummary.totalLakehouses || 0, color: 'secondary', icon: 'boxes', href: '/governance/artifacts?type=Lakehouse' + (runId ? '&runId=' + runId : '') },
+    { label: 'Notebooks', count: governanceSummary.totalNotebooks || 0, color: 'secondary', icon: 'journal-code', href: '/governance/artifacts?type=Notebook' + (runId ? '&runId=' + runId : '') },
+    { label: 'Pipelines', count: governanceSummary.totalPipelines || 0, color: 'secondary', icon: 'arrow-left-right', href: '/governance/artifacts?type=DataPipeline' + (runId ? '&runId=' + runId : '') },
+    { label: 'Warehouses', count: governanceSummary.totalWarehouses || 0, color: 'secondary', icon: 'building', href: '/governance/artifacts?type=Warehouse' + (runId ? '&runId=' + runId : '') },
+    { label: 'Unique Users', count: governanceSummary.totalUsers || 0, color: 'secondary', icon: 'people', href: '/governance/users' + (runId ? '?runId=' + runId : '') }
+  ];
+  var pageWindowStart = Math.max(1, page - 4);
+  var pageWindowEnd = Math.min(totalPages, pageWindowStart + 9);
+  var querySuffix = runId ? '&runId=' + runId : '';
+%>
 <h2><i class="bi bi-shield-check me-2"></i>Governance Overview</h2>
 <p class="text-muted">Tenant-wide Power BI governance metrics from the latest analysis run.</p>
 
-${noData ? `
-<div class="alert alert-warning">
-  <i class="bi bi-exclamation-triangle me-2"></i>
-  No analysis data available. <a href="/analysis">Run an analysis</a> first to see governance metrics.
-</div>
-` : `
-<!-- Summary Cards -->
-<div class="row g-3 mb-4">
-  <div class="col-sm-2">
-    <div class="card text-center bg-primary text-white">
-      <div class="card-body py-2">
-        <div class="display-6 fw-bold">${governance.totalWorkspaces}</div>
-        <div class="small">Workspaces</div>
-      </div>
-    </div>
+<% if (noData) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    No analysis data available. <a href="/analysis">Run an analysis</a> first to see governance metrics.
   </div>
-  <div class="col-sm-2">
-    <div class="card text-center bg-success text-white">
-      <div class="card-body py-2">
-        <div class="display-6 fw-bold">${governance.totalReports}</div>
-        <div class="small">Reports</div>
+<% } else { %>
+  <div class="row g-3 mb-4">
+    <% cards.forEach(function(card) { %>
+      <div class="col-sm-6 col-md-4 col-xl-2">
+        <a href="<%= card.href %>" class="text-decoration-none text-reset">
+          <div class="card text-center h-100 border-<%= card.color %>">
+            <div class="card-body py-3">
+              <div class="text-<%= card.color %> mb-2"><i class="bi bi-<%= card.icon %>"></i></div>
+              <div class="fs-3 fw-bold text-<%= card.color %>"><%= card.count %></div>
+              <div class="small"><%= card.label %></div>
+            </div>
+          </div>
+        </a>
       </div>
-    </div>
+    <% }) %>
   </div>
-  <div class="col-sm-2">
-    <div class="card text-center bg-info text-white">
-      <div class="card-body py-2">
-        <div class="display-6 fw-bold">${governance.totalDatasets}</div>
-        <div class="small">Datasets</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-sm-2">
-    <div class="card text-center bg-warning">
-      <div class="card-body py-2">
-        <div class="display-6 fw-bold">${governance.totalDashboards}</div>
-        <div class="small">Dashboards</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-sm-2">
-    <div class="card text-center bg-secondary text-white">
-      <div class="card-body py-2">
-        <div class="display-6 fw-bold">${governance.totalDataflows}</div>
-        <div class="small">Dataflows</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-sm-2">
-    <div class="card text-center bg-dark text-white">
-      <div class="card-body py-2">
-        <div class="display-6 fw-bold">${governance.totalUsers}</div>
-        <div class="small">Unique Users</div>
-      </div>
-    </div>
-  </div>
-</div>
 
-<!-- Distribution -->
-<div class="row g-4 mb-4">
-  <div class="col-md-4">
-    <div class="card h-100">
-      <div class="card-header"><i class="bi bi-pie-chart me-2"></i>Workspace States</div>
-      <div class="card-body">
-        <table class="table table-sm mb-0">
-          <thead><tr><th>State</th><th>Count</th><th>%</th></tr></thead>
-          <tbody>
-            ${Object.entries(governance.workspacesByState || {}).map(([state, count]) =>
-              '<tr><td><span class="badge bg-' + (state === 'Active' ? 'success' : state === 'Deleted' ? 'danger' : 'warning') + '">' + state + '</span></td>' +
-              '<td>' + count + '</td>' +
-              '<td>' + Math.round(count / governance.totalWorkspaces * 100) + '%</td></tr>'
-            ).join('')}
-          </tbody>
-        </table>
+  <div class="row g-4 mb-4">
+    <div class="col-lg-4">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span><i class="bi bi-pie-chart me-2"></i>Workspace States</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter states..." oninput="filterTable(this, 'governance-states-table')">
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm mb-0" id="governance-states-table">
+            <thead><tr><th>State</th><th>Count</th><th>%</th></tr></thead>
+            <tbody>
+              <% Object.entries(governanceSummary.workspacesByState || {}).forEach(function(entry) { var state = entry[0]; var count = entry[1]; %>
+                <tr data-filter="<%= [state, count].join(' ').toLowerCase() %>">
+                  <td><span class="badge bg-<%= state === 'Active' ? 'success' : state === 'Deleted' ? 'danger' : 'warning' %>"><%= state %></span></td>
+                  <td><%= count %></td>
+                  <td><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-4">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span><i class="bi bi-diagram-2 me-2"></i>Workspace Types</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter types..." oninput="filterTable(this, 'governance-types-table')">
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm mb-0" id="governance-types-table">
+            <thead><tr><th>Type</th><th>Count</th><th>%</th></tr></thead>
+            <tbody>
+              <% Object.entries(governanceSummary.workspacesByType || {}).forEach(function(entry) { var type = entry[0]; var count = entry[1]; %>
+                <tr data-filter="<%= [type, count].join(' ').toLowerCase() %>">
+                  <td><span class="badge bg-secondary"><%= type %></span></td>
+                  <td><%= count %></td>
+                  <td><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-4">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span><i class="bi bi-lightning me-2"></i>Capacity</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter capacity..." oninput="filterTable(this, 'governance-capacity-table')">
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm mb-0" id="governance-capacity-table">
+            <tbody>
+              <tr data-filter="premium dedicated <%= governanceSummary.workspacesOnCapacity || 0 %>"><td>Premium/Dedicated</td><td><strong><%= governanceSummary.workspacesOnCapacity || 0 %></strong></td></tr>
+              <tr data-filter="shared <%= governanceSummary.workspacesOnSharedCapacity || 0 %>"><td>Shared</td><td><strong><%= governanceSummary.workspacesOnSharedCapacity || 0 %></strong></td></tr>
+              <tr data-filter="fabric <%= governanceSummary.hasFabric ? 'yes' : 'no' %>"><td>Fabric</td><td><span class="badge bg-<%= governanceSummary.hasFabric ? 'success' : 'secondary' %>"><%= governanceSummary.hasFabric ? 'Yes' : 'No' %></span></td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
-  <div class="col-md-4">
-    <div class="card h-100">
-      <div class="card-header"><i class="bi bi-diagram-2 me-2"></i>Workspace Types</div>
-      <div class="card-body">
-        <table class="table table-sm mb-0">
-          <thead><tr><th>Type</th><th>Count</th><th>%</th></tr></thead>
-          <tbody>
-            ${Object.entries(governance.workspacesByType || {}).map(([type, count]) =>
-              '<tr><td><span class="badge bg-secondary">' + type + '</span></td>' +
-              '<td>' + count + '</td>' +
-              '<td>' + Math.round(count / governance.totalWorkspaces * 100) + '%</td></tr>'
-            ).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-  <div class="col-md-4">
-    <div class="card h-100">
-      <div class="card-header"><i class="bi bi-lightning me-2"></i>Capacity</div>
-      <div class="card-body">
-        <table class="table table-sm mb-0">
-          <tbody>
-            <tr><td>Premium/Dedicated</td><td><strong>${governance.workspacesOnCapacity}</strong></td></tr>
-            <tr><td>Shared</td><td><strong>${governance.workspacesOnSharedCapacity}</strong></td></tr>
-            <tr><td>Fabric</td><td>${governance.hasFabric ? '<span class="badge bg-success">Yes</span>' : '<span class="badge bg-secondary">No</span>'}</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-</div>
 
-<!-- Workspace List (Paginated) -->
-<div class="card mb-4">
-  <div class="card-header">
-    <i class="bi bi-table me-2"></i>All Workspaces (page ${page} of ${totalPages})
+  <div class="card mb-4" id="workspace-governance-card">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span><i class="bi bi-table me-2"></i>All Workspaces (page <%= page %> of <%= totalPages %>)</span>
+      <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter workspaces..." oninput="filterTable(this, 'governance-workspaces-table')">
+    </div>
+    <div class="table-responsive">
+      <table class="table table-hover table-sm mb-0" id="governance-workspaces-table">
+        <thead>
+          <tr>
+            <th>Workspace</th>
+            <th>State</th>
+            <th>Type</th>
+            <th>Items</th>
+            <th>Reports</th>
+            <th>Models</th>
+            <th>Dashboards</th>
+            <th>Dataflows</th>
+            <th>Lakehouses</th>
+            <th>Notebooks</th>
+            <th>Pipelines</th>
+            <th>Warehouses</th>
+            <th>Users</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <% workspaces.forEach(function(ws) { %>
+            <tr data-filter="<%= [ws.name || '', ws.state || '', ws.type || ''].join(' ').toLowerCase() %>">
+              <td><strong><%= ws.name || 'Unnamed' %></strong></td>
+              <td><span class="badge bg-<%= ws.state === 'Active' ? 'success' : 'warning' %>"><%= ws.state || '-' %></span></td>
+              <td><span class="badge bg-secondary"><%= ws.type || '-' %></span></td>
+              <td><%= ws.totalItems || 0 %></td>
+              <td><%= ws.reportCount || 0 %></td>
+              <td><%= ws.datasetCount || 0 %></td>
+              <td><%= ws.dashboardCount || 0 %></td>
+              <td><%= ws.dataflowCount || 0 %></td>
+              <td><%= ws.lakehouseCount || 0 %></td>
+              <td><%= ws.notebookCount || 0 %></td>
+              <td><%= ws.pipelineCount || 0 %></td>
+              <td><%= ws.warehouseCount || 0 %></td>
+              <td><%= ws.userCount || 0 %></td>
+              <td><a href="/workspaces/<%= ws.id %>" class="btn btn-sm btn-outline-primary">Details</a></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+    <% if (totalPages > 1) { %>
+      <div class="card-footer">
+        <nav>
+          <ul class="pagination pagination-sm mb-0 justify-content-center flex-wrap">
+            <% if (page > 1) { %>
+              <li class="page-item"><a class="page-link" href="/governance?page=<%= page - 1 %>&pageSize=<%= pageSize %><%= querySuffix %>">&laquo; Previous</a></li>
+            <% } else { %>
+              <li class="page-item disabled"><span class="page-link">&laquo; Previous</span></li>
+            <% } %>
+            <% for (var p = pageWindowStart; p <= pageWindowEnd; p += 1) { %>
+              <li class="page-item <%= p === page ? 'active' : '' %>"><a class="page-link" href="/governance?page=<%= p %>&pageSize=<%= pageSize %><%= querySuffix %>"><%= p %></a></li>
+            <% } %>
+            <% if (page < totalPages) { %>
+              <li class="page-item"><a class="page-link" href="/governance?page=<%= page + 1 %>&pageSize=<%= pageSize %><%= querySuffix %>">Next &raquo;</a></li>
+            <% } else { %>
+              <li class="page-item disabled"><span class="page-link">Next &raquo;</span></li>
+            <% } %>
+          </ul>
+        </nav>
+      </div>
+    <% } %>
   </div>
-  <div class="table-responsive">
-    <table class="table table-hover table-sm mb-0">
-      <thead>
-        <tr>
-          <th>Workspace</th>
-          <th>State</th>
-          <th>Type</th>
-          <th>Reports</th>
-          <th>Datasets</th>
-          <th>Dashboards</th>
-          <th>Dataflows</th>
-          <th>Users</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        ${workspaces.map(ws =>
-          '<tr>' +
-          '<td><strong>' + (ws.name || 'Unnamed') + '</strong></td>' +
-          '<td><span class="badge bg-' + (ws.state === 'Active' ? 'success' : 'warning') + '">' + (ws.state || '-') + '</span></td>' +
-          '<td><span class="badge bg-secondary">' + (ws.type || '-') + '</span></td>' +
-          '<td>' + (ws.reportCount || 0) + '</td>' +
-          '<td>' + (ws.datasetCount || 0) + '</td>' +
-          '<td>' + (ws.dashboardCount || 0) + '</td>' +
-          '<td>' + (ws.dataflowCount || 0) + '</td>' +
-          '<td>' + (ws.userCount || 0) + '</td>' +
-          '<td><a href="/workspaces/' + ws.id + '" class="btn btn-sm btn-outline-primary">Details</a></td>' +
-          '</tr>'
-        ).join('')}
-      </tbody>
-    </table>
-  </div>
-  ${totalPages > 1 ? `
-  <div class="card-footer">
-    <nav>
-      <ul class="pagination pagination-sm mb-0 justify-content-center">
-        ${page > 1 ? '<li class="page-item"><a class="page-link" href="/governance?page=' + (page - 1) + '">&laquo; Previous</a></li>' : '<li class="page-item disabled"><span class="page-link">&laquo; Previous</span></li>'}
-        ${Array.from({length: Math.min(totalPages, 10)}, (_, i) => {
-          const p = page <= 5 ? i + 1 : Math.min(page - 5 + i + 1, totalPages);
-          return '<li class="page-item ' + (p === page ? 'active' : '') + '"><a class="page-link" href="/governance?page=' + p + '">' + p + '</a></li>';
-        }).join('')}
-        ${page < totalPages ? '<li class="page-item"><a class="page-link" href="/governance?page=' + (page + 1) + '">Next &raquo;</a></li>' : '<li class="page-item disabled"><span class="page-link">Next &raquo;</span></li>'}
-      </ul>
-    </nav>
-  </div>` : ''}
-</div>
 
-<div class="alert alert-info small">
-  <i class="bi bi-info-circle me-2"></i>
-  Data from analysis run #${run.id} on ${new Date(run.started_at).toLocaleString()}.
-  <a href="/analysis">Run a new analysis</a> to refresh.
-</div>
-`}
-` }) %>
+  <div class="alert alert-info small">
+    <i class="bi bi-info-circle me-2"></i>
+    Data from analysis run #<%= run.id %> on <%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %>. <a href="/analysis">Run a new analysis</a> to refresh.
+  </div>
+<% } %>
+<%- include('../partials/footer') %>

@@ -5,6 +5,14 @@ const { createPowerBIService } = require('../services/powerbiService');
 
 const activeAnalyses = new Map();
 
+function ensureNotCancelled(progress) {
+  if (progress.cancelRequested) {
+    const error = new Error('Analysis cancelled by user.');
+    error.isCancelled = true;
+    throw error;
+  }
+}
+
 router.get('/', async (req, res) => {
   try {
     const [servicePrincipals, runs] = await Promise.all([
@@ -40,6 +48,19 @@ router.post('/run', async (req, res) => {
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
+});
+
+router.post('/cancel/:runId', async (req, res) => {
+  const runId = parseInt(req.params.runId);
+  const progress = activeAnalyses.get(runId);
+  if (!progress || progress.status !== 'running') {
+    return res.json({ success: false, message: 'Analysis is not currently running.' });
+  }
+
+  progress.cancelRequested = true;
+  progress.status = 'cancelling';
+  progress.message = 'Cancellation requested...';
+  res.json({ success: true });
 });
 
 router.get('/progress/:runId', (req, res) => {
@@ -79,43 +100,40 @@ router.post('/delete/:runId', async (req, res) => {
 });
 
 async function runAnalysis(runId, sp) {
-  const progress = { status: 'running', progress: 0, message: 'Starting analysis...', current: 0, total: 0 };
+  const progress = { status: 'running', progress: 0, message: 'Starting analysis...', current: 0, total: 0, cancelRequested: false };
   activeAnalyses.set(runId, progress);
 
   try {
     const pbi = createPowerBIService(sp);
 
-    // Step 1: Get all workspaces via Fabric Admin API
     progress.message = 'Fetching workspaces...';
     const workspaces = await pbi.getWorkspaces();
+    ensureNotCancelled(progress);
     progress.total = workspaces.length;
-    progress.message = `Found ${workspaces.length} workspaces. Fetching all items...`;
+    progress.message = 'Found ' + workspaces.length + ' workspaces. Fetching all items...';
     progress.progress = 10;
 
-    // Step 2: Get ALL items across tenant via Fabric Admin API (single call, paginated)
     progress.message = 'Fetching all items via Fabric Admin API...';
     const allItems = await pbi.getAllItems();
+    ensureNotCancelled(progress);
     progress.progress = 40;
-    progress.message = `Found ${allItems.length} items. Processing...`;
+    progress.message = 'Found ' + allItems.length + ' items. Processing...';
 
-    // Step 3: Get capacities
     const capacities = await pbi.getCapacities().catch(() => []);
+    ensureNotCancelled(progress);
     const fabricSkus = new Set(['F2', 'F4', 'F8', 'F16', 'F32', 'F64', 'F128', 'F256', 'F512', 'F1024', 'F2048', 'FT1']);
-    const hasFabric = capacities.some(c => fabricSkus.has(c.sku));
+    const hasFabric = capacities.some((capacity) => fabricSkus.has(capacity.sku));
 
-    // Step 4: Group items by workspace
     const itemsByWorkspace = new Map();
     const allUsers = new Set();
     const itemTypeCounts = {};
 
     for (const item of allItems) {
-      const wsId = item.workspaceId;
-      if (!itemsByWorkspace.has(wsId)) {
-        itemsByWorkspace.set(wsId, []);
+      const workspaceId = item.workspaceId;
+      if (!itemsByWorkspace.has(workspaceId)) {
+        itemsByWorkspace.set(workspaceId, []);
       }
-      itemsByWorkspace.get(wsId).push(item);
-
-      const t = (item.type || 'Unknown').toLowerCase();
+      itemsByWorkspace.get(workspaceId).push(item);
       itemTypeCounts[item.type || 'Unknown'] = (itemTypeCounts[item.type || 'Unknown'] || 0) + 1;
 
       if (item.creatorPrincipal) {
@@ -124,24 +142,31 @@ async function runAnalysis(runId, sp) {
       }
     }
 
-    // Step 5: Build workspace details
     progress.message = 'Building workspace details...';
     progress.progress = 60;
+    ensureNotCancelled(progress);
 
     const workspaceDetails = [];
-    let totalReports = 0, totalDatasets = 0, totalDashboards = 0, totalDataflows = 0;
-    let totalLakehouses = 0, totalNotebooks = 0, totalPipelines = 0, totalWarehouses = 0;
+    let totalReports = 0;
+    let totalDatasets = 0;
+    let totalDashboards = 0;
+    let totalDataflows = 0;
+    let totalLakehouses = 0;
+    let totalNotebooks = 0;
+    let totalPipelines = 0;
+    let totalWarehouses = 0;
 
     for (const ws of workspaces) {
+      ensureNotCancelled(progress);
       const wsItems = itemsByWorkspace.get(ws.id) || [];
-      const reports = wsItems.filter(i => ['Report', 'PaginatedReport'].includes(i.type));
-      const datasets = wsItems.filter(i => ['SemanticModel', 'Dataset'].includes(i.type));
-      const dashboards = wsItems.filter(i => i.type === 'Dashboard');
-      const dataflows = wsItems.filter(i => (i.type || '').toLowerCase().includes('dataflow'));
-      const lakehouses = wsItems.filter(i => i.type === 'Lakehouse');
-      const notebooks = wsItems.filter(i => i.type === 'Notebook');
-      const pipelines = wsItems.filter(i => i.type === 'DataPipeline');
-      const warehouses = wsItems.filter(i => i.type === 'Warehouse' || i.type === 'SQLDatabase');
+      const reports = wsItems.filter((item) => ['Report', 'PaginatedReport'].includes(item.type));
+      const datasets = wsItems.filter((item) => ['SemanticModel', 'Dataset'].includes(item.type));
+      const dashboards = wsItems.filter((item) => item.type === 'Dashboard');
+      const dataflows = wsItems.filter((item) => (item.type || '').toLowerCase().includes('dataflow') || (item.type || '').toLowerCase() === 'datagen2');
+      const lakehouses = wsItems.filter((item) => item.type === 'Lakehouse');
+      const notebooks = wsItems.filter((item) => item.type === 'Notebook');
+      const pipelines = wsItems.filter((item) => item.type === 'DataPipeline');
+      const warehouses = wsItems.filter((item) => item.type === 'Warehouse' || item.type === 'SQLDatabase');
 
       totalReports += reports.length;
       totalDatasets += datasets.length;
@@ -169,56 +194,53 @@ async function runAnalysis(runId, sp) {
         notebookCount: notebooks.length,
         pipelineCount: pipelines.length,
         warehouseCount: warehouses.length,
-        items: wsItems.map(i => ({
-          id: i.id,
-          name: i.name,
-          type: i.type,
-          state: i.state,
-          lastUpdated: i.lastUpdatedDate,
-          creator: i.creatorPrincipal ? {
-            name: i.creatorPrincipal.displayName,
-            upn: i.creatorPrincipal.userDetails?.userPrincipalName,
-            type: i.creatorPrincipal.type,
+        items: wsItems.map((item) => ({
+          id: item.id,
+          name: item.name,
+          type: item.type,
+          state: item.state,
+          lastUpdated: item.lastUpdatedDate,
+          creator: item.creatorPrincipal ? {
+            name: item.creatorPrincipal.displayName,
+            upn: item.creatorPrincipal.userDetails?.userPrincipalName,
+            type: item.creatorPrincipal.type,
           } : null,
-          description: i.description,
+          description: item.description,
         })),
       });
     }
 
     progress.progress = 80;
-
-    // Step 6: Fetch workspace users in batches
     progress.message = 'Fetching workspace users...';
     const batchSize = 10;
     let usersFetched = 0;
     for (let i = 0; i < workspaces.length; i += batchSize) {
+      ensureNotCancelled(progress);
       const batch = workspaces.slice(i, i + batchSize);
-      const results = await Promise.allSettled(
-        batch.map(ws => pbi.getWorkspaceUsers(ws.id))
-      );
-      for (let j = 0; j < results.length; j++) {
-        if (results[j].status === 'fulfilled') {
-          const users = results[j].value;
-          const wsDetail = workspaceDetails.find(w => w.id === batch[j].id);
+      const userResults = await Promise.allSettled(batch.map((ws) => pbi.getWorkspaceUsers(ws.id)));
+      ensureNotCancelled(progress);
+      for (let j = 0; j < userResults.length; j += 1) {
+        if (userResults[j].status === 'fulfilled') {
+          const users = userResults[j].value;
+          const wsDetail = workspaceDetails.find((workspace) => workspace.id === batch[j].id);
           if (wsDetail) {
             wsDetail.userCount = users.length;
-            wsDetail.users = users.map(u => ({
-              name: u.displayName,
-              email: u.emailAddress,
-              role: u.groupUserAccessRight,
-              type: u.principalType,
+            wsDetail.users = users.map((user) => ({
+              name: user.displayName,
+              email: user.emailAddress,
+              role: user.groupUserAccessRight,
+              type: user.principalType,
             }));
           }
-          users.forEach(u => allUsers.add(u.emailAddress || u.displayName || u.identifier));
+          users.forEach((user) => allUsers.add(user.emailAddress || user.displayName || user.identifier));
         }
       }
       usersFetched = Math.min(i + batchSize, workspaces.length);
       progress.current = usersFetched;
-      progress.progress = 80 + Math.round((usersFetched / workspaces.length) * 20);
-      progress.message = `Fetching users: ${usersFetched} / ${workspaces.length} workspaces...`;
+      progress.progress = 80 + Math.round((usersFetched / Math.max(workspaces.length, 1)) * 20);
+      progress.message = 'Fetching users: ' + usersFetched + ' / ' + workspaces.length + ' workspaces...';
     }
 
-    // Build summary
     const summary = {
       totalWorkspaces: workspaces.length,
       totalItems: allItems.length,
@@ -233,7 +255,7 @@ async function runAnalysis(runId, sp) {
       totalUsers: allUsers.size,
       hasFabric,
       itemTypeCounts,
-      capacities: capacities.map(c => ({ displayName: c.displayName, sku: c.sku, state: c.state, region: c.region })),
+      capacities: capacities.map((capacity) => ({ displayName: capacity.displayName, sku: capacity.sku, state: capacity.state, region: capacity.region })),
       workspacesByState: {},
       workspacesByType: {},
       workspacesOnCapacity: 0,
@@ -246,9 +268,9 @@ async function runAnalysis(runId, sp) {
       summary.workspacesByState[state] = (summary.workspacesByState[state] || 0) + 1;
       summary.workspacesByType[type] = (summary.workspacesByType[type] || 0) + 1;
       if (ws.capacityId && ws.capacityId !== '00000000-0000-0000-0000-000000000000') {
-        summary.workspacesOnCapacity++;
+        summary.workspacesOnCapacity += 1;
       } else {
-        summary.workspacesOnSharedCapacity++;
+        summary.workspacesOnSharedCapacity += 1;
       }
     }
 
@@ -269,16 +291,23 @@ async function runAnalysis(runId, sp) {
     progress.progress = 100;
     progress.message = 'Analysis complete!';
   } catch (err) {
-    progress.status = 'failed';
-    progress.message = `Error: ${err.message}`;
+    const cancelled = !!err.isCancelled;
+    progress.status = cancelled ? 'cancelled' : 'failed';
+    progress.message = cancelled ? 'Analysis cancelled.' : 'Error: ' + err.message;
     try {
       await db.updateAnalysisRun(runId, {
-        status: 'failed',
-        totalWorkspaces: 0, totalReports: 0, totalDatasets: 0,
-        totalDashboards: 0, totalDataflows: 0, totalUsers: 0,
-        resultsJson: JSON.stringify({ error: err.message }),
+        status: cancelled ? 'cancelled' : 'failed',
+        totalWorkspaces: 0,
+        totalReports: 0,
+        totalDatasets: 0,
+        totalDashboards: 0,
+        totalDataflows: 0,
+        totalUsers: 0,
+        resultsJson: JSON.stringify(cancelled ? { cancelled: true } : { error: err.message }),
       });
-    } catch { /* ignore */ }
+    } catch {
+      // ignore
+    }
   }
 
   setTimeout(() => activeAnalyses.delete(runId), 5 * 60 * 1000);

@@ -2,43 +2,155 @@ const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
 
-// Governance now shows saved analysis results
+function normalizeArtifactType(type) {
+  return (type || 'all').trim().toLowerCase();
+}
+
+function matchesArtifactType(item, requestedType) {
+  const normalizedRequest = normalizeArtifactType(requestedType);
+  const normalizedType = (item.type || '').toLowerCase();
+
+  if (normalizedRequest === 'all') return true;
+  if (normalizedRequest === 'report') return normalizedType === 'report' || normalizedType === 'paginatedreport';
+  if (normalizedRequest === 'semanticmodel' || normalizedRequest === 'dataset') return normalizedType === 'semanticmodel' || normalizedType === 'dataset';
+  if (normalizedRequest === 'dashboard') return normalizedType === 'dashboard';
+  if (normalizedRequest === 'dataflow') return normalizedType.includes('dataflow') || normalizedType === 'datagen2';
+  if (normalizedRequest === 'lakehouse') return normalizedType === 'lakehouse';
+  if (normalizedRequest === 'notebook') return normalizedType === 'notebook';
+  if (normalizedRequest === 'datapipeline' || normalizedRequest === 'pipeline') return normalizedType === 'datapipeline';
+  if (normalizedRequest === 'warehouse') return normalizedType === 'warehouse' || normalizedType === 'sqldatabase';
+  if (normalizedRequest === 'other') {
+    return !matchesArtifactType(item, 'report')
+      && !matchesArtifactType(item, 'semanticmodel')
+      && !matchesArtifactType(item, 'dashboard')
+      && !matchesArtifactType(item, 'dataflow')
+      && !matchesArtifactType(item, 'lakehouse')
+      && !matchesArtifactType(item, 'notebook')
+      && !matchesArtifactType(item, 'datapipeline')
+      && !matchesArtifactType(item, 'warehouse');
+  }
+  return normalizedType === normalizedRequest;
+}
+
+function artifactTypeLabel(type) {
+  const normalized = normalizeArtifactType(type);
+  const labels = {
+    all: 'All',
+    report: 'Report',
+    semanticmodel: 'Semantic Model',
+    dataset: 'Semantic Model',
+    dashboard: 'Dashboard',
+    dataflow: 'Dataflow',
+    lakehouse: 'Lakehouse',
+    notebook: 'Notebook',
+    datapipeline: 'Data Pipeline',
+    pipeline: 'Data Pipeline',
+    warehouse: 'Warehouse',
+    other: 'Other',
+  };
+  return labels[normalized] || type || 'All';
+}
+
+async function loadRunWithResults(runId) {
+  const runs = await db.getAnalysisRuns();
+  let selectedRun = null;
+  if (runId) {
+    selectedRun = runs.find((run) => run.id === runId && run.status === 'completed') || null;
+  }
+  if (!selectedRun) {
+    selectedRun = runs.find((run) => run.status === 'completed') || null;
+  }
+  if (!selectedRun) {
+    return { run: null, results: null };
+  }
+
+  const fullRun = await db.getAnalysisRunById(selectedRun.id);
+  let results = null;
+  try {
+    results = fullRun.results_json ? JSON.parse(fullRun.results_json) : null;
+  } catch {
+    results = null;
+  }
+  return { run: fullRun, results };
+}
+
+function buildUser360(workspaces) {
+  const userMap = new Map();
+
+  function ensureUser(key, name, upn) {
+    if (!userMap.has(key)) {
+      userMap.set(key, {
+        name: name || upn || 'Unknown',
+        upn: upn || '',
+        items: [],
+        workspaces: [],
+        workspaceKeys: new Set(),
+      });
+    }
+    return userMap.get(key);
+  }
+
+  for (const workspace of workspaces) {
+    const workspaceName = workspace.name || 'Unnamed Workspace';
+    for (const workspaceUser of workspace.users || []) {
+      const userKey = (workspaceUser.email || workspaceUser.name || workspaceName).toLowerCase();
+      const user = ensureUser(userKey, workspaceUser.name, workspaceUser.email);
+      const workspaceKey = workspaceName + '::' + (workspaceUser.role || '');
+      if (!user.workspaceKeys.has(workspaceKey)) {
+        user.workspaceKeys.add(workspaceKey);
+        user.workspaces.push({ name: workspaceName, role: workspaceUser.role || 'Unknown' });
+      }
+    }
+
+    for (const item of workspace.items || []) {
+      const creatorName = item.creator?.name || item.creator?.upn;
+      const creatorUpn = item.creator?.upn || '';
+      if (!creatorName && !creatorUpn) continue;
+      const userKey = (creatorUpn || creatorName).toLowerCase();
+      const user = ensureUser(userKey, creatorName, creatorUpn);
+      const accessMatch = user.workspaces.find((entry) => entry.name === workspaceName);
+      user.items.push({
+        name: item.name || 'Unnamed',
+        type: item.type || '-',
+        workspace: workspaceName,
+        role: accessMatch ? accessMatch.role : '',
+      });
+    }
+  }
+
+  return Array.from(userMap.values())
+    .map((user) => {
+      delete user.workspaceKeys;
+      user.items.sort((a, b) => (a.workspace || '').localeCompare(b.workspace || '') || (a.name || '').localeCompare(b.name || ''));
+      user.workspaces.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      return user;
+    })
+    .sort((a, b) => (a.name || a.upn || '').localeCompare(b.name || b.upn || ''));
+}
+
 router.get('/', async (req, res) => {
   try {
-    const runs = await db.getAnalysisRuns();
-    const latestRun = runs.find(r => r.status === 'completed');
-    
-    if (!latestRun) {
+    const requestedRunId = req.query.runId ? parseInt(req.query.runId) : null;
+    const { run, results } = await loadRunWithResults(requestedRunId);
+
+    if (!run || !results || !results.summary) {
       return res.render('governance/overview', {
         title: 'Governance Overview',
         user: req.user,
         governance: null,
+        workspaces: [],
+        run: null,
         page: 1,
         pageSize: 50,
+        totalPages: 1,
         noData: true,
       });
     }
 
-    // Load the latest completed run
-    const fullRun = await db.getAnalysisRunById(latestRun.id);
-    let results = null;
-    try { results = JSON.parse(fullRun.results_json); } catch { results = null; }
-
-    if (!results || !results.summary) {
-      return res.render('governance/overview', {
-        title: 'Governance Overview',
-        user: req.user,
-        governance: null,
-        page: 1,
-        pageSize: 50,
-        noData: true,
-      });
-    }
-
-    const page = parseInt(req.query.page) || 1;
-    const pageSize = parseInt(req.query.pageSize) || 50;
+    const page = parseInt(req.query.page, 10) || 1;
+    const pageSize = parseInt(req.query.pageSize, 10) || 50;
     const allWorkspaces = results.workspaces || [];
-    const totalPages = Math.ceil(allWorkspaces.length / pageSize);
+    const totalPages = Math.max(1, Math.ceil(allWorkspaces.length / pageSize));
     const pagedWorkspaces = allWorkspaces.slice((page - 1) * pageSize, page * pageSize);
 
     res.render('governance/overview', {
@@ -46,11 +158,72 @@ router.get('/', async (req, res) => {
       user: req.user,
       governance: results.summary,
       workspaces: pagedWorkspaces,
-      run: fullRun,
+      run,
       page,
       pageSize,
       totalPages,
       noData: false,
+    });
+  } catch (err) {
+    res.render('error', { title: 'Error', user: req.user, message: err.message });
+  }
+});
+
+router.get('/users', async (req, res) => {
+  try {
+    const requestedRunId = req.query.runId ? parseInt(req.query.runId) : null;
+    const { run, results } = await loadRunWithResults(requestedRunId);
+    if (!run || !results) {
+      return res.redirect('/governance');
+    }
+
+    const users = buildUser360(results.workspaces || []);
+    res.render('governance/users', {
+      title: 'Governance Users',
+      user: req.user,
+      users,
+      totalUsers: users.length,
+      run,
+    });
+  } catch (err) {
+    res.render('error', { title: 'Error', user: req.user, message: err.message });
+  }
+});
+
+router.get('/artifacts', async (req, res) => {
+  try {
+    const requestedRunId = req.query.runId ? parseInt(req.query.runId) : null;
+    const requestedType = req.query.type || 'all';
+    const { run, results } = await loadRunWithResults(requestedRunId);
+    if (!run || !results) {
+      return res.redirect('/governance');
+    }
+
+    const artifacts = [];
+    for (const workspace of results.workspaces || []) {
+      for (const item of workspace.items || []) {
+        if (!matchesArtifactType(item, requestedType)) continue;
+        artifacts.push({
+          type: item.type || '-',
+          name: item.name || 'Unnamed',
+          workspace: workspace.name || 'Unnamed Workspace',
+          creator: item.creator?.upn || item.creator?.name || '-',
+          lastUpdated: item.lastUpdated,
+          description: item.description,
+          state: item.state,
+        });
+      }
+    }
+
+    artifacts.sort((a, b) => (a.workspace || '').localeCompare(b.workspace || '') || (a.name || '').localeCompare(b.name || ''));
+
+    res.render('governance/artifacts', {
+      title: 'Governance Artifacts',
+      user: req.user,
+      artifactType: artifactTypeLabel(requestedType),
+      artifacts,
+      totalCount: artifacts.length,
+      run,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
