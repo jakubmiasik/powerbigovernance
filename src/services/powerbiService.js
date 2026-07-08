@@ -197,6 +197,24 @@ function createPowerBIService(spConfig) {
     return safeGet(token, PBI_ADMIN + '/workspaces/scanResult/' + scanId);
   }
 
+  // ── Assign workspace to capacity: Fabric Core API ──
+  // POST https://api.fabric.microsoft.com/v1/workspaces/{workspaceId}/assignToCapacity
+  async function assignToCapacity(workspaceId, capacityId) {
+    const token = await getToken();
+    return safePost(token,
+      'https://api.fabric.microsoft.com/v1/workspaces/' + workspaceId + '/assignToCapacity',
+      { capacityId });
+  }
+
+  // ── Unassign workspace from capacity (move to shared/Pro) ──
+  // POST https://api.fabric.microsoft.com/v1/workspaces/{workspaceId}/unassignFromCapacity
+  async function unassignFromCapacity(workspaceId) {
+    const token = await getToken();
+    return safePost(token,
+      'https://api.fabric.microsoft.com/v1/workspaces/' + workspaceId + '/unassignFromCapacity',
+      {});
+  }
+
   return {
     getWorkspaces,
     getWorkspaceById,
@@ -212,6 +230,8 @@ function createPowerBIService(spConfig) {
     scanWorkspaces,
     getScanStatus,
     getScanResult,
+    assignToCapacity,
+    unassignFromCapacity,
   };
 }
 

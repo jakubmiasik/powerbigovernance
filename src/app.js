@@ -109,12 +109,14 @@ const configRoutes = require('./routes/config');
 const workspaceRoutes = require('./routes/workspaces');
 const governanceRoutes = require('./routes/governance');
 const analysisRoutes = require('./routes/analysis');
+const migrateRoutes = require('./routes/migrate');
 
 app.use('/', indexRoutes);
 app.use('/settings', configRoutes);
 app.use('/workspaces', workspaceRoutes);
 app.use('/governance', governanceRoutes);
 app.use('/analysis', analysisRoutes);
+app.use('/migrate', migrateRoutes);
 
 // Error handler
 app.use((err, req, res, _next) => {
