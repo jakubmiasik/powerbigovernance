@@ -2,8 +2,10 @@
 <%
   var governanceSummary = governance || {};
   var runId = run && run.id ? run.id : '';
+  var activeWs = (governanceSummary.workspacesByState || {})['Active'] || 0;
+  var inactiveWs = (governanceSummary.totalWorkspaces || 0) - activeWs;
   var cards = [
-    { label: 'Workspaces', count: governanceSummary.totalWorkspaces || 0, color: 'primary', icon: 'collection', href: '#workspace-governance-card' },
+    { label: 'Workspaces', count: governanceSummary.totalWorkspaces || 0, color: 'primary', icon: 'collection', href: '#workspace-governance-card', sub: activeWs + ' Active' + (inactiveWs > 0 ? ' / ' + inactiveWs + ' Inactive' : '') },
     { label: 'Total Items', count: governanceSummary.totalItems || 0, color: 'dark', icon: 'boxes', href: '/governance/artifacts?type=all' + (runId ? '&runId=' + runId : '') },
     { label: 'Reports', count: governanceSummary.totalReports || 0, color: 'primary', icon: 'file-earmark-bar-graph', href: '/governance/artifacts?type=Report' + (runId ? '&runId=' + runId : '') },
     { label: 'Semantic Models', count: governanceSummary.totalDatasets || 0, color: 'success', icon: 'database', href: '/governance/artifacts?type=SemanticModel' + (runId ? '&runId=' + runId : '') },
@@ -34,7 +36,7 @@
     <% cards.forEach(function(card) { %>
       <div class="col-sm-6 col-md-4 col-xl-2">
         <a href="<%= card.href %>" class="text-decoration-none text-reset">
-          <div class="card text-center h-100 border-<%= card.color %>">
+          <div class="card text-center h-100 border-<%= card.color %> stat-card">
             <div class="card-body py-3">
               <div class="text-<%= card.color %> mb-2"><i class="bi bi-<%= card.icon %>"></i></div>
               <div class="fs-3 fw-bold text-<%= card.color %>"><%= card.count %></div>
@@ -109,25 +111,26 @@
         </div>
         <div class="table-responsive">
           <table class="table table-sm mb-0" id="governance-capacity-table">
-            <thead><tr><th>Name</th><th>SKU</th><th>License</th><th>State</th><th>Region</th></tr></thead>
+           <thead><tr><th>Name</th><th>SKU</th><th>License</th><th>State</th><th>Region</th><th>Admins</th></tr></thead>
             <tbody>
               <% if (governanceSummary.capacities && governanceSummary.capacities.length) { %>
-                <% governanceSummary.capacities.forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared'; var licColor = licType === 'Fabric' ? 'success' : licType === 'Premium' ? 'warning' : licType === 'PPU' ? 'info' : 'secondary'; %>
-                  <tr data-filter="<%= [cap.displayName || '', cap.sku || '', licType, cap.state || '', cap.region || ''].join(' ').toLowerCase() %>">
+               <% governanceSummary.capacities.forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared'; var licColor = licType === 'Fabric' ? 'success' : licType === 'Premium' ? 'warning' : licType === 'PPU' ? 'info' : 'secondary'; var adminNames = (cap.admins || []).map(function(a){ return a.displayName || a.emailAddress || a.principalName || '-'; }).join(', '); %>
+                 <tr data-filter="<%= [cap.displayName || '', cap.sku || '', licType, cap.state || '', cap.region || '', adminNames].join(' ').toLowerCase() %>">
                     <td><strong><%= cap.displayName || 'Unnamed' %></strong></td>
                     <td><code><%= cap.sku || '-' %></code></td>
                     <td><span class="badge bg-<%= licColor %>"><%= licType %></span></td>
                     <td><span class="badge bg-<%= cap.state === 'Active' ? 'success' : 'warning' %>"><%= cap.state || '-' %></span></td>
                     <td class="small"><%= cap.region || '-' %></td>
-                  </tr>
-                <% }) %>
-              <% } else { %>
-                <tr data-filter="no capacities"><td colspan="5" class="text-muted small">No dedicated capacities found.</td></tr>
-              <% } %>
-              <tr data-filter="summary dedicated shared">
-                <td colspan="2" class="small fw-bold">Summary</td>
-                <td colspan="3" class="small">Dedicated: <strong><%= governanceSummary.workspacesOnCapacity || 0 %></strong> | Shared: <strong><%= governanceSummary.workspacesOnSharedCapacity || 0 %></strong></td>
-              </tr>
+                   <td class="small"><%= adminNames || '-' %></td>
+                 </tr>
+               <% }) %>
+             <% } else { %>
+               <tr data-filter="no capacities"><td colspan="6" class="text-muted small">No dedicated capacities found.</td></tr>
+             <% } %>
+             <tr data-filter="summary dedicated shared">
+               <td colspan="3" class="small fw-bold">Summary</td>
+               <td colspan="3" class="small">Dedicated: <strong><%= governanceSummary.workspacesOnCapacity || 0 %></strong> workspaces | Shared: <strong><%= governanceSummary.workspacesOnSharedCapacity || 0 %></strong> workspaces</td>
+             </tr>
             </tbody>
           </table>
         </div>

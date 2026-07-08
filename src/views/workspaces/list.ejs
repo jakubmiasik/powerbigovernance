@@ -12,18 +12,29 @@
     No workspace data available. Select a scan from the top bar or <a href="/analysis">run an analysis</a> first.
   </div>
 <% } else { %>
+  <%
+    var activeCount = (stats.byState || {})['Active'] || 0;
+    var otherStates = [];
+    Object.entries(stats.byState || {}).forEach(function(e) { if (e[0] !== 'Active') otherStates.push(e); });
+  %>
   <div class="row g-3 mb-4">
     <div class="col-sm-3 col-lg-2">
-      <div class="card text-center h-100">
+      <div class="card text-center h-100 stat-card">
         <div class="card-body py-3">
-          <div class="fs-3 fw-bold text-primary"><%= stats.total %></div>
-          <div class="text-muted small">Total</div>
+          <div class="fs-3 fw-bold" style="color: var(--color-primary);"><%= stats.total %></div>
+          <div class="text-muted small">Total Workspaces</div>
+          <div style="font-size: 0.75rem; color: var(--color-text-muted); margin-top: 0.25rem;">
+            <span class="badge bg-success"><%= activeCount %> Active</span>
+            <% otherStates.forEach(function(e) { %>
+              <span class="badge bg-secondary ms-1"><%= e[1] %> <%= e[0] %></span>
+            <% }) %>
+          </div>
         </div>
       </div>
     </div>
     <% Object.entries(stats.byLicense || {}).forEach(function(entry) { var license = entry[0]; var count = entry[1]; var color = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
       <div class="col-sm-3 col-lg-2">
-        <div class="card text-center h-100 border-<%= color %>">
+        <div class="card text-center h-100 stat-card border-<%= color %>">
           <div class="card-body py-3">
             <div class="fs-3 fw-bold text-<%= color %>"><%= count %></div>
             <div class="text-muted small"><%= license %></div>
@@ -37,7 +48,7 @@
     <div class="row g-3 mb-4">
       <% Object.entries(stats.bySku || {}).sort(function(a,b) { return b[1] - a[1]; }).forEach(function(entry) { var sku = entry[0]; var count = entry[1]; %>
         <div class="col-sm-3 col-lg-2">
-          <div class="card text-center h-100">
+          <div class="card text-center h-100 stat-card">
             <div class="card-body py-2">
               <div class="fs-4 fw-bold"><%= count %></div>
               <div class="text-muted small"><code><%= sku %></code></div>
@@ -47,17 +58,6 @@
       <% }) %>
     </div>
   <% } %>
-    <% Object.entries(stats.byState || {}).forEach(function(entry) { var state = entry[0]; var count = entry[1]; %>
-      <div class="col-sm-3 col-lg-2">
-        <div class="card text-center h-100">
-          <div class="card-body py-3">
-            <div class="fs-3 fw-bold"><%= count %></div>
-            <div class="text-muted small"><%= state %></div>
-          </div>
-        </div>
-      </div>
-    <% }) %>
-  </div>
 
   <div class="card">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">

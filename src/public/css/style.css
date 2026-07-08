@@ -1,44 +1,275 @@
+/* ──── Design tokens (matching Fabric Project Sizing) ──── */
+:root {
+  --color-bg: #f7f6f2;
+  --color-surface: #f9f8f5;
+  --color-surface-2: #fbfbf9;
+  --color-surface-offset: #f3f0ec;
+  --color-border: #d4d1ca;
+  --color-divider: #dcd9d5;
+  --color-text: #28251d;
+  --color-text-muted: #6d685f;
+  --color-primary: #01696f;
+  --color-primary-strong: #014a4f;
+  --color-primary-soft: #dbeeed;
+  --color-accent: #e8b923;
+  --color-shadow: rgba(40,37,29,.08);
+  --radius-md: 16px;
+  --radius-lg: 22px;
+  --shadow-sm: 0 18px 40px rgba(40,37,29,.06);
+  --font-body: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
 body {
-  background-color: #f8f9fa;
+  background-color: var(--color-bg);
+  font-family: var(--font-body);
+  color: var(--color-text);
 }
 
+/* ──── Navbar ──── */
+.navbar {
+  background: color-mix(in srgb, var(--color-bg) 90%, transparent) !important;
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--color-divider);
+}
 .navbar-brand {
+  font-weight: 700;
+  color: var(--color-primary) !important;
+}
+.navbar .nav-link {
+  color: var(--color-text) !important;
   font-weight: 600;
+  font-size: 0.9rem;
+}
+.navbar .nav-link:hover,
+.navbar .nav-link.active {
+  color: var(--color-primary) !important;
+}
+.navbar-toggler {
+  border-color: var(--color-border);
+}
+.navbar-toggler-icon {
+  filter: none;
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3e%3cpath stroke='%2301696f' stroke-linecap='round' stroke-miterlimit='10' stroke-width='2' d='M4 7h22M4 15h22M4 23h22'/%3e%3c/svg%3e");
 }
 
+/* ──── Logo icon in navbar ──── */
+.brand-logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--color-primary), var(--color-primary-strong));
+  color: #fff;
+  display: inline-grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 0.85rem;
+  box-shadow: 0 8px 18px rgba(1,105,111,.25);
+  flex-shrink: 0;
+}
+
+/* ──── Run selector bar ──── */
+.run-selector-bar {
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+/* ──── Cards ──── */
 .card {
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-  border-radius: 0.5rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
 }
-
 .card-header {
   font-weight: 600;
-  background-color: rgba(0, 0, 0, 0.03);
+  background: var(--color-surface-offset);
+  border-bottom: 1px solid var(--color-divider);
 }
 
+/* ──── Stat cards (governance / workspace summary) ──── */
+.stat-card {
+  transition: transform .2s ease, box-shadow .2s ease;
+}
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(0,0,0,.08);
+}
+
+/* ──── Tables ──── */
 .table th {
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  color: var(--color-text-muted);
+  border-bottom-color: var(--color-divider);
+}
+.table td {
+  border-bottom-color: var(--color-divider);
+  vertical-align: middle;
 }
 
-.display-6 {
-  font-weight: 700;
-}
-
-.breadcrumb {
-  background: none;
-  padding: 0;
-}
-
-.nav-tabs .nav-link {
-  font-weight: 500;
-}
-
+/* ──── Badges — teal primary ──── */
 .badge {
-  font-weight: 500;
+  font-weight: 600;
+  font-size: 0.75rem;
+}
+.badge.bg-primary {
+  background-color: var(--color-primary) !important;
 }
 
-code {
-  font-size: 0.8rem;
+/* ──── Buttons ──── */
+.btn-primary {
+  background: linear-gradient(135deg, var(--color-primary), var(--color-primary-strong));
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+  border-radius: 12px;
+}
+.btn-primary:hover {
+  background: var(--color-primary-strong);
+  border-color: transparent;
+}
+.btn-outline-primary {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  border-radius: 12px;
+}
+.btn-outline-primary:hover {
+  background-color: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+/* ──── Nav tabs ──── */
+.nav-tabs .nav-link {
+  font-weight: 600;
+  color: var(--color-text-muted);
+  border-radius: 12px 12px 0 0;
+}
+.nav-tabs .nav-link.active {
+  color: var(--color-primary);
+  border-color: var(--color-divider) var(--color-divider) var(--color-surface);
+}
+
+/* ──── Form controls ──── */
+.form-control, .form-select {
+  border-color: var(--color-border);
+  border-radius: 12px;
+}
+.form-control:focus, .form-select:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 15%, transparent);
+}
+
+/* ──── Alerts ──── */
+.alert-warning {
+  background-color: color-mix(in srgb, var(--color-accent) 15%, var(--color-surface));
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+.alert-info {
+  background-color: var(--color-primary-soft);
+  border-color: color-mix(in srgb, var(--color-primary) 30%, transparent);
+  color: var(--color-text);
+}
+
+/* ──── Pagination ──── */
+.page-link {
+  color: var(--color-primary);
+  border-color: var(--color-border);
+  border-radius: 8px !important;
+}
+.page-item.active .page-link {
+  background-color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+/* ──── Footer ──── */
+footer {
+  color: var(--color-text-muted);
+  border-color: var(--color-divider) !important;
+}
+
+/* ──── Misc ──── */
+.breadcrumb { background: none; padding: 0; }
+.display-6 { font-weight: 700; }
+code { font-size: 0.8rem; }
+a { color: var(--color-primary); }
+a:hover { color: var(--color-primary-strong); }
+
+/* ──── Landing page ──── */
+.landing-hero {
+  min-height: 80vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.landing-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 20px;
+  background: linear-gradient(135deg, var(--color-primary), var(--color-primary-strong));
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 2rem;
+  box-shadow: 0 16px 36px rgba(1,105,111,.3);
+  margin: 0 auto var(--radius-md);
+}
+.landing-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 3rem 2.5rem;
+  max-width: 480px;
+  text-align: center;
+}
+.landing-card h1 {
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  color: var(--color-text);
+}
+.landing-card p {
+  color: var(--color-text-muted);
+  margin-bottom: 1.5rem;
+}
+.landing-features {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-bottom: 2rem;
+}
+.landing-features .feature-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.8rem;
+  border-radius: 999px;
+  background: var(--color-surface-offset);
+  color: var(--color-primary);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.btn-sign-in {
+  background: linear-gradient(135deg, var(--color-primary), var(--color-primary-strong));
+  color: #fff;
+  border: none;
+  border-radius: 14px;
+  padding: 0.9rem 2rem;
+  font-weight: 700;
+  font-size: 1rem;
+  box-shadow: 0 8px 24px rgba(1,105,111,.25);
+  transition: transform .2s ease, box-shadow .2s ease;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.btn-sign-in:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 32px rgba(1,105,111,.35);
+  color: #fff;
 }
