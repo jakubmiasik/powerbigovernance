@@ -163,14 +163,20 @@ function createPowerBIService(spConfig) {
     } catch { return []; }
   }
 
-  // ── Capacities: PBI API ──
-  // GET https://api.powerbi.com/v1.0/myorg/capacities
+  // ── Capacities: PBI Admin API ──
+  // GET https://api.powerbi.com/v1.0/myorg/admin/capacities
   async function getCapacities() {
     const token = await getToken();
     try {
-      const data = await safeGet(token, PBI_BASE + '/capacities');
+      const data = await safeGet(token, PBI_ADMIN + '/capacities');
       return data.value || [];
-    } catch { return []; }
+    } catch {
+      // Fallback to non-admin endpoint
+      try {
+        const data = await safeGet(token, PBI_BASE + '/capacities');
+        return data.value || [];
+      } catch { return []; }
+    }
   }
 
   // ── Admin scanner: PBI Admin API ──

@@ -31,6 +31,22 @@
         </div>
       </div>
     <% }) %>
+  </div>
+
+  <% if (Object.keys(stats.bySku || {}).length > 0) { %>
+    <div class="row g-3 mb-4">
+      <% Object.entries(stats.bySku || {}).sort(function(a,b) { return b[1] - a[1]; }).forEach(function(entry) { var sku = entry[0]; var count = entry[1]; %>
+        <div class="col-sm-3 col-lg-2">
+          <div class="card text-center h-100">
+            <div class="card-body py-2">
+              <div class="fs-4 fw-bold"><%= count %></div>
+              <div class="text-muted small"><code><%= sku %></code></div>
+            </div>
+          </div>
+        </div>
+      <% }) %>
+    </div>
+  <% } %>
     <% Object.entries(stats.byState || {}).forEach(function(entry) { var state = entry[0]; var count = entry[1]; %>
       <div class="col-sm-3 col-lg-2">
         <div class="card text-center h-100">
@@ -54,6 +70,7 @@
           <tr>
             <th>Name</th>
             <th>License Type</th>
+            <th>SKU</th>
             <th>State</th>
             <th>Items</th>
             <th>Reports</th>
@@ -62,10 +79,11 @@
           </tr>
         </thead>
         <tbody>
-          <% workspaces.forEach(function(ws) { var wsName = ws.displayName || ws.name || 'Unnamed'; var license = ws.licenseType || 'Pro'; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
-            <tr data-filter="<%= [wsName, license, ws.state || '', ws.type || ''].join(' ').toLowerCase() %>">
+          <% workspaces.forEach(function(ws) { var wsName = ws.displayName || ws.name || 'Unnamed'; var license = ws.licenseType || 'Pro'; var sku = ws.capacitySku || '-'; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
+            <tr data-filter="<%= [wsName, license, sku, ws.state || ''].join(' ').toLowerCase() %>">
               <td><i class="bi bi-folder2 me-2 text-primary"></i><strong><%= wsName %></strong></td>
               <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
+              <td><code><%= sku %></code></td>
               <td>
                 <span class="badge bg-<%= ws.state === 'Active' ? 'success' : ws.state === 'Deleted' ? 'danger' : 'warning' %>"><%= ws.state || 'Unknown' %></span>
               </td>

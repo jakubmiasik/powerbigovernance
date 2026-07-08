@@ -41,12 +41,14 @@ router.get('/', async (req, res) => {
     if (savedWorkspaces) {
       // Use saved data
       const workspaces = savedWorkspaces.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-      const stats = { total: workspaces.length, byState: {}, byLicense: {} };
+      const stats = { total: workspaces.length, byState: {}, byLicense: {}, bySku: {} };
       for (const ws of workspaces) {
         const state = ws.state || 'Active';
         const license = ws.licenseType || 'Pro';
+        const sku = ws.capacitySku || 'Shared (Pro)';
         stats.byState[state] = (stats.byState[state] || 0) + 1;
         stats.byLicense[license] = (stats.byLicense[license] || 0) + 1;
+        stats.bySku[sku] = (stats.bySku[sku] || 0) + 1;
       }
       return res.render('workspaces/list', {
         title: 'Workspaces', user: req.user, workspaces, stats, fromSavedData: true,
@@ -56,7 +58,7 @@ router.get('/', async (req, res) => {
     // No saved data — show message
     res.render('workspaces/list', {
       title: 'Workspaces', user: req.user, workspaces: [],
-      stats: { total: 0, byState: {}, byLicense: {} }, fromSavedData: false,
+      stats: { total: 0, byState: {}, byLicense: {}, bySku: {} }, fromSavedData: false,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });

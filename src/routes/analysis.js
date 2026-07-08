@@ -122,23 +122,28 @@ async function runAnalysis(runId, sp) {
     const capacities = await pbi.getCapacities().catch(() => []);
     ensureNotCancelled(progress);
 
-    // Build capacity lookup: id -> capacity details
+    // Build capacity lookup: id (lowercase) -> capacity details
     const capacityMap = new Map();
     for (const cap of capacities) {
-      capacityMap.set(cap.id, cap);
+      capacityMap.set((cap.id || '').toLowerCase(), cap);
+    }
+
+    // Get capacity SKU for a workspace
+    function getCapacitySku(ws) {
+      if (!ws.capacityId || ws.capacityId === '00000000-0000-0000-0000-000000000000') {
+        return null;
+      }
+      const cap = capacityMap.get((ws.capacityId || '').toLowerCase());
+      return cap ? cap.sku : null;
     }
 
     // License type helper based on capacity SKU
-    function getLicenseType(ws) {
-      if (!ws.capacityId || ws.capacityId === '00000000-0000-0000-0000-000000000000') {
-        return 'Pro';
-      }
-      const cap = capacityMap.get(ws.capacityId);
-      if (!cap) return 'Premium';
-      const sku = (cap.sku || '').toUpperCase();
-      if (sku.startsWith('F') && sku !== 'FREE') return 'Fabric';
-      if (sku === 'PPU') return 'Premium Per User';
-      if (sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A')) return 'Premium';
+    function getLicenseType(sku) {
+      if (!sku) return 'Pro';
+      const s = sku.toUpperCase();
+      if (s.startsWith('F') && s !== 'FREE') return 'Fabric';
+      if (s === 'PPU') return 'Premium Per User';
+      if (s.startsWith('P') || s.startsWith('EM') || s.startsWith('A')) return 'Premium';
       return 'Pro';
     }
 
@@ -200,13 +205,17 @@ async function runAnalysis(runId, sp) {
 
       const wsName = ws.displayName || ws.name || 'Unnamed';
 
+      const wsSku = getCapacitySku(ws);
+      const wsLicenseType = getLicenseType(wsSku);
+
       workspaceDetails.push({
         id: ws.id,
         name: wsName,
         state: ws.state,
         type: ws.type,
         capacityId: ws.capacityId,
-        licenseType: getLicenseType(ws),
+        capacitySku: wsSku,
+        licenseType: wsLicenseType,
         totalItems: wsItems.length,
         reportCount: reports.length,
         datasetCount: datasets.length,
@@ -289,16 +298,20 @@ async function runAnalysis(runId, sp) {
       workspacesByState: {},
       workspacesByType: {},
       workspacesByLicense: {},
+      workspacesBySku: {},
       workspacesOnCapacity: 0,
       workspacesOnSharedCapacity: 0,
     };
 
     for (const ws of workspaces) {
       const state = ws.state || 'Active';
-      const licenseType = getLicenseType(ws);
+      const wsSku = getCapacitySku(ws);
+      const licenseType = getLicenseType(wsSku);
+      const skuLabel = wsSku || 'Shared (Pro)';
       summary.workspacesByState[state] = (summary.workspacesByState[state] || 0) + 1;
       summary.workspacesByType[licenseType] = (summary.workspacesByType[licenseType] || 0) + 1;
       summary.workspacesByLicense[licenseType] = (summary.workspacesByLicense[licenseType] || 0) + 1;
+      summary.workspacesBySku[skuLabel] = (summary.workspacesBySku[skuLabel] || 0) + 1;
       if (ws.capacityId && ws.capacityId !== '00000000-0000-0000-0000-000000000000') {
         summary.workspacesOnCapacity += 1;
       } else {

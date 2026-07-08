@@ -13,7 +13,7 @@
     { label: 'Notebooks', count: governanceSummary.totalNotebooks || 0, color: 'secondary', icon: 'journal-code', href: '/governance/artifacts?type=Notebook' + (runId ? '&runId=' + runId : '') },
     { label: 'Pipelines', count: governanceSummary.totalPipelines || 0, color: 'secondary', icon: 'arrow-left-right', href: '/governance/artifacts?type=DataPipeline' + (runId ? '&runId=' + runId : '') },
     { label: 'Warehouses', count: governanceSummary.totalWarehouses || 0, color: 'secondary', icon: 'building', href: '/governance/artifacts?type=Warehouse' + (runId ? '&runId=' + runId : '') },
-    { label: 'Unique Users', count: governanceSummary.totalUsers || 0, color: 'secondary', icon: 'people', href: '/governance/users' + (runId ? '?runId=' + runId : '') }
+    { label: 'Unique Users', count: governanceSummary.totalUsers || 0, color: 'secondary', icon: 'people', href: '/governance/users' + (runId ? '?runId=' + runId : ''), sub: '(' + (typeof creatorCount !== 'undefined' ? creatorCount : 0) + ' Creators / ' + (typeof explorerCount !== 'undefined' ? explorerCount : 0) + ' Explorers)' }
   ];
   var pageWindowStart = Math.max(1, page - 4);
   var pageWindowEnd = Math.min(totalPages, pageWindowStart + 9);
@@ -39,6 +39,7 @@
               <div class="text-<%= card.color %> mb-2"><i class="bi bi-<%= card.icon %>"></i></div>
               <div class="fs-3 fw-bold text-<%= card.color %>"><%= card.count %></div>
               <div class="small"><%= card.label %></div>
+              <% if (card.sub) { %><div class="text-muted" style="font-size: 0.7rem;"><%= card.sub %></div><% } %>
             </div>
           </div>
         </a>
@@ -77,15 +78,24 @@
         </div>
         <div class="table-responsive">
           <table class="table table-sm mb-0" id="governance-types-table">
-            <thead><tr><th>License</th><th>Count</th><th>%</th></tr></thead>
+            <thead><tr><th>License</th><th>SKU</th><th>Count</th><th>%</th></tr></thead>
             <tbody>
-              <% Object.entries(governanceSummary.workspacesByLicense || governanceSummary.workspacesByType || {}).forEach(function(entry) { var license = entry[0]; var count = entry[1]; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
-                <tr data-filter="<%= [license, count].join(' ').toLowerCase() %>">
-                  <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
+              <% Object.entries(governanceSummary.workspacesBySku || {}).sort(function(a,b){ return b[1]-a[1]; }).forEach(function(entry) { var sku = entry[0]; var count = entry[1]; var s = sku.toUpperCase(); var licType = s.startsWith('F') && s !== 'FREE' && s !== 'SHARED (PRO)' ? 'Fabric' : s === 'PPU' ? 'PPU' : s.startsWith('P') || s.startsWith('EM') || s.startsWith('A') ? 'Premium' : 'Pro'; var licColor = licType === 'Fabric' ? 'success' : licType === 'Premium' ? 'warning' : licType === 'PPU' ? 'info' : 'secondary'; %>
+                <tr data-filter="<%= [sku, licType, count].join(' ').toLowerCase() %>">
+                  <td><span class="badge bg-<%= licColor %>"><%= licType %></span></td>
+                  <td><code><%= sku %></code></td>
                   <td><%= count %></td>
                   <td><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td>
                 </tr>
               <% }) %>
+              <% if (!governanceSummary.workspacesBySku || Object.keys(governanceSummary.workspacesBySku).length === 0) { Object.entries(governanceSummary.workspacesByLicense || governanceSummary.workspacesByType || {}).forEach(function(entry) { var license = entry[0]; var count = entry[1]; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
+                <tr data-filter="<%= [license, count].join(' ').toLowerCase() %>">
+                  <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
+                  <td>-</td>
+                  <td><%= count %></td>
+                  <td><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td>
+                </tr>
+              <% }) } %>
             </tbody>
           </table>
         </div>

@@ -48,6 +48,7 @@
       ID: <code><%= workspace.id %></code>
       <% if (workspace.licenseType) { var licColor = workspace.licenseType === 'Fabric' ? 'success' : workspace.licenseType === 'Premium' ? 'warning' : workspace.licenseType === 'Premium Per User' ? 'info' : 'secondary'; %>
         &bull; License: <span class="badge bg-<%= licColor %>"><%= workspace.licenseType %></span>
+        <% if (workspace.capacitySku) { %> (<code><%= workspace.capacitySku %></code>)<% } %>
       <% } %>
       <% if (workspace.capacityId) { %>
         &bull; Capacity: <code><%= workspace.capacityId %></code>
