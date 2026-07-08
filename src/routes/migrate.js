@@ -56,15 +56,10 @@ router.post('/execute', async (req, res) => {
 
     const sp = await db.getServicePrincipalById(globalRun.sp_id);
     if (!sp) {
-      return res.json({ success: false, message: 'Service principal not found.' });
+      return res.json({ success: false, message: 'Service principal not found (sp_id: ' + globalRun.sp_id + '). Go to Settings to add one.' });
     }
 
-    const spConfig = {
-      tenantId: sp.tenant_id,
-      clientId: sp.client_id,
-      clientSecret: sp.client_secret,
-    };
-    const pbi = createPowerBIService(spConfig);
+    const pbi = createPowerBIService(sp);
 
     // Load workspace names for results
     const results = await loadMigrationData(res);
