@@ -1,5 +1,23 @@
 <%- include('../partials/header') %>
 <%
+  // Helper to get creator display name - handles both raw API (creatorPrincipal) and saved analysis (creator) formats
+  function getCreator(item) {
+    if (item.creatorPrincipal) {
+      return item.creatorPrincipal.displayName || (item.creatorPrincipal.userDetails && item.creatorPrincipal.userDetails.userPrincipalName) || '-';
+    }
+    if (item.creator) {
+      if (typeof item.creator === 'string') return item.creator;
+      return item.creator.name || item.creator.upn || '-';
+    }
+    return '-';
+  }
+  // Helper to get last updated date - handles both raw API and saved analysis formats
+  function getLastUpdated(item) {
+    var d = item.lastUpdatedDate || item.lastUpdated;
+    if (!d) return '-';
+    try { return new Date(d).toLocaleString(); } catch(e) { return d; }
+  }
+
   var summaryCards = [
     { key: 'total', label: 'Total Items', count: items.length, color: 'dark', icon: 'collection', always: true },
     { key: 'reports', label: 'Reports', count: reports.length, color: 'primary', icon: 'file-earmark-bar-graph' },
@@ -89,13 +107,13 @@
               </tr>
             </thead>
             <tbody>
-              <% items.forEach(function(item) { var name = item.name || item.displayName || 'Unnamed'; var creator = item.creatorPrincipal && (item.creatorPrincipal.displayName || (item.creatorPrincipal.userDetails && item.creatorPrincipal.userDetails.userPrincipalName)) || '-'; %>
+              <% items.forEach(function(item) { var name = item.name || item.displayName || 'Unnamed'; var creator = getCreator(item); %>
                 <tr data-filter="<%= [name, item.type || '', item.state || '', creator, item.description || ''].join(' ').toLowerCase() %>">
                   <td><strong><%= name %></strong></td>
                   <td><span class="badge item-type-badge" data-type="<%= item.type || '' %>"><%= item.type || '-' %></span></td>
                   <td><%= item.state || '-' %></td>
                   <td><%= creator %></td>
-                  <td><small><%= item.lastUpdatedDate ? new Date(item.lastUpdatedDate).toLocaleString() : '-' %></small></td>
+                  <td><small><%= getLastUpdated(item) %></small></td>
                 </tr>
               <% }) %>
             </tbody>
@@ -126,12 +144,12 @@
               </tr>
             </thead>
             <tbody>
-              <% reports.forEach(function(report) { var creator = report.creatorPrincipal && (report.creatorPrincipal.displayName || (report.creatorPrincipal.userDetails && report.creatorPrincipal.userDetails.userPrincipalName)) || '-'; %>
+              <% reports.forEach(function(report) { var creator = getCreator(report); %>
                 <tr data-filter="<%= [report.name || '', report.type || '', creator, report.description || ''].join(' ').toLowerCase() %>">
                   <td><i class="bi bi-file-earmark-bar-graph text-primary me-1"></i><strong><%= report.name || 'Unnamed' %></strong></td>
                   <td><span class="badge item-type-badge" data-type="<%= report.type || 'Report' %>"><%= report.type || 'Report' %></span></td>
                   <td><%= creator %></td>
-                  <td><small><%= report.lastUpdatedDate ? new Date(report.lastUpdatedDate).toLocaleString() : '-' %></small></td>
+                  <td><small><%= getLastUpdated(report) %></small></td>
                   <td class="text-muted small"><%= report.description || '-' %></td>
                 </tr>
               <% }) %>
@@ -163,11 +181,11 @@
               </tr>
             </thead>
             <tbody>
-              <% datasets.forEach(function(dataset) { var creator = dataset.creatorPrincipal && (dataset.creatorPrincipal.displayName || (dataset.creatorPrincipal.userDetails && dataset.creatorPrincipal.userDetails.userPrincipalName)) || '-'; %>
+              <% datasets.forEach(function(dataset) { var creator = getCreator(dataset); %>
                 <tr data-filter="<%= [dataset.name || '', creator, dataset.description || '', dataset.type || ''].join(' ').toLowerCase() %>">
                   <td><i class="bi bi-database text-success me-1"></i><strong><%= dataset.name || 'Unnamed' %></strong></td>
                   <td><%= creator %></td>
-                  <td><small><%= dataset.lastUpdatedDate ? new Date(dataset.lastUpdatedDate).toLocaleString() : '-' %></small></td>
+                  <td><small><%= getLastUpdated(dataset) %></small></td>
                   <td class="text-muted small"><%= dataset.description || '-' %></td>
                   <td><a href="/workspaces/<%= workspace.id %>/datasets/<%= dataset.id %>" class="btn btn-sm btn-outline-success"><i class="bi bi-search"></i></a></td>
                 </tr>
@@ -199,11 +217,11 @@
               </tr>
             </thead>
             <tbody>
-              <% dashboards.forEach(function(dashboard) { var creator = dashboard.creatorPrincipal && (dashboard.creatorPrincipal.displayName || (dashboard.creatorPrincipal.userDetails && dashboard.creatorPrincipal.userDetails.userPrincipalName)) || '-'; %>
+              <% dashboards.forEach(function(dashboard) { var creator = getCreator(dashboard); %>
                 <tr data-filter="<%= [dashboard.name || dashboard.displayName || '', creator, dashboard.type || 'Dashboard'].join(' ').toLowerCase() %>">
                   <td><i class="bi bi-grid-1x2 text-info me-1"></i><strong><%= dashboard.name || dashboard.displayName || 'Unnamed' %></strong></td>
                   <td><%= creator %></td>
-                  <td><small><%= dashboard.lastUpdatedDate ? new Date(dashboard.lastUpdatedDate).toLocaleString() : '-' %></small></td>
+                  <td><small><%= getLastUpdated(dashboard) %></small></td>
                   <td><a href="/workspaces/<%= workspace.id %>/dashboards/<%= dashboard.id %>" class="btn btn-sm btn-outline-info"><i class="bi bi-search"></i></a></td>
                 </tr>
               <% }) %>
@@ -241,12 +259,12 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <% group.items.forEach(function(item) { var creator = item.creatorPrincipal && (item.creatorPrincipal.displayName || (item.creatorPrincipal.userDetails && item.creatorPrincipal.userDetails.userPrincipalName)) || '-'; %>
+                  <% group.items.forEach(function(item) { var creator = getCreator(item); %>
                     <tr data-filter="<%= [item.name || '', item.type || '', creator, item.description || ''].join(' ').toLowerCase() %>">
                       <td><strong><%= item.name || 'Unnamed' %></strong></td>
                       <td><span class="badge item-type-badge" data-type="<%= item.type || '' %>"><%= item.type || '-' %></span></td>
                       <td><%= creator %></td>
-                      <td><small><%= item.lastUpdatedDate ? new Date(item.lastUpdatedDate).toLocaleString() : '-' %></small></td>
+                      <td><small><%= getLastUpdated(item) %></small></td>
                     </tr>
                   <% }) %>
                 </tbody>

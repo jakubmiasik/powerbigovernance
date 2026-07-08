@@ -19,8 +19,13 @@
   var pageWindowEnd = Math.min(totalPages, pageWindowStart + 9);
   var querySuffix = runId ? '&runId=' + runId : '';
 %>
-<h2><i class="bi bi-shield-check me-2"></i>Governance Overview</h2>
-<p class="text-muted">Tenant-wide Power BI governance metrics from the latest analysis run.</p>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-3">
+  <div>
+    <h2><i class="bi bi-shield-check me-2"></i>Governance Overview</h2>
+    <p class="text-muted mb-0">Tenant-wide Power BI governance metrics from the latest analysis run.</p>
+  </div>
+  <%- include('../partials/tenant-selector', { selectorType: 'run', items: typeof availableRuns !== 'undefined' ? availableRuns : [], selectedId: run ? run.id : null, targetUrl: '/governance' }) %>
+</div>
 
 <% if (noData) { %>
   <div class="alert alert-warning">

@@ -128,8 +128,14 @@ function buildUser360(workspaces) {
     .sort((a, b) => (a.name || a.upn || '').localeCompare(b.name || b.upn || ''));
 }
 
+async function getAvailableRuns() {
+  const runs = await db.getAnalysisRuns();
+  return runs.filter(r => r.status === 'completed');
+}
+
 router.get('/', async (req, res) => {
   try {
+    const availableRuns = await getAvailableRuns();
     const requestedRunId = req.query.runId ? parseInt(req.query.runId) : null;
     const { run, results } = await loadRunWithResults(requestedRunId);
 
@@ -140,6 +146,7 @@ router.get('/', async (req, res) => {
         governance: null,
         workspaces: [],
         run: null,
+        availableRuns,
         page: 1,
         pageSize: 50,
         totalPages: 1,
@@ -159,6 +166,7 @@ router.get('/', async (req, res) => {
       governance: results.summary,
       workspaces: pagedWorkspaces,
       run,
+      availableRuns,
       page,
       pageSize,
       totalPages,
@@ -171,6 +179,7 @@ router.get('/', async (req, res) => {
 
 router.get('/users', async (req, res) => {
   try {
+    const availableRuns = await getAvailableRuns();
     const requestedRunId = req.query.runId ? parseInt(req.query.runId) : null;
     const { run, results } = await loadRunWithResults(requestedRunId);
     if (!run || !results) {
@@ -184,6 +193,7 @@ router.get('/users', async (req, res) => {
       users,
       totalUsers: users.length,
       run,
+      availableRuns,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -192,6 +202,7 @@ router.get('/users', async (req, res) => {
 
 router.get('/artifacts', async (req, res) => {
   try {
+    const availableRuns = await getAvailableRuns();
     const requestedRunId = req.query.runId ? parseInt(req.query.runId) : null;
     const requestedType = req.query.type || 'all';
     const { run, results } = await loadRunWithResults(requestedRunId);
@@ -224,6 +235,7 @@ router.get('/artifacts', async (req, res) => {
       artifacts,
       totalCount: artifacts.length,
       run,
+      availableRuns,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });

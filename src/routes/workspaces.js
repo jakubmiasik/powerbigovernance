@@ -38,7 +38,21 @@ function categorizeItems(items) {
 
 router.get('/', async (req, res) => {
   try {
-    const pbi = await getDefaultPBI();
+    // Get available tenants/SPs for dropdown
+    const servicePrincipals = await db.getServicePrincipals();
+    const selectedSpId = req.query.spId ? parseInt(req.query.spId) : null;
+
+    // Determine which SP to use
+    let activeSp = null;
+    if (selectedSpId) {
+      activeSp = servicePrincipals.find(sp => sp.id === selectedSpId) || null;
+    }
+    if (!activeSp && servicePrincipals.length > 0) {
+      activeSp = servicePrincipals[0];
+    }
+    if (!activeSp) throw new Error('No service principal configured. Go to Settings to add one.');
+
+    const pbi = createPowerBIService(activeSp);
     const workspaces = await pbi.getWorkspaces();
     workspaces.sort((a, b) => (a.displayName || a.name || '').localeCompare(b.displayName || b.name || ''));
 
@@ -49,7 +63,10 @@ router.get('/', async (req, res) => {
       stats.byState[state] = (stats.byState[state] || 0) + 1;
       stats.byType[type] = (stats.byType[type] || 0) + 1;
     }
-    res.render('workspaces/list', { title: 'Workspaces', user: req.user, workspaces, stats });
+    res.render('workspaces/list', {
+      title: 'Workspaces', user: req.user, workspaces, stats,
+      servicePrincipals, selectedSpId: activeSp.id,
+    });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
   }
