@@ -3,7 +3,6 @@ const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
 
-// In-memory store for active analysis progress
 const activeAnalyses = new Map();
 
 router.get('/', async (req, res) => {
@@ -23,7 +22,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Start analysis
 router.post('/run', async (req, res) => {
   const spId = parseInt(req.body.spId);
   try {
@@ -37,23 +35,19 @@ router.post('/run', async (req, res) => {
       runBy: req.user?.name || 'anonymous',
     });
 
-    // Start analysis in background
     runAnalysis(runId, sp);
-
     res.json({ success: true, runId });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
 });
 
-// Get analysis progress
 router.get('/progress/:runId', (req, res) => {
   const runId = parseInt(req.params.runId);
   const progress = activeAnalyses.get(runId) || { status: 'unknown', progress: 0, message: '' };
   res.json(progress);
 });
 
-// Get analysis results
 router.get('/results/:runId', async (req, res) => {
   try {
     const run = await db.getAnalysisRunById(parseInt(req.params.runId));
@@ -75,7 +69,6 @@ router.get('/results/:runId', async (req, res) => {
   }
 });
 
-// Delete a run
 router.post('/delete/:runId', async (req, res) => {
   try {
     await db.deleteAnalysisRun(parseInt(req.params.runId));
@@ -92,122 +85,154 @@ async function runAnalysis(runId, sp) {
   try {
     const pbi = createPowerBIService(sp);
 
-    // Step 1: Get all workspaces
+    // Step 1: Get all workspaces via Fabric Admin API
     progress.message = 'Fetching workspaces...';
-    const workspaces = await pbi.getWorkspaces({ useAdmin: true }).catch(() => pbi.getWorkspaces());
+    const workspaces = await pbi.getWorkspaces();
     progress.total = workspaces.length;
-    progress.message = `Found ${workspaces.length} workspaces. Scanning...`;
+    progress.message = `Found ${workspaces.length} workspaces. Fetching all items...`;
+    progress.progress = 10;
 
-    // Step 2: Get capacities
+    // Step 2: Get ALL items across tenant via Fabric Admin API (single call, paginated)
+    progress.message = 'Fetching all items via Fabric Admin API...';
+    const allItems = await pbi.getAllItems();
+    progress.progress = 40;
+    progress.message = `Found ${allItems.length} items. Processing...`;
+
+    // Step 3: Get capacities
     const capacities = await pbi.getCapacities().catch(() => []);
-
-    // Check for Fabric capacities
     const fabricSkus = new Set(['F2', 'F4', 'F8', 'F16', 'F32', 'F64', 'F128', 'F256', 'F512', 'F1024', 'F2048', 'FT1']);
     const hasFabric = capacities.some(c => fabricSkus.has(c.sku));
 
-    // Step 3: Scan each workspace
-    const workspaceDetails = [];
+    // Step 4: Group items by workspace
+    const itemsByWorkspace = new Map();
     const allUsers = new Set();
-    let totalReports = 0, totalDatasets = 0, totalDashboards = 0, totalDataflows = 0;
+    const itemTypeCounts = {};
 
-    // Process in batches of 5
-    const batchSize = 5;
+    for (const item of allItems) {
+      const wsId = item.workspaceId;
+      if (!itemsByWorkspace.has(wsId)) {
+        itemsByWorkspace.set(wsId, []);
+      }
+      itemsByWorkspace.get(wsId).push(item);
+
+      const t = (item.type || 'Unknown').toLowerCase();
+      itemTypeCounts[item.type || 'Unknown'] = (itemTypeCounts[item.type || 'Unknown'] || 0) + 1;
+
+      if (item.creatorPrincipal) {
+        const creator = item.creatorPrincipal;
+        allUsers.add(creator.userDetails?.userPrincipalName || creator.displayName || creator.id);
+      }
+    }
+
+    // Step 5: Build workspace details
+    progress.message = 'Building workspace details...';
+    progress.progress = 60;
+
+    const workspaceDetails = [];
+    let totalReports = 0, totalDatasets = 0, totalDashboards = 0, totalDataflows = 0;
+    let totalLakehouses = 0, totalNotebooks = 0, totalPipelines = 0, totalWarehouses = 0;
+
+    for (const ws of workspaces) {
+      const wsItems = itemsByWorkspace.get(ws.id) || [];
+      const reports = wsItems.filter(i => ['Report', 'PaginatedReport'].includes(i.type));
+      const datasets = wsItems.filter(i => ['SemanticModel', 'Dataset'].includes(i.type));
+      const dashboards = wsItems.filter(i => i.type === 'Dashboard');
+      const dataflows = wsItems.filter(i => (i.type || '').toLowerCase().includes('dataflow'));
+      const lakehouses = wsItems.filter(i => i.type === 'Lakehouse');
+      const notebooks = wsItems.filter(i => i.type === 'Notebook');
+      const pipelines = wsItems.filter(i => i.type === 'DataPipeline');
+      const warehouses = wsItems.filter(i => i.type === 'Warehouse' || i.type === 'SQLDatabase');
+
+      totalReports += reports.length;
+      totalDatasets += datasets.length;
+      totalDashboards += dashboards.length;
+      totalDataflows += dataflows.length;
+      totalLakehouses += lakehouses.length;
+      totalNotebooks += notebooks.length;
+      totalPipelines += pipelines.length;
+      totalWarehouses += warehouses.length;
+
+      const wsName = ws.displayName || ws.name || 'Unnamed';
+
+      workspaceDetails.push({
+        id: ws.id,
+        name: wsName,
+        state: ws.state,
+        type: ws.type,
+        capacityId: ws.capacityId,
+        totalItems: wsItems.length,
+        reportCount: reports.length,
+        datasetCount: datasets.length,
+        dashboardCount: dashboards.length,
+        dataflowCount: dataflows.length,
+        lakehouseCount: lakehouses.length,
+        notebookCount: notebooks.length,
+        pipelineCount: pipelines.length,
+        warehouseCount: warehouses.length,
+        items: wsItems.map(i => ({
+          id: i.id,
+          name: i.name,
+          type: i.type,
+          state: i.state,
+          lastUpdated: i.lastUpdatedDate,
+          creator: i.creatorPrincipal ? {
+            name: i.creatorPrincipal.displayName,
+            upn: i.creatorPrincipal.userDetails?.userPrincipalName,
+            type: i.creatorPrincipal.type,
+          } : null,
+          description: i.description,
+        })),
+      });
+    }
+
+    progress.progress = 80;
+
+    // Step 6: Fetch workspace users in batches
+    progress.message = 'Fetching workspace users...';
+    const batchSize = 10;
+    let usersFetched = 0;
     for (let i = 0; i < workspaces.length; i += batchSize) {
       const batch = workspaces.slice(i, i + batchSize);
-      const batchResults = await Promise.allSettled(
-        batch.map(async (ws) => {
-          const [reports, datasets, dashboards, dataflows, users] = await Promise.all([
-            pbi.getReports(ws.id).catch(() => []),
-            pbi.getDatasets(ws.id).catch(() => []),
-            pbi.getDashboards(ws.id).catch(() => []),
-            pbi.getDataflows(ws.id).catch(() => []),
-            pbi.getWorkspaceUsers(ws.id).catch(() => []),
-          ]);
-          return { ws, reports, datasets, dashboards, dataflows, users };
-        })
+      const results = await Promise.allSettled(
+        batch.map(ws => pbi.getWorkspaceUsers(ws.id))
       );
-
-      for (const result of batchResults) {
-        if (result.status === 'fulfilled') {
-          const { ws, reports, datasets, dashboards, dataflows, users } = result.value;
-          totalReports += reports.length;
-          totalDatasets += datasets.length;
-          totalDashboards += dashboards.length;
-          totalDataflows += dataflows.length;
-          users.forEach(u => allUsers.add(u.emailAddress || u.displayName || u.identifier));
-
-          workspaceDetails.push({
-            id: ws.id,
-            name: ws.name,
-            state: ws.state,
-            type: ws.type,
-            capacityId: ws.capacityId,
-            isOnDedicatedCapacity: ws.isOnDedicatedCapacity,
-            reportCount: reports.length,
-            datasetCount: datasets.length,
-            dashboardCount: dashboards.length,
-            dataflowCount: dataflows.length,
-            userCount: users.length,
-            users: users.map(u => ({
+      for (let j = 0; j < results.length; j++) {
+        if (results[j].status === 'fulfilled') {
+          const users = results[j].value;
+          const wsDetail = workspaceDetails.find(w => w.id === batch[j].id);
+          if (wsDetail) {
+            wsDetail.userCount = users.length;
+            wsDetail.users = users.map(u => ({
               name: u.displayName,
               email: u.emailAddress,
               role: u.groupUserAccessRight,
               type: u.principalType,
-            })),
-            reports: reports.map(r => ({ id: r.id, name: r.name, webUrl: r.webUrl })),
-            datasets: datasets.map(d => ({ id: d.id, name: d.name, isRefreshable: d.isRefreshable, configuredBy: d.configuredBy })),
-            dashboards: dashboards.map(d => ({ id: d.id, displayName: d.displayName })),
-            dataflows: dataflows.map(d => ({ objectId: d.objectId, name: d.name })),
-          });
-        } else {
-          const ws = batch[batchResults.indexOf(result)];
-          workspaceDetails.push({
-            id: ws?.id, name: ws?.name, state: ws?.state, type: ws?.type,
-            reportCount: 0, datasetCount: 0, dashboardCount: 0, dataflowCount: 0, userCount: 0,
-            users: [], reports: [], datasets: [], dashboards: [], dataflows: [],
-            error: result.reason?.message,
-          });
-        }
-      }
-
-      progress.current = Math.min(i + batchSize, workspaces.length);
-      progress.progress = Math.round((progress.current / workspaces.length) * 100);
-      progress.message = `Scanned ${progress.current} of ${workspaces.length} workspaces...`;
-    }
-
-    // Step 4: If Fabric, try scanner API for extra metadata
-    let scanResults = null;
-    if (hasFabric && workspaces.length > 0) {
-      progress.message = 'Running Fabric workspace scanner...';
-      try {
-        const wsIds = workspaces.slice(0, 100).map(w => w.id);
-        const scanResponse = await pbi.scanWorkspaces(wsIds);
-        if (scanResponse.id) {
-          // Poll for scan completion
-          for (let attempt = 0; attempt < 30; attempt++) {
-            await new Promise(r => setTimeout(r, 2000));
-            const status = await pbi.getScanStatus(scanResponse.id);
-            if (status.status === 'Succeeded') {
-              scanResults = await pbi.getScanResult(scanResponse.id);
-              break;
-            }
-            if (status.status === 'Failed') break;
+            }));
           }
+          users.forEach(u => allUsers.add(u.emailAddress || u.displayName || u.identifier));
         }
-      } catch {
-        // Scanner API not available, continue without it
       }
+      usersFetched = Math.min(i + batchSize, workspaces.length);
+      progress.current = usersFetched;
+      progress.progress = 80 + Math.round((usersFetched / workspaces.length) * 20);
+      progress.message = `Fetching users: ${usersFetched} / ${workspaces.length} workspaces...`;
     }
 
     // Build summary
     const summary = {
       totalWorkspaces: workspaces.length,
+      totalItems: allItems.length,
       totalReports,
       totalDatasets,
       totalDashboards,
       totalDataflows,
+      totalLakehouses,
+      totalNotebooks,
+      totalPipelines,
+      totalWarehouses,
       totalUsers: allUsers.size,
       hasFabric,
+      itemTypeCounts,
       capacities: capacities.map(c => ({ displayName: c.displayName, sku: c.sku, state: c.state, region: c.region })),
       workspacesByState: {},
       workspacesByType: {},
@@ -227,7 +252,7 @@ async function runAnalysis(runId, sp) {
       }
     }
 
-    const resultsJson = JSON.stringify({ summary, workspaces: workspaceDetails, scanResults });
+    const resultsJson = JSON.stringify({ summary, workspaces: workspaceDetails });
 
     await db.updateAnalysisRun(runId, {
       status: 'completed',
@@ -256,7 +281,6 @@ async function runAnalysis(runId, sp) {
     } catch { /* ignore */ }
   }
 
-  // Clean up progress after 5 minutes
   setTimeout(() => activeAnalyses.delete(runId), 5 * 60 * 1000);
 }
 

@@ -9,20 +9,47 @@ async function getDefaultPBI() {
   return createPowerBIService(sps[0]);
 }
 
+// Categorize Fabric items by type
+function categorizeItems(items) {
+  const reports = [];
+  const datasets = [];
+  const dashboards = [];
+  const dataflows = [];
+  const lakehouses = [];
+  const notebooks = [];
+  const pipelines = [];
+  const warehouses = [];
+  const others = [];
+
+  for (const item of items) {
+    const t = (item.type || '').toLowerCase();
+    if (t === 'report' || t === 'paginatedreport') reports.push(item);
+    else if (t === 'semanticmodel' || t === 'dataset') datasets.push(item);
+    else if (t === 'dashboard') dashboards.push(item);
+    else if (t === 'dataflow' || t === 'dataflowgen2' || t === 'datagen2') dataflows.push(item);
+    else if (t === 'lakehouse') lakehouses.push(item);
+    else if (t === 'notebook') notebooks.push(item);
+    else if (t === 'datapipeline') pipelines.push(item);
+    else if (t === 'warehouse' || t === 'sqldatabase') warehouses.push(item);
+    else others.push(item);
+  }
+  return { reports, datasets, dashboards, dataflows, lakehouses, notebooks, pipelines, warehouses, others };
+}
+
 router.get('/', async (req, res) => {
   try {
     const pbi = await getDefaultPBI();
-    const useAdmin = req.query.mode === 'admin';
-    const workspaces = await pbi.getWorkspaces({ useAdmin });
-    workspaces.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    const workspaces = await pbi.getWorkspaces();
+    workspaces.sort((a, b) => (a.displayName || a.name || '').localeCompare(b.displayName || b.name || ''));
+
     const stats = { total: workspaces.length, byState: {}, byType: {} };
     for (const ws of workspaces) {
-      const state = ws.state || 'Unknown';
-      const type = ws.type || 'Unknown';
+      const state = ws.state || 'Active';
+      const type = ws.type || 'Workspace';
       stats.byState[state] = (stats.byState[state] || 0) + 1;
       stats.byType[type] = (stats.byType[type] || 0) + 1;
     }
-    res.render('workspaces/list', { title: 'Workspaces', user: req.user, workspaces, stats, useAdmin });
+    res.render('workspaces/list', { title: 'Workspaces', user: req.user, workspaces, stats });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
   }
@@ -32,17 +59,25 @@ router.get('/:id', async (req, res) => {
   try {
     const pbi = await getDefaultPBI();
     const workspaceId = req.params.id;
-    const tab = req.query.tab || 'overview';
-    const [reports, datasets, dashboards, dataflows, users] = await Promise.all([
-      pbi.getReports(workspaceId),
-      pbi.getDatasets(workspaceId),
-      pbi.getDashboards(workspaceId),
-      pbi.getDataflows(workspaceId),
+
+    // Fetch workspace info and all items via Fabric Admin API
+    const [workspace, items, users] = await Promise.all([
+      pbi.getWorkspaceById(workspaceId),
+      pbi.getItemsByWorkspace(workspaceId),
       pbi.getWorkspaceUsers(workspaceId),
     ]);
-    let workspace;
-    try { workspace = await pbi.getWorkspaceById(workspaceId); } catch { workspace = { id: workspaceId, name: 'Workspace' }; }
-    res.render('workspaces/detail', { title: workspace.name || 'Workspace Details', user: req.user, workspace, reports, datasets, dashboards, dataflows, users, tab });
+
+    const categorized = categorizeItems(items);
+    const wsName = workspace.displayName || workspace.name || 'Workspace';
+
+    res.render('workspaces/detail', {
+      title: wsName,
+      user: req.user,
+      workspace: { ...workspace, name: wsName },
+      items,
+      ...categorized,
+      users,
+    });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
   }

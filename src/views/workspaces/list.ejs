@@ -2,15 +2,7 @@
 <div class="d-flex justify-content-between align-items-center mb-4">
   <div>
     <h2><i class="bi bi-collection me-2"></i>Workspaces</h2>
-    <p class="text-muted mb-0">Browse Power BI workspaces in your tenant.</p>
-  </div>
-  <div class="btn-group">
-    <a href="/workspaces" class="btn btn-${useAdmin ? 'outline-' : ''}primary btn-sm">
-      <i class="bi bi-person me-1"></i>My Workspaces
-    </a>
-    <a href="/workspaces?mode=admin" class="btn btn-${useAdmin ? '' : 'outline-'}primary btn-sm">
-      <i class="bi bi-people me-1"></i>All (Admin)
-    </a>
+    <p class="text-muted mb-0">Browse all Power BI / Fabric workspaces in your tenant.</p>
   </div>
 </div>
 
@@ -53,15 +45,16 @@
       <tbody id="workspaceTable">
         ${workspaces.length === 0
           ? '<tr><td colspan="5" class="text-center text-muted py-4">No workspaces found.</td></tr>'
-          : workspaces.map(ws =>
-            '<tr class="workspace-row" data-name="' + (ws.name || '').toLowerCase() + '">' +
-            '<td><i class="bi bi-folder2 me-2 text-primary"></i><strong>' + (ws.name || 'Unnamed') + '</strong></td>' +
+          : workspaces.map(ws => {
+            const wsName = ws.displayName || ws.name || 'Unnamed';
+            return '<tr class="workspace-row" data-name="' + wsName.toLowerCase() + '">' +
+            '<td><i class="bi bi-folder2 me-2 text-primary"></i><strong>' + wsName + '</strong></td>' +
             '<td><span class="badge bg-secondary">' + (ws.type || 'Workspace') + '</span></td>' +
             '<td><span class="badge bg-' + (ws.state === 'Active' ? 'success' : ws.state === 'Deleted' ? 'danger' : 'warning') + '">' + (ws.state || 'Unknown') + '</span></td>' +
-            '<td class="small">' + (ws.capacityId && ws.capacityId !== '00000000-0000-0000-0000-000000000000' ? '<i class="bi bi-lightning-fill text-warning me-1"></i>Premium' : '<i class="bi bi-cloud me-1"></i>Shared') + '</td>' +
+            '<td class="small">' + (ws.capacityId && ws.capacityId !== '00000000-0000-0000-0000-000000000000' ? '<i class="bi bi-lightning-fill text-warning me-1"></i>Dedicated' : '<i class="bi bi-cloud me-1"></i>Shared') + '</td>' +
             '<td><a href="/workspaces/' + ws.id + '" class="btn btn-sm btn-outline-primary"><i class="bi bi-eye me-1"></i>Details</a></td>' +
-            '</tr>'
-          ).join('')}
+            '</tr>';
+          }).join('')}
       </tbody>
     </table>
   </div>
