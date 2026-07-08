@@ -27,12 +27,16 @@
       </div>
       <div class="col-md-4" id="capacitySelectGroup">
         <label class="form-label fw-bold small">Target Capacity</label>
-        <select class="form-select" id="targetCapacity">
+        <select class="form-select" id="targetCapacity" onchange="checkCapacityState()">
           <option value="">-- Select capacity --</option>
-          <% capacities.forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared'; %>
-            <option value="<%= cap.id %>"><%= cap.displayName || 'Unnamed' %> (<%= cap.sku %>) - <%= licType %> - <%= cap.region || '' %></option>
+          <% capacities.filter(function(c){ return c.state === 'Active'; }).forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared'; %>
+            <option value="<%= cap.id %>" data-state="Active" data-sku="<%= cap.sku %>"><%= cap.displayName || 'Unnamed' %> (<%= cap.sku %>) - <%= licType %> - <%= cap.region || '' %></option>
+          <% }) %>
+          <% capacities.filter(function(c){ return c.state !== 'Active'; }).forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared'; %>
+            <option value="<%= cap.id %>" data-state="<%= cap.state %>" data-sku="<%= cap.sku %>" style="color:#999;" disabled>[<%= cap.state %>] <%= cap.displayName || 'Unnamed' %> (<%= cap.sku %>) - <%= licType %></option>
           <% }) %>
         </select>
+        <div id="capacityWarning" class="small text-danger mt-1" style="display:none;"></div>
       </div>
       <div class="col-md-3">
         <button class="btn btn-primary w-100" onclick="executeMigration()" id="migrateBtn" disabled>
@@ -203,6 +207,18 @@
 </div>
 
 <script>
+function checkCapacityState() {
+  var sel = document.getElementById('targetCapacity');
+  var opt = sel.selectedOptions[0];
+  var warn = document.getElementById('capacityWarning');
+  if (opt && opt.getAttribute('data-state') && opt.getAttribute('data-state') !== 'Active') {
+    warn.textContent = 'Warning: This capacity is ' + opt.getAttribute('data-state') + '. Migration may fail.';
+    warn.style.display = '';
+  } else {
+    warn.style.display = 'none';
+  }
+}
+
 function toggleCapacitySelect() {
   var action = document.getElementById('migrationAction').value;
   document.getElementById('capacitySelectGroup').style.display = action === 'assign' ? '' : 'none';
@@ -357,11 +373,23 @@ function executeMigration() {
     // Results table
     var tbody = document.getElementById('resultsTableBody');
     tbody.innerHTML = '';
+    var tSku = data.targetSku || '';
     (data.results || []).forEach(function(r) {
       var statusBadge = r.status === 'success'
         ? '<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Success</span>'
         : '<span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>';
       tbody.innerHTML += '<tr><td><strong>' + r.name + '</strong></td><td>' + statusBadge + '</td><td class="small">' + (r.message || '') + '</td></tr>';
+
+      // Update the workspace row in the table to show migrated SKU
+      if (r.status === 'success') {
+        var wsRow = document.querySelector('.ws-row[data-ws-id="' + r.id + '"]');
+        if (wsRow) {
+          var skuCell = wsRow.querySelectorAll('td')[3]; // SKU column (0-indexed: checkbox, name, license, sku)
+          if (skuCell) {
+            skuCell.innerHTML = '<span style="color: #198754; font-weight: 600;"><i class="bi bi-check-circle me-1"></i>migrated to <code style="color: #198754;">' + (tSku || 'Shared') + '</code></span>';
+          }
+        }
+      }
     });
   })
   .catch(function(err) {

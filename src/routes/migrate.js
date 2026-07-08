@@ -61,6 +61,24 @@ router.post('/execute', async (req, res) => {
 
     const pbi = createPowerBIService(sp);
 
+    // For assign action, verify target capacity is active
+    let targetSku = '';
+    if (action === 'assign') {
+      try {
+        const capacities = await pbi.getCapacities();
+        const targetCap = capacities.find(c => c.id.toLowerCase() === targetCapacityId.toLowerCase());
+        if (!targetCap) {
+          return res.json({ success: false, message: 'Target capacity not found. It may have been deleted.' });
+        }
+        if (targetCap.state !== 'Active') {
+          return res.json({ success: false, message: 'Target capacity "' + (targetCap.displayName || targetCapacityId) + '" is ' + targetCap.state + '. Please select an active capacity.' });
+        }
+        targetSku = targetCap.sku || '';
+      } catch (err) {
+        return res.json({ success: false, message: 'Failed to verify target capacity: ' + err.message });
+      }
+    }
+
     // Load workspace names for results
     const results = await loadMigrationData(res);
     const wsMap = new Map();
@@ -91,6 +109,7 @@ router.post('/execute', async (req, res) => {
       success: true,
       results: migrationResults,
       summary: { total: workspaceIds.length, success: successCount, errors: errorCount },
+      targetSku: targetSku,
     });
   } catch (err) {
     res.json({ success: false, message: err.message });
