@@ -3,23 +3,9 @@ const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
 
-async function getDefaultPBI() {
-  const sps = await db.getServicePrincipals();
-  if (sps.length === 0) throw new Error('No service principal configured. Go to Settings to add one.');
-  return createPowerBIService(sps[0]);
-}
-
-// Categorize Fabric items by type
 function categorizeItems(items) {
-  const reports = [];
-  const datasets = [];
-  const dashboards = [];
-  const dataflows = [];
-  const lakehouses = [];
-  const notebooks = [];
-  const pipelines = [];
-  const warehouses = [];
-  const others = [];
+  const reports = [], datasets = [], dashboards = [], dataflows = [];
+  const lakehouses = [], notebooks = [], pipelines = [], warehouses = [], others = [];
 
   for (const item of items) {
     const t = (item.type || '').toLowerCase();
@@ -36,36 +22,41 @@ function categorizeItems(items) {
   return { reports, datasets, dashboards, dataflows, lakehouses, notebooks, pipelines, warehouses, others };
 }
 
+// Load workspace list from saved analysis (global run)
+async function loadWorkspacesFromRun(res) {
+  const globalRun = res.locals.globalRun;
+  if (!globalRun) return null;
+
+  const fullRun = await db.getAnalysisRunById(globalRun.id);
+  try {
+    const results = JSON.parse(fullRun.results_json);
+    return results.workspaces || [];
+  } catch { return null; }
+}
+
 router.get('/', async (req, res) => {
   try {
-    // Get available tenants/SPs for dropdown
-    const servicePrincipals = await db.getServicePrincipals();
-    const selectedSpId = req.query.spId ? parseInt(req.query.spId) : null;
+    const savedWorkspaces = await loadWorkspacesFromRun(res);
 
-    // Determine which SP to use
-    let activeSp = null;
-    if (selectedSpId) {
-      activeSp = servicePrincipals.find(sp => sp.id === selectedSpId) || null;
+    if (savedWorkspaces) {
+      // Use saved data
+      const workspaces = savedWorkspaces.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      const stats = { total: workspaces.length, byState: {}, byLicense: {} };
+      for (const ws of workspaces) {
+        const state = ws.state || 'Active';
+        const license = ws.licenseType || 'Pro';
+        stats.byState[state] = (stats.byState[state] || 0) + 1;
+        stats.byLicense[license] = (stats.byLicense[license] || 0) + 1;
+      }
+      return res.render('workspaces/list', {
+        title: 'Workspaces', user: req.user, workspaces, stats, fromSavedData: true,
+      });
     }
-    if (!activeSp && servicePrincipals.length > 0) {
-      activeSp = servicePrincipals[0];
-    }
-    if (!activeSp) throw new Error('No service principal configured. Go to Settings to add one.');
 
-    const pbi = createPowerBIService(activeSp);
-    const workspaces = await pbi.getWorkspaces();
-    workspaces.sort((a, b) => (a.displayName || a.name || '').localeCompare(b.displayName || b.name || ''));
-
-    const stats = { total: workspaces.length, byState: {}, byType: {} };
-    for (const ws of workspaces) {
-      const state = ws.state || 'Active';
-      const type = ws.type || 'Workspace';
-      stats.byState[state] = (stats.byState[state] || 0) + 1;
-      stats.byType[type] = (stats.byType[type] || 0) + 1;
-    }
+    // No saved data — show message
     res.render('workspaces/list', {
-      title: 'Workspaces', user: req.user, workspaces, stats,
-      servicePrincipals, selectedSpId: activeSp.id,
+      title: 'Workspaces', user: req.user, workspaces: [],
+      stats: { total: 0, byState: {}, byLicense: {} }, fromSavedData: false,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -76,46 +67,35 @@ router.get('/:id', async (req, res) => {
   try {
     const workspaceId = req.params.id;
 
-    // Try to use saved analysis data first
-    const runs = await db.getAnalysisRuns();
-    const latestRun = runs.find(r => r.status === 'completed');
-    if (latestRun) {
-      const fullRun = await db.getAnalysisRunById(latestRun.id);
-      try {
-        const results = JSON.parse(fullRun.results_json);
-        const savedWs = (results.workspaces || []).find(w => w.id === workspaceId);
-        if (savedWs) {
-          const categorized = categorizeItems(savedWs.items || []);
-          return res.render('workspaces/detail', {
-            title: savedWs.name || 'Workspace',
-            user: req.user,
-            workspace: savedWs,
-            items: savedWs.items || [],
-            ...categorized,
-            users: savedWs.users || [],
-          });
-        }
-      } catch { /* fall through to live API */ }
+    // Use saved analysis data from global run
+    const savedWorkspaces = await loadWorkspacesFromRun(res);
+    if (savedWorkspaces) {
+      const savedWs = savedWorkspaces.find(w => w.id === workspaceId);
+      if (savedWs) {
+        const categorized = categorizeItems(savedWs.items || []);
+        return res.render('workspaces/detail', {
+          title: savedWs.name || 'Workspace', user: req.user,
+          workspace: savedWs, items: savedWs.items || [], ...categorized,
+          users: savedWs.users || [],
+        });
+      }
     }
 
-    // Fallback: fetch live from API
-    const pbi = await getDefaultPBI();
+    // Fallback to live API
+    const sps = await db.getServicePrincipals();
+    if (sps.length === 0) throw new Error('No service principal configured.');
+    const pbi = createPowerBIService(sps[0]);
     const [workspace, items, users] = await Promise.all([
       pbi.getWorkspaceById(workspaceId),
       pbi.getItemsByWorkspace(workspaceId),
       pbi.getWorkspaceUsers(workspaceId),
     ]);
-
     const categorized = categorizeItems(items);
     const wsName = workspace.displayName || workspace.name || 'Workspace';
 
     res.render('workspaces/detail', {
-      title: wsName,
-      user: req.user,
-      workspace: { ...workspace, name: wsName },
-      items,
-      ...categorized,
-      users,
+      title: wsName, user: req.user,
+      workspace: { ...workspace, name: wsName }, items, ...categorized, users,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -124,7 +104,9 @@ router.get('/:id', async (req, res) => {
 
 router.get('/:workspaceId/datasets/:datasetId', async (req, res) => {
   try {
-    const pbi = await getDefaultPBI();
+    const sps = await db.getServicePrincipals();
+    if (sps.length === 0) throw new Error('No service principal configured.');
+    const pbi = createPowerBIService(sps[0]);
     const { workspaceId, datasetId } = req.params;
     const [refreshHistory, datasources, parameters] = await Promise.all([
       pbi.getDatasetRefreshHistory(workspaceId, datasetId),
@@ -139,7 +121,9 @@ router.get('/:workspaceId/datasets/:datasetId', async (req, res) => {
 
 router.get('/:workspaceId/dashboards/:dashboardId', async (req, res) => {
   try {
-    const pbi = await getDefaultPBI();
+    const sps = await db.getServicePrincipals();
+    if (sps.length === 0) throw new Error('No service principal configured.');
+    const pbi = createPowerBIService(sps[0]);
     const { workspaceId, dashboardId } = req.params;
     const tiles = await pbi.getDashboardTiles(workspaceId, dashboardId);
     res.render('workspaces/dashboard-detail', { title: 'Dashboard Tiles', user: req.user, workspaceId, dashboardId, tiles });

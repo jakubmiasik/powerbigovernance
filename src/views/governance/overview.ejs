@@ -19,12 +19,9 @@
   var pageWindowEnd = Math.min(totalPages, pageWindowStart + 9);
   var querySuffix = runId ? '&runId=' + runId : '';
 %>
-<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-3">
-  <div>
-    <h2><i class="bi bi-shield-check me-2"></i>Governance Overview</h2>
-    <p class="text-muted mb-0">Tenant-wide Power BI governance metrics from the latest analysis run.</p>
-  </div>
-  <%- include('../partials/tenant-selector', { selectorType: 'run', items: typeof availableRuns !== 'undefined' ? availableRuns : [], selectedId: run ? run.id : null, targetUrl: '/governance' }) %>
+<div class="mb-3">
+  <h2><i class="bi bi-shield-check me-2"></i>Governance Overview</h2>
+  <p class="text-muted mb-0">Tenant-wide Power BI governance metrics.</p>
 </div>
 
 <% if (noData) { %>
@@ -75,16 +72,16 @@
     <div class="col-lg-4">
       <div class="card h-100">
         <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-          <span><i class="bi bi-diagram-2 me-2"></i>Workspace Types</span>
-          <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter types..." oninput="filterTable(this, 'governance-types-table')">
+          <span><i class="bi bi-diagram-2 me-2"></i>License Types</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter..." oninput="filterTable(this, 'governance-types-table')">
         </div>
         <div class="table-responsive">
           <table class="table table-sm mb-0" id="governance-types-table">
-            <thead><tr><th>Type</th><th>Count</th><th>%</th></tr></thead>
+            <thead><tr><th>License</th><th>Count</th><th>%</th></tr></thead>
             <tbody>
-              <% Object.entries(governanceSummary.workspacesByType || {}).forEach(function(entry) { var type = entry[0]; var count = entry[1]; %>
-                <tr data-filter="<%= [type, count].join(' ').toLowerCase() %>">
-                  <td><span class="badge bg-secondary"><%= type %></span></td>
+              <% Object.entries(governanceSummary.workspacesByLicense || governanceSummary.workspacesByType || {}).forEach(function(entry) { var license = entry[0]; var count = entry[1]; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
+                <tr data-filter="<%= [license, count].join(' ').toLowerCase() %>">
+                  <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
                   <td><%= count %></td>
                   <td><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td>
                 </tr>
@@ -97,15 +94,30 @@
     <div class="col-lg-4">
       <div class="card h-100">
         <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-          <span><i class="bi bi-lightning me-2"></i>Capacity</span>
-          <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter capacity..." oninput="filterTable(this, 'governance-capacity-table')">
+          <span><i class="bi bi-lightning me-2"></i>Capacities</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter..." oninput="filterTable(this, 'governance-capacity-table')">
         </div>
         <div class="table-responsive">
           <table class="table table-sm mb-0" id="governance-capacity-table">
+            <thead><tr><th>Name</th><th>SKU</th><th>License</th><th>State</th><th>Region</th></tr></thead>
             <tbody>
-              <tr data-filter="premium dedicated <%= governanceSummary.workspacesOnCapacity || 0 %>"><td>Premium/Dedicated</td><td><strong><%= governanceSummary.workspacesOnCapacity || 0 %></strong></td></tr>
-              <tr data-filter="shared <%= governanceSummary.workspacesOnSharedCapacity || 0 %>"><td>Shared</td><td><strong><%= governanceSummary.workspacesOnSharedCapacity || 0 %></strong></td></tr>
-              <tr data-filter="fabric <%= governanceSummary.hasFabric ? 'yes' : 'no' %>"><td>Fabric</td><td><span class="badge bg-<%= governanceSummary.hasFabric ? 'success' : 'secondary' %>"><%= governanceSummary.hasFabric ? 'Yes' : 'No' %></span></td></tr>
+              <% if (governanceSummary.capacities && governanceSummary.capacities.length) { %>
+                <% governanceSummary.capacities.forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared'; var licColor = licType === 'Fabric' ? 'success' : licType === 'Premium' ? 'warning' : licType === 'PPU' ? 'info' : 'secondary'; %>
+                  <tr data-filter="<%= [cap.displayName || '', cap.sku || '', licType, cap.state || '', cap.region || ''].join(' ').toLowerCase() %>">
+                    <td><strong><%= cap.displayName || 'Unnamed' %></strong></td>
+                    <td><code><%= cap.sku || '-' %></code></td>
+                    <td><span class="badge bg-<%= licColor %>"><%= licType %></span></td>
+                    <td><span class="badge bg-<%= cap.state === 'Active' ? 'success' : 'warning' %>"><%= cap.state || '-' %></span></td>
+                    <td class="small"><%= cap.region || '-' %></td>
+                  </tr>
+                <% }) %>
+              <% } else { %>
+                <tr data-filter="no capacities"><td colspan="5" class="text-muted small">No dedicated capacities found.</td></tr>
+              <% } %>
+              <tr data-filter="summary dedicated shared">
+                <td colspan="2" class="small fw-bold">Summary</td>
+                <td colspan="3" class="small">Dedicated: <strong><%= governanceSummary.workspacesOnCapacity || 0 %></strong> | Shared: <strong><%= governanceSummary.workspacesOnSharedCapacity || 0 %></strong></td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -123,8 +135,8 @@
         <thead>
           <tr>
             <th>Workspace</th>
+            <th>License</th>
             <th>State</th>
-            <th>Type</th>
             <th>Items</th>
             <th>Reports</th>
             <th>Models</th>
@@ -139,11 +151,11 @@
           </tr>
         </thead>
         <tbody>
-          <% workspaces.forEach(function(ws) { %>
-            <tr data-filter="<%= [ws.name || '', ws.state || '', ws.type || ''].join(' ').toLowerCase() %>">
+          <% workspaces.forEach(function(ws) { var license = ws.licenseType || 'Pro'; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
+            <tr data-filter="<%= [ws.name || '', license, ws.state || ''].join(' ').toLowerCase() %>">
               <td><strong><%= ws.name || 'Unnamed' %></strong></td>
+              <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
               <td><span class="badge bg-<%= ws.state === 'Active' ? 'success' : 'warning' %>"><%= ws.state || '-' %></span></td>
-              <td><span class="badge bg-secondary"><%= ws.type || '-' %></span></td>
               <td><%= ws.totalItems || 0 %></td>
               <td><%= ws.reportCount || 0 %></td>
               <td><%= ws.datasetCount || 0 %></td>

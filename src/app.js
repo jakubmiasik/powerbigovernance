@@ -7,6 +7,7 @@ const cookieParser = require('cookie-parser');
 const path = require('path');
 const { getConfig } = require('./config/settings');
 const { parseEasyAuthUser } = require('./middleware/auth');
+const db = require('./services/databaseService');
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
@@ -47,10 +48,42 @@ app.use(flash());
 // Parse EasyAuth user from headers (Azure App Service built-in auth)
 app.use(parseEasyAuthUser);
 
-// Make user available to all views
-app.use((req, res, next) => {
+// Global context: selected run + available runs, loaded once per request
+app.use(async (req, res, next) => {
   res.locals.currentUser = req.user;
+
+  try {
+    const runs = await db.getAnalysisRuns();
+    const completedRuns = runs.filter(r => r.status === 'completed');
+    res.locals.availableRuns = completedRuns;
+
+    // Allow ?runId= query param to switch the selection and persist in session
+    if (req.query.runId) {
+      req.session.selectedRunId = parseInt(req.query.runId);
+    }
+
+    const selectedRunId = req.session.selectedRunId;
+    let selectedRun = null;
+    if (selectedRunId) {
+      selectedRun = completedRuns.find(r => r.id === selectedRunId);
+    }
+    if (!selectedRun && completedRuns.length > 0) {
+      selectedRun = completedRuns[0];
+    }
+    res.locals.globalRun = selectedRun;
+    res.locals.selectedRunId = selectedRun ? selectedRun.id : null;
+  } catch {
+    res.locals.availableRuns = [];
+    res.locals.globalRun = null;
+    res.locals.selectedRunId = null;
+  }
   next();
+});
+
+// API to switch selected run
+app.post('/api/select-run', (req, res) => {
+  req.session.selectedRunId = parseInt(req.body.runId);
+  res.json({ success: true });
 });
 
 // Health check endpoint (Azure App Service)

@@ -2,73 +2,82 @@
 <div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
   <div>
     <h2><i class="bi bi-collection me-2"></i>Workspaces</h2>
-    <p class="text-muted mb-0">Browse all Power BI and Fabric workspaces in your tenant.</p>
+    <p class="text-muted mb-0">Browse all Power BI and Fabric workspaces.</p>
   </div>
-  <%- include('../partials/tenant-selector', { selectorType: 'sp', items: typeof servicePrincipals !== 'undefined' ? servicePrincipals : [], selectedId: typeof selectedSpId !== 'undefined' ? selectedSpId : null, targetUrl: '/workspaces' }) %>
 </div>
 
-<div class="row g-3 mb-4">
-  <div class="col-sm-3">
-    <div class="card text-center h-100">
-      <div class="card-body">
-        <div class="display-6 fw-bold text-primary"><%= stats.total %></div>
-        <div class="text-muted small">Total Workspaces</div>
-      </div>
-    </div>
+<% if (!workspaces.length) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    No workspace data available. Select a scan from the top bar or <a href="/analysis">run an analysis</a> first.
   </div>
-  <% Object.entries(stats.byState || {}).forEach(function(entry) { var state = entry[0]; var count = entry[1]; %>
-    <div class="col-sm-3">
+<% } else { %>
+  <div class="row g-3 mb-4">
+    <div class="col-sm-3 col-lg-2">
       <div class="card text-center h-100">
-        <div class="card-body">
-          <div class="display-6 fw-bold"><%= count %></div>
-          <div class="text-muted small"><%= state %></div>
+        <div class="card-body py-3">
+          <div class="fs-3 fw-bold text-primary"><%= stats.total %></div>
+          <div class="text-muted small">Total</div>
         </div>
       </div>
     </div>
-  <% }) %>
-</div>
+    <% Object.entries(stats.byLicense || {}).forEach(function(entry) { var license = entry[0]; var count = entry[1]; var color = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
+      <div class="col-sm-3 col-lg-2">
+        <div class="card text-center h-100 border-<%= color %>">
+          <div class="card-body py-3">
+            <div class="fs-3 fw-bold text-<%= color %>"><%= count %></div>
+            <div class="text-muted small"><%= license %></div>
+          </div>
+        </div>
+      </div>
+    <% }) %>
+    <% Object.entries(stats.byState || {}).forEach(function(entry) { var state = entry[0]; var count = entry[1]; %>
+      <div class="col-sm-3 col-lg-2">
+        <div class="card text-center h-100">
+          <div class="card-body py-3">
+            <div class="fs-3 fw-bold"><%= count %></div>
+            <div class="text-muted small"><%= state %></div>
+          </div>
+        </div>
+      </div>
+    <% }) %>
+  </div>
 
-<div class="card">
-  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-    <span><i class="bi bi-table me-2"></i>Workspace Inventory</span>
-    <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter workspaces..." oninput="filterTable(this, 'workspace-list-table')">
-  </div>
-  <div class="table-responsive">
-    <table class="table table-hover table-striped mb-0" id="workspace-list-table">
-      <thead class="table-dark">
-        <tr>
-          <th>Name</th>
-          <th>Type</th>
-          <th>State</th>
-          <th>Capacity</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        <% if (!workspaces.length) { %>
-          <tr data-filter="no workspaces">
-            <td colspan="5" class="text-center text-muted py-4">No workspaces found.</td>
+  <div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span><i class="bi bi-table me-2"></i>Workspace Inventory (<%= stats.total %>)</span>
+      <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter workspaces..." oninput="filterTable(this, 'workspace-list-table')">
+    </div>
+    <div class="table-responsive">
+      <table class="table table-hover table-striped mb-0" id="workspace-list-table">
+        <thead class="table-dark">
+          <tr>
+            <th>Name</th>
+            <th>License Type</th>
+            <th>State</th>
+            <th>Items</th>
+            <th>Reports</th>
+            <th>Models</th>
+            <th></th>
           </tr>
-        <% } %>
-        <% workspaces.forEach(function(ws) { var wsName = ws.displayName || ws.name || 'Unnamed'; var isDedicated = ws.capacityId && ws.capacityId !== '00000000-0000-0000-0000-000000000000'; %>
-          <tr data-filter="<%= [wsName, ws.type || 'Workspace', ws.state || 'Unknown', isDedicated ? 'Dedicated' : 'Shared'].join(' ').toLowerCase() %>">
-            <td><i class="bi bi-folder2 me-2 text-primary"></i><strong><%= wsName %></strong></td>
-            <td><span class="badge bg-secondary"><%= ws.type || 'Workspace' %></span></td>
-            <td>
-              <span class="badge bg-<%= ws.state === 'Active' ? 'success' : ws.state === 'Deleted' ? 'danger' : 'warning' %>"><%= ws.state || 'Unknown' %></span>
-            </td>
-            <td class="small">
-              <% if (isDedicated) { %>
-                <i class="bi bi-lightning-fill text-warning me-1"></i>Dedicated
-              <% } else { %>
-                <i class="bi bi-cloud me-1"></i>Shared
-              <% } %>
-            </td>
-            <td><a href="/workspaces/<%= ws.id %>" class="btn btn-sm btn-outline-primary"><i class="bi bi-eye me-1"></i>Details</a></td>
-          </tr>
-        <% }) %>
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          <% workspaces.forEach(function(ws) { var wsName = ws.displayName || ws.name || 'Unnamed'; var license = ws.licenseType || 'Pro'; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
+            <tr data-filter="<%= [wsName, license, ws.state || '', ws.type || ''].join(' ').toLowerCase() %>">
+              <td><i class="bi bi-folder2 me-2 text-primary"></i><strong><%= wsName %></strong></td>
+              <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
+              <td>
+                <span class="badge bg-<%= ws.state === 'Active' ? 'success' : ws.state === 'Deleted' ? 'danger' : 'warning' %>"><%= ws.state || 'Unknown' %></span>
+              </td>
+              <td data-sort-value="<%= ws.totalItems || 0 %>"><%= ws.totalItems || 0 %></td>
+              <td data-sort-value="<%= ws.reportCount || 0 %>"><%= ws.reportCount || 0 %></td>
+              <td data-sort-value="<%= ws.datasetCount || 0 %>"><%= ws.datasetCount || 0 %></td>
+              <td><a href="/workspaces/<%= ws.id %>" class="btn btn-sm btn-outline-primary"><i class="bi bi-eye me-1"></i>Details</a></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
   </div>
-</div>
+<% } %>
 <%- include('../partials/footer') %>

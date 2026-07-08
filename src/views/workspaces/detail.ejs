@@ -46,14 +46,14 @@
     <h2><i class="bi bi-folder2-open me-2"></i><%= workspaceName %></h2>
     <p class="text-muted small mb-0">
       ID: <code><%= workspace.id %></code>
+      <% if (workspace.licenseType) { var licColor = workspace.licenseType === 'Fabric' ? 'success' : workspace.licenseType === 'Premium' ? 'warning' : workspace.licenseType === 'Premium Per User' ? 'info' : 'secondary'; %>
+        &bull; License: <span class="badge bg-<%= licColor %>"><%= workspace.licenseType %></span>
+      <% } %>
       <% if (workspace.capacityId) { %>
         &bull; Capacity: <code><%= workspace.capacityId %></code>
       <% } %>
       <% if (workspace.state) { %>
         &bull; State: <span class="badge bg-<%= workspace.state === 'Active' ? 'success' : 'warning' %>"><%= workspace.state %></span>
-      <% } %>
-      <% if (workspace.type) { %>
-        &bull; Type: <span class="badge bg-secondary"><%= workspace.type %></span>
       <% } %>
     </p>
   </div>

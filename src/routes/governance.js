@@ -35,42 +35,21 @@ function matchesArtifactType(item, requestedType) {
 function artifactTypeLabel(type) {
   const normalized = normalizeArtifactType(type);
   const labels = {
-    all: 'All',
-    report: 'Report',
-    semanticmodel: 'Semantic Model',
-    dataset: 'Semantic Model',
-    dashboard: 'Dashboard',
-    dataflow: 'Dataflow',
-    lakehouse: 'Lakehouse',
-    notebook: 'Notebook',
-    datapipeline: 'Data Pipeline',
-    pipeline: 'Data Pipeline',
-    warehouse: 'Warehouse',
-    other: 'Other',
+    all: 'All', report: 'Report', semanticmodel: 'Semantic Model', dataset: 'Semantic Model',
+    dashboard: 'Dashboard', dataflow: 'Dataflow', lakehouse: 'Lakehouse', notebook: 'Notebook',
+    datapipeline: 'Data Pipeline', pipeline: 'Data Pipeline', warehouse: 'Warehouse', other: 'Other',
   };
   return labels[normalized] || type || 'All';
 }
 
-async function loadRunWithResults(runId) {
-  const runs = await db.getAnalysisRuns();
-  let selectedRun = null;
-  if (runId) {
-    selectedRun = runs.find((run) => run.id === runId && run.status === 'completed') || null;
-  }
-  if (!selectedRun) {
-    selectedRun = runs.find((run) => run.status === 'completed') || null;
-  }
-  if (!selectedRun) {
-    return { run: null, results: null };
-  }
+// Load results for the globally selected run
+async function loadGlobalResults(res) {
+  const globalRun = res.locals.globalRun;
+  if (!globalRun) return { run: null, results: null };
 
-  const fullRun = await db.getAnalysisRunById(selectedRun.id);
+  const fullRun = await db.getAnalysisRunById(globalRun.id);
   let results = null;
-  try {
-    results = fullRun.results_json ? JSON.parse(fullRun.results_json) : null;
-  } catch {
-    results = null;
-  }
+  try { results = fullRun.results_json ? JSON.parse(fullRun.results_json) : null; } catch { results = null; }
   return { run: fullRun, results };
 }
 
@@ -79,13 +58,7 @@ function buildUser360(workspaces) {
 
   function ensureUser(key, name, upn) {
     if (!userMap.has(key)) {
-      userMap.set(key, {
-        name: name || upn || 'Unknown',
-        upn: upn || '',
-        items: [],
-        workspaces: [],
-        workspaceKeys: new Set(),
-      });
+      userMap.set(key, { name: name || upn || 'Unknown', upn: upn || '', items: [], workspaces: [], workspaceKeys: new Set() });
     }
     return userMap.get(key);
   }
@@ -108,49 +81,24 @@ function buildUser360(workspaces) {
       if (!creatorName && !creatorUpn) continue;
       const userKey = (creatorUpn || creatorName).toLowerCase();
       const user = ensureUser(userKey, creatorName, creatorUpn);
-      const accessMatch = user.workspaces.find((entry) => entry.name === workspaceName);
-      user.items.push({
-        name: item.name || 'Unnamed',
-        type: item.type || '-',
-        workspace: workspaceName,
-        role: accessMatch ? accessMatch.role : '',
-      });
+      user.items.push({ name: item.name || 'Unnamed', type: item.type || '-', workspace: workspaceName });
     }
   }
 
   return Array.from(userMap.values())
-    .map((user) => {
-      delete user.workspaceKeys;
-      user.items.sort((a, b) => (a.workspace || '').localeCompare(b.workspace || '') || (a.name || '').localeCompare(b.name || ''));
-      user.workspaces.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-      return user;
-    })
+    .map(user => { delete user.workspaceKeys; return user; })
     .sort((a, b) => (a.name || a.upn || '').localeCompare(b.name || b.upn || ''));
-}
-
-async function getAvailableRuns() {
-  const runs = await db.getAnalysisRuns();
-  return runs.filter(r => r.status === 'completed');
 }
 
 router.get('/', async (req, res) => {
   try {
-    const availableRuns = await getAvailableRuns();
-    const requestedRunId = req.query.runId ? parseInt(req.query.runId) : null;
-    const { run, results } = await loadRunWithResults(requestedRunId);
+    const { run, results } = await loadGlobalResults(res);
 
     if (!run || !results || !results.summary) {
       return res.render('governance/overview', {
-        title: 'Governance Overview',
-        user: req.user,
-        governance: null,
-        workspaces: [],
-        run: null,
-        availableRuns,
-        page: 1,
-        pageSize: 50,
-        totalPages: 1,
-        noData: true,
+        title: 'Governance Overview', user: req.user,
+        governance: null, workspaces: [], run: null,
+        page: 1, pageSize: 50, totalPages: 1, noData: true,
       });
     }
 
@@ -161,16 +109,9 @@ router.get('/', async (req, res) => {
     const pagedWorkspaces = allWorkspaces.slice((page - 1) * pageSize, page * pageSize);
 
     res.render('governance/overview', {
-      title: 'Governance Overview',
-      user: req.user,
-      governance: results.summary,
-      workspaces: pagedWorkspaces,
-      run,
-      availableRuns,
-      page,
-      pageSize,
-      totalPages,
-      noData: false,
+      title: 'Governance Overview', user: req.user,
+      governance: results.summary, workspaces: pagedWorkspaces, run,
+      page, pageSize, totalPages, noData: false,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -179,21 +120,13 @@ router.get('/', async (req, res) => {
 
 router.get('/users', async (req, res) => {
   try {
-    const availableRuns = await getAvailableRuns();
-    const requestedRunId = req.query.runId ? parseInt(req.query.runId) : null;
-    const { run, results } = await loadRunWithResults(requestedRunId);
-    if (!run || !results) {
-      return res.redirect('/governance');
-    }
+    const { run, results } = await loadGlobalResults(res);
+    if (!run || !results) return res.redirect('/governance');
 
     const users = buildUser360(results.workspaces || []);
     res.render('governance/users', {
-      title: 'Governance Users',
-      user: req.user,
-      users,
-      totalUsers: users.length,
-      run,
-      availableRuns,
+      title: 'Governance Users', user: req.user,
+      users, totalUsers: users.length, run,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -202,40 +135,28 @@ router.get('/users', async (req, res) => {
 
 router.get('/artifacts', async (req, res) => {
   try {
-    const availableRuns = await getAvailableRuns();
-    const requestedRunId = req.query.runId ? parseInt(req.query.runId) : null;
     const requestedType = req.query.type || 'all';
-    const { run, results } = await loadRunWithResults(requestedRunId);
-    if (!run || !results) {
-      return res.redirect('/governance');
-    }
+    const { run, results } = await loadGlobalResults(res);
+    if (!run || !results) return res.redirect('/governance');
 
     const artifacts = [];
     for (const workspace of results.workspaces || []) {
       for (const item of workspace.items || []) {
         if (!matchesArtifactType(item, requestedType)) continue;
         artifacts.push({
-          type: item.type || '-',
-          name: item.name || 'Unnamed',
+          type: item.type || '-', name: item.name || 'Unnamed',
           workspace: workspace.name || 'Unnamed Workspace',
           creator: item.creator?.upn || item.creator?.name || '-',
-          lastUpdated: item.lastUpdated,
-          description: item.description,
-          state: item.state,
+          lastUpdated: item.lastUpdated, description: item.description, state: item.state,
         });
       }
     }
-
     artifacts.sort((a, b) => (a.workspace || '').localeCompare(b.workspace || '') || (a.name || '').localeCompare(b.name || ''));
 
     res.render('governance/artifacts', {
-      title: 'Governance Artifacts',
-      user: req.user,
+      title: 'Governance Artifacts', user: req.user,
       artifactType: artifactTypeLabel(requestedType),
-      artifacts,
-      totalCount: artifacts.length,
-      run,
-      availableRuns,
+      artifacts, totalCount: artifacts.length, run,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });

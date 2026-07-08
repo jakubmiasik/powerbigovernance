@@ -11,11 +11,10 @@
 <body>
   <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
     <div class="container-fluid">
-      <a class="navbar-brand" href="/"><i class="bi bi-bar-chart-line-fill me-2"></i>Power BI Governance</a>
+      <a class="navbar-brand" href="/governance"><i class="bi bi-bar-chart-line-fill me-2"></i>Power BI Governance</a>
       <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"><span class="navbar-toggler-icon"></span></button>
       <div class="collapse navbar-collapse" id="navbarNav">
         <ul class="navbar-nav me-auto">
-          <li class="nav-item"><a class="nav-link" href="/"><i class="bi bi-house me-1"></i>Home</a></li>
           <li class="nav-item"><a class="nav-link" href="/workspaces"><i class="bi bi-collection me-1"></i>Workspaces</a></li>
           <li class="nav-item"><a class="nav-link" href="/governance"><i class="bi bi-shield-check me-1"></i>Governance</a></li>
           <li class="nav-item"><a class="nav-link" href="/analysis"><i class="bi bi-play-circle me-1"></i>Run Analysis</a></li>
@@ -32,10 +31,37 @@
               </ul>
             </li>
           <% } else { %>
-            <li class="nav-item"><a class="nav-link" href="/.auth/login/aad?post_login_redirect_uri=<%= encodeURIComponent('/') %>"><i class="bi bi-box-arrow-in-right me-1"></i>Sign In</a></li>
+            <li class="nav-item"><a class="nav-link" href="/.auth/login/aad?post_login_redirect_uri=<%= encodeURIComponent('/governance') %>"><i class="bi bi-box-arrow-in-right me-1"></i>Sign In</a></li>
           <% } %>
         </ul>
       </div>
     </div>
   </nav>
+  <% if (typeof availableRuns !== 'undefined' && availableRuns && availableRuns.length > 0) { %>
+    <div class="bg-light border-bottom px-3 py-2">
+      <div class="container-fluid d-flex align-items-center gap-3 flex-wrap">
+        <span class="fw-bold small text-nowrap"><i class="bi bi-building me-1"></i>Tenant / Scan:</span>
+        <select class="form-select form-select-sm" style="max-width: 500px;" id="globalRunSelector" onchange="switchGlobalRun(this.value)">
+          <% availableRuns.forEach(function(r) { %>
+            <option value="<%= r.id %>" <%= (typeof selectedRunId !== 'undefined' && selectedRunId === r.id) ? 'selected' : '' %>>
+              <%= r.sp_name %> (<%= r.tenant_id %>) &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
+            </option>
+          <% }) %>
+        </select>
+        <% if (typeof globalRun !== 'undefined' && globalRun) { %>
+          <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Run #<%= globalRun.id %></span>
+          <span class="text-muted small">Workspaces: <%= globalRun.total_workspaces || '-' %> | Reports: <%= globalRun.total_reports || '-' %></span>
+        <% } %>
+      </div>
+    </div>
+  <% } %>
   <main class="container-fluid py-4">
+  <script>
+  function switchGlobalRun(runId) {
+    fetch('/api/select-run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ runId: parseInt(runId) })
+    }).then(function() { window.location.reload(); });
+  }
+  </script>

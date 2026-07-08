@@ -121,6 +121,27 @@ async function runAnalysis(runId, sp) {
 
     const capacities = await pbi.getCapacities().catch(() => []);
     ensureNotCancelled(progress);
+
+    // Build capacity lookup: id -> capacity details
+    const capacityMap = new Map();
+    for (const cap of capacities) {
+      capacityMap.set(cap.id, cap);
+    }
+
+    // License type helper based on capacity SKU
+    function getLicenseType(ws) {
+      if (!ws.capacityId || ws.capacityId === '00000000-0000-0000-0000-000000000000') {
+        return 'Pro';
+      }
+      const cap = capacityMap.get(ws.capacityId);
+      if (!cap) return 'Premium';
+      const sku = (cap.sku || '').toUpperCase();
+      if (sku.startsWith('F') && sku !== 'FREE') return 'Fabric';
+      if (sku === 'PPU') return 'Premium Per User';
+      if (sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A')) return 'Premium';
+      return 'Pro';
+    }
+
     const fabricSkus = new Set(['F2', 'F4', 'F8', 'F16', 'F32', 'F64', 'F128', 'F256', 'F512', 'F1024', 'F2048', 'FT1']);
     const hasFabric = capacities.some((capacity) => fabricSkus.has(capacity.sku));
 
@@ -185,6 +206,7 @@ async function runAnalysis(runId, sp) {
         state: ws.state,
         type: ws.type,
         capacityId: ws.capacityId,
+        licenseType: getLicenseType(ws),
         totalItems: wsItems.length,
         reportCount: reports.length,
         datasetCount: datasets.length,
@@ -255,18 +277,28 @@ async function runAnalysis(runId, sp) {
       totalUsers: allUsers.size,
       hasFabric,
       itemTypeCounts,
-      capacities: capacities.map((capacity) => ({ displayName: capacity.displayName, sku: capacity.sku, state: capacity.state, region: capacity.region })),
+      capacities: capacities.map((capacity) => ({
+        id: capacity.id,
+        displayName: capacity.displayName,
+        sku: capacity.sku,
+        state: capacity.state,
+        region: capacity.region,
+        admins: capacity.admins,
+        capacityUserAccessRight: capacity.capacityUserAccessRight,
+      })),
       workspacesByState: {},
       workspacesByType: {},
+      workspacesByLicense: {},
       workspacesOnCapacity: 0,
       workspacesOnSharedCapacity: 0,
     };
 
     for (const ws of workspaces) {
       const state = ws.state || 'Active';
-      const type = ws.type || 'Workspace';
+      const licenseType = getLicenseType(ws);
       summary.workspacesByState[state] = (summary.workspacesByState[state] || 0) + 1;
-      summary.workspacesByType[type] = (summary.workspacesByType[type] || 0) + 1;
+      summary.workspacesByType[licenseType] = (summary.workspacesByType[licenseType] || 0) + 1;
+      summary.workspacesByLicense[licenseType] = (summary.workspacesByLicense[licenseType] || 0) + 1;
       if (ws.capacityId && ws.capacityId !== '00000000-0000-0000-0000-000000000000') {
         summary.workspacesOnCapacity += 1;
       } else {
