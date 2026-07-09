@@ -135,6 +135,7 @@ router.get('/:workspaceId/dashboards/:dashboardId', async (req, res) => {
 });
 
 // ── Lineage: get item connections for graph visualization ──
+// Uses PBI Scanner API with lineage=true to get full workspace lineage, then filters for the item
 router.get('/:workspaceId/lineage/:itemId', async (req, res) => {
   try {
     const globalRun = res.locals.globalRun;
@@ -148,7 +149,10 @@ router.get('/:workspaceId/lineage/:itemId', async (req, res) => {
       sp = sps[0];
     }
     const pbi = createPowerBIService(sp);
-    const connections = await pbi.getItemConnections(req.params.itemId);
+    const { workspaceId, itemId } = req.params;
+    const allLinks = await pbi.getWorkspaceLineage(workspaceId);
+    // Filter connections related to this item (as source or target)
+    const connections = allLinks.filter(l => l.sourceItemId === itemId || l.targetItemId === itemId);
     res.json({ success: true, connections });
   } catch (err) {
     res.json({ success: false, message: err.message });

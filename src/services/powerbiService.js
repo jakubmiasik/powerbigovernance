@@ -255,13 +255,58 @@ function createPowerBIService(spConfig) {
       {});
   }
 
-  // ── Item connections (lineage): Fabric Admin API ──
-  // GET https://api.fabric.microsoft.com/v1/admin/items/{itemId}/connections
-  async function getItemConnections(itemId) {
+  // ── Item lineage: use Power BI Admin scanner API with lineage ──
+  // Fetches lineage for a workspace by calling getInfo with lineage=true
+  async function getWorkspaceLineage(workspaceId) {
     const token = await getToken();
     try {
-      const data = await safeGet(token, FABRIC_ADMIN + '/items/' + itemId + '/connections');
-      return data.value || data || [];
+      // Trigger scan with lineage for this workspace
+      const scanResp = await safePost(token, PBI_ADMIN + '/workspaces/getInfo',
+        { workspaces: [workspaceId] },
+        { lineage: true });
+      const scanId = scanResp.id;
+      // Poll for completion (max 30s)
+      for (let i = 0; i < 15; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        const status = await safeGet(token, PBI_ADMIN + '/workspaces/scanStatus/' + scanId);
+        if (status.status === 'Succeeded') {
+          const result = await safeGet(token, PBI_ADMIN + '/workspaces/scanResult/' + scanId);
+          // Extract lineage from datasets (upstreamDataflows, upstreamDatasets)
+          const ws = (result.workspaces || [])[0];
+          if (!ws) return [];
+          const lineageLinks = [];
+          // Datasets have upstreamDataflows and upstreamDatasets
+          for (const ds of ws.datasets || []) {
+            for (const udf of ds.upstreamDataflows || []) {
+              lineageLinks.push({ sourceItemId: udf.groupId ? udf.targetDataflowId : udf.targetDataflowId, sourceItemDisplayName: udf.targetDataflowId, sourceItemType: 'Dataflow', targetItemId: ds.id, targetItemDisplayName: ds.name, targetItemType: 'Dataset' });
+            }
+            for (const uds of ds.upstreamDatasets || []) {
+              lineageLinks.push({ sourceItemId: uds.datasetId, sourceItemDisplayName: uds.datasetId, sourceItemType: 'Dataset', targetItemId: ds.id, targetItemDisplayName: ds.name, targetItemType: 'Dataset' });
+            }
+          }
+          // Reports have datasetId (link to dataset)
+          for (const r of ws.reports || []) {
+            if (r.datasetId) {
+              const dsObj = (ws.datasets || []).find(d => d.id === r.datasetId);
+              lineageLinks.push({ sourceItemId: r.datasetId, sourceItemDisplayName: dsObj ? dsObj.name : r.datasetId, sourceItemType: 'Dataset', targetItemId: r.id, targetItemDisplayName: r.name, targetItemType: 'Report' });
+            }
+          }
+          // Dashboards have tiles with datasetId
+          for (const d of ws.dashboards || []) {
+            const dsIds = new Set();
+            for (const t of d.tiles || []) {
+              if (t.datasetId && !dsIds.has(t.datasetId)) {
+                dsIds.add(t.datasetId);
+                const dsObj = (ws.datasets || []).find(ds => ds.id === t.datasetId);
+                lineageLinks.push({ sourceItemId: t.datasetId, sourceItemDisplayName: dsObj ? dsObj.name : t.datasetId, sourceItemType: 'Dataset', targetItemId: d.id, targetItemDisplayName: d.displayName || d.id, targetItemType: 'Dashboard' });
+              }
+            }
+          }
+          return lineageLinks;
+        }
+        if (status.status === 'Failed') return [];
+      }
+      return [];
     } catch { return []; }
   }
 
@@ -280,7 +325,8 @@ function createPowerBIService(spConfig) {
     scanWorkspaces,
     getScanStatus,
     getScanResult,
-    getItemConnections,
+    getItemConnections: getWorkspaceLineage,
+    getWorkspaceLineage,
     assignToCapacity,
     unassignFromCapacity,
     addWorkspaceAdmin,
