@@ -255,6 +255,16 @@ function createPowerBIService(spConfig) {
       {});
   }
 
+  // ── Item connections (lineage): Fabric Admin API ──
+  // GET https://api.fabric.microsoft.com/v1/admin/items/{itemId}/connections
+  async function getItemConnections(itemId) {
+    const token = await getToken();
+    try {
+      const data = await safeGet(token, FABRIC_ADMIN + '/items/' + itemId + '/connections');
+      return data.value || data || [];
+    } catch { return []; }
+  }
+
   return {
     getWorkspaces,
     getWorkspaceById,
@@ -270,6 +280,7 @@ function createPowerBIService(spConfig) {
     scanWorkspaces,
     getScanStatus,
     getScanResult,
+    getItemConnections,
     assignToCapacity,
     unassignFromCapacity,
     addWorkspaceAdmin,

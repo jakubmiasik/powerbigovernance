@@ -106,6 +106,7 @@
                 <th>State</th>
                 <th>Creator</th>
                 <th>Last Updated</th>
+                <th style="width:40px;">Lineage</th>
               </tr>
             </thead>
             <tbody>
@@ -116,6 +117,7 @@
                   <td><%= item.state || '-' %></td>
                   <td><%= creator %></td>
                   <td><small><%= getLastUpdated(item) %></small></td>
+                  <td><button class="btn btn-sm btn-outline-primary p-0 px-1" onclick="showLineage('<%= item.id %>', '<%= (item.name || item.displayName || 'Unnamed').replace(/'/g, "\\'") %>', '<%= item.type || '' %>')" title="View lineage"><i class="bi bi-diagram-3"></i></button></td>
                 </tr>
               <% }) %>
             </tbody>
@@ -143,6 +145,7 @@
                 <th>Creator</th>
                 <th>Last Updated</th>
                 <th>Description</th>
+                <th style="width:40px;">Lineage</th>
               </tr>
             </thead>
             <tbody>
@@ -153,6 +156,7 @@
                   <td><%= creator %></td>
                   <td><small><%= getLastUpdated(report) %></small></td>
                   <td class="text-muted small"><%= report.description || '-' %></td>
+                  <td><button class="btn btn-sm btn-outline-primary p-0 px-1" onclick="showLineage('<%= report.id %>', '<%= (report.name || 'Unnamed').replace(/'/g, "\\'") %>', 'Report')" title="View lineage"><i class="bi bi-diagram-3"></i></button></td>
                 </tr>
               <% }) %>
             </tbody>
@@ -180,6 +184,7 @@
                 <th>Last Updated</th>
                 <th>Description</th>
                 <th>Details</th>
+                <th style="width:40px;">Lineage</th>
               </tr>
             </thead>
             <tbody>
@@ -190,6 +195,7 @@
                   <td><small><%= getLastUpdated(dataset) %></small></td>
                   <td class="text-muted small"><%= dataset.description || '-' %></td>
                   <td><a href="/workspaces/<%= workspace.id %>/datasets/<%= dataset.id %>" class="btn btn-sm btn-outline-success"><i class="bi bi-search"></i></a></td>
+                  <td><button class="btn btn-sm btn-outline-primary p-0 px-1" onclick="showLineage('<%= dataset.id %>', '<%= (dataset.name || 'Unnamed').replace(/'/g, "\\'") %>', 'SemanticModel')" title="View lineage"><i class="bi bi-diagram-3"></i></button></td>
                 </tr>
               <% }) %>
             </tbody>
@@ -216,6 +222,7 @@
                 <th>Creator</th>
                 <th>Last Updated</th>
                 <th>Tiles</th>
+                <th style="width:40px;">Lineage</th>
               </tr>
             </thead>
             <tbody>
@@ -225,6 +232,7 @@
                   <td><%= creator %></td>
                   <td><small><%= getLastUpdated(dashboard) %></small></td>
                   <td><a href="/workspaces/<%= workspace.id %>/dashboards/<%= dashboard.id %>" class="btn btn-sm btn-outline-info"><i class="bi bi-search"></i></a></td>
+                  <td><button class="btn btn-sm btn-outline-primary p-0 px-1" onclick="showLineage('<%= dashboard.id %>', '<%= (dashboard.name || dashboard.displayName || 'Unnamed').replace(/'/g, "\\'") %>', 'Dashboard')" title="View lineage"><i class="bi bi-diagram-3"></i></button></td>
                 </tr>
               <% }) %>
             </tbody>
@@ -258,6 +266,7 @@
                     <th>Type</th>
                     <th>Creator</th>
                     <th>Last Updated</th>
+                    <th style="width:40px;">Lineage</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -267,6 +276,7 @@
                       <td><span class="badge item-type-badge" data-type="<%= item.type || '' %>"><%= item.type || '-' %></span></td>
                       <td><%= creator %></td>
                       <td><small><%= getLastUpdated(item) %></small></td>
+                      <td><button class="btn btn-sm btn-outline-primary p-0 px-1" onclick="showLineage('<%= item.id %>', '<%= (item.name || 'Unnamed').replace(/'/g, "\\'") %>', '<%= item.type || '' %>')" title="View lineage"><i class="bi bi-diagram-3"></i></button></td>
                     </tr>
                   <% }) %>
                 </tbody>
@@ -428,5 +438,86 @@ function getTypeBadge(type) {
 document.querySelectorAll('.item-type-badge').forEach(function(badge) {
   badge.classList.add('bg-' + getTypeBadge(badge.getAttribute('data-type')));
 });
+</script>
+
+<!-- Lineage Modal -->
+<div class="modal fade" id="lineageModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="lineageModalTitle">Item Lineage</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="lineageLoading" class="text-center py-4"><div class="spinner-border text-primary"></div><p class="mt-2 text-muted">Loading lineage...</p></div>
+        <div id="lineageEmpty" class="text-center py-4 d-none"><i class="bi bi-diagram-3 fs-1 text-muted"></i><p class="mt-2 text-muted">No connections found for this item.</p></div>
+        <div id="lineageGraph" class="d-none"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+mermaid.initialize({ startOnLoad: false, theme: 'base', themeVariables: { primaryColor: '#0d9488', primaryTextColor: '#fff', lineColor: '#0d9488' } });
+
+async function showLineage(itemId, itemName, itemType) {
+  var modal = new bootstrap.Modal(document.getElementById('lineageModal'));
+  document.getElementById('lineageModalTitle').textContent = 'Lineage: ' + itemName;
+  document.getElementById('lineageLoading').classList.remove('d-none');
+  document.getElementById('lineageEmpty').classList.add('d-none');
+  document.getElementById('lineageGraph').classList.add('d-none');
+  document.getElementById('lineageGraph').innerHTML = '';
+  modal.show();
+
+  try {
+    var workspaceId = '<%= workspace.id %>';
+    var resp = await fetch('/workspaces/' + workspaceId + '/lineage/' + itemId);
+    var data = await resp.json();
+    document.getElementById('lineageLoading').classList.add('d-none');
+
+    if (!data.success || !data.connections || data.connections.length === 0) {
+      document.getElementById('lineageEmpty').classList.remove('d-none');
+      return;
+    }
+
+    // Build mermaid flowchart
+    var lines = ['flowchart LR'];
+    var nodeSet = new Set();
+    var currentNode = 'N_' + itemId.replace(/[^a-zA-Z0-9]/g, '');
+    nodeSet.add(currentNode);
+    lines.push('  ' + currentNode + '["' + itemName + '<br/><small>' + itemType + '</small>"]');
+    lines.push('  style ' + currentNode + ' fill:#0d9488,color:#fff');
+
+    data.connections.forEach(function(conn, idx) {
+      var srcName = conn.sourceItemDisplayName || conn.sourceItemId || 'Source ' + idx;
+      var srcType = conn.sourceItemType || '';
+      var tgtName = conn.targetItemDisplayName || conn.targetItemId || 'Target ' + idx;
+      var tgtType = conn.targetItemType || '';
+      var srcNode = 'N_' + (conn.sourceItemId || 's' + idx).replace(/[^a-zA-Z0-9]/g, '');
+      var tgtNode = 'N_' + (conn.targetItemId || 't' + idx).replace(/[^a-zA-Z0-9]/g, '');
+
+      if (!nodeSet.has(srcNode)) {
+        nodeSet.add(srcNode);
+        lines.push('  ' + srcNode + '["' + srcName + '<br/><small>' + srcType + '</small>"]');
+      }
+      if (!nodeSet.has(tgtNode)) {
+        nodeSet.add(tgtNode);
+        lines.push('  ' + tgtNode + '["' + tgtName + '<br/><small>' + tgtType + '</small>"]');
+      }
+      lines.push('  ' + srcNode + ' --> ' + tgtNode);
+    });
+
+    var graphDef = lines.join('\n');
+    var graphEl = document.getElementById('lineageGraph');
+    graphEl.classList.remove('d-none');
+    var { svg } = await mermaid.render('lineage_' + Date.now(), graphDef);
+    graphEl.innerHTML = svg;
+  } catch (e) {
+    document.getElementById('lineageLoading').classList.add('d-none');
+    document.getElementById('lineageEmpty').classList.remove('d-none');
+    document.getElementById('lineageEmpty').querySelector('p').textContent = 'Error: ' + e.message;
+  }
+}
 </script>
 <%- include('../partials/footer') %>

@@ -134,4 +134,25 @@ router.get('/:workspaceId/dashboards/:dashboardId', async (req, res) => {
   }
 });
 
+// ── Lineage: get item connections for graph visualization ──
+router.get('/:workspaceId/lineage/:itemId', async (req, res) => {
+  try {
+    const globalRun = res.locals.globalRun;
+    let sp;
+    if (globalRun && globalRun.sp_id) {
+      sp = await db.getServicePrincipalById(globalRun.sp_id);
+    }
+    if (!sp) {
+      const sps = await db.getServicePrincipals();
+      if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
+      sp = sps[0];
+    }
+    const pbi = createPowerBIService(sp);
+    const connections = await pbi.getItemConnections(req.params.itemId);
+    res.json({ success: true, connections });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;
