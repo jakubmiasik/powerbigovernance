@@ -246,7 +246,7 @@ var workspacesReady = false;
 function refreshWorkspaces() {
   var btn = document.getElementById('refreshBtn');
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Refreshing...';
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Loading from API...';
 
   fetch('/migrate/refresh')
     .then(function(r) { return r.json(); })
@@ -256,7 +256,7 @@ function refreshWorkspaces() {
         btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Refresh';
         return showAlert(data.message || 'Failed to refresh.');
       }
-      // Rebuild table with fresh data
+      // Rebuild workspace table with fresh API data
       var tbody = document.querySelector('#migrate-table tbody');
       tbody.innerHTML = '';
       (data.workspaces || []).sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); }).forEach(function(ws) {
@@ -276,6 +276,39 @@ function refreshWorkspaces() {
           '<td class="small text-muted">' + capShort + '</td></tr>';
       });
       document.getElementById('visibleCount').textContent = (data.workspaces || []).length;
+
+      // Update capacity dropdown with fresh data
+      if (data.capacities && data.capacities.length > 0) {
+        var capSelect = document.getElementById('targetCapacity');
+        var prevVal = capSelect.value;
+        capSelect.innerHTML = '<option value="">-- Select capacity --</option>';
+        var activeCaps = data.capacities.filter(function(c) { return c.state === 'Active'; });
+        var inactiveCaps = data.capacities.filter(function(c) { return c.state !== 'Active'; });
+        activeCaps.forEach(function(cap) {
+          var sku = (cap.sku || '').toUpperCase();
+          var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : (sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A')) ? 'Premium' : 'Shared';
+          var opt = document.createElement('option');
+          opt.value = cap.id;
+          opt.setAttribute('data-state', 'Active');
+          opt.setAttribute('data-sku', cap.sku);
+          opt.textContent = (cap.displayName || 'Unnamed') + ' (' + cap.sku + ') - ' + licType + ' - ' + (cap.region || '');
+          capSelect.appendChild(opt);
+        });
+        inactiveCaps.forEach(function(cap) {
+          var sku = (cap.sku || '').toUpperCase();
+          var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : (sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A')) ? 'Premium' : 'Shared';
+          var opt = document.createElement('option');
+          opt.value = cap.id;
+          opt.setAttribute('data-state', cap.state);
+          opt.setAttribute('data-sku', cap.sku);
+          opt.style.color = '#999';
+          opt.disabled = true;
+          opt.textContent = '[' + cap.state + '] ' + (cap.displayName || 'Unnamed') + ' (' + cap.sku + ') - ' + licType;
+          capSelect.appendChild(opt);
+        });
+        if (prevVal) capSelect.value = prevVal;
+      }
+
       // Remove overlay, enable checkboxes
       document.getElementById('workspaceOverlay').style.display = 'none';
       document.getElementById('selectAllCheckbox').disabled = false;

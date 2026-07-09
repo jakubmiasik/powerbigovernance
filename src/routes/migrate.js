@@ -40,14 +40,82 @@ router.get('/', async (req, res) => {
   }
 });
 
-// ── Refresh workspace data ──
+// ── Refresh: call live Fabric/PBI APIs for fresh workspace + capacity data ──
 router.get('/refresh', async (req, res) => {
   try {
-    const results = await loadMigrationData(res);
-    if (!results) {
-      return res.json({ success: false, message: 'No analysis data available.' });
+    const globalRun = res.locals.globalRun;
+    if (!globalRun || !globalRun.sp_id) {
+      return res.json({ success: false, message: 'No analysis run selected. Select a scan from the top bar first.' });
     }
-    res.json({ success: true, workspaces: results.workspaces || [] });
+
+    const sp = await db.getServicePrincipalById(globalRun.sp_id);
+    if (!sp) {
+      return res.json({ success: false, message: 'Service principal not found.' });
+    }
+
+    const { createPowerBIService } = require('../services/powerbiService');
+    const pbi = createPowerBIService(sp);
+
+    // Fetch live workspaces from Fabric Admin API
+    const workspaces = await pbi.getWorkspaces();
+
+    // Fetch live items per workspace to get counts
+    let allItems = [];
+    try {
+      allItems = await pbi.getAllItems();
+    } catch (_) { /* items optional */ }
+
+    // Fetch live capacities from PBI Admin API
+    let capacities = [];
+    try {
+      capacities = await pbi.getCapacities();
+    } catch (_) { /* capacities optional */ }
+
+    // Build capacity map for SKU/license lookup
+    const capMap = new Map();
+    capacities.forEach(c => capMap.set(c.id.toLowerCase(), c));
+
+    // Enrich workspaces with item counts and capacity info
+    const itemsByWs = new Map();
+    allItems.forEach(item => {
+      const wsId = item.workspaceId;
+      if (!wsId) return;
+      if (!itemsByWs.has(wsId)) itemsByWs.set(wsId, []);
+      itemsByWs.get(wsId).push(item);
+    });
+
+    const enriched = workspaces.map(ws => {
+      const wsItems = itemsByWs.get(ws.id) || [];
+      const capId = ws.capacityId || '';
+      const cap = capId ? capMap.get(capId.toLowerCase()) : null;
+      const sku = cap ? cap.sku : '';
+      const skuUpper = (sku || '').toUpperCase();
+      let licenseType = 'Pro';
+      if (skuUpper.startsWith('F') && skuUpper !== 'FREE') licenseType = 'Fabric';
+      else if (skuUpper === 'PPU') licenseType = 'Premium Per User';
+      else if (skuUpper.startsWith('P') || skuUpper.startsWith('EM') || skuUpper.startsWith('A')) licenseType = 'Premium';
+
+      return {
+        id: ws.id,
+        name: ws.displayName || ws.name || 'Unnamed',
+        state: ws.state || 'Active',
+        capacityId: capId,
+        capacitySku: sku,
+        licenseType,
+        totalItems: wsItems.length,
+      };
+    });
+
+    // Enrich capacities with state info
+    const enrichedCaps = capacities.map(c => ({
+      id: c.id,
+      displayName: c.displayName || 'Unnamed',
+      sku: c.sku || '',
+      state: c.state || 'Unknown',
+      region: c.region || '',
+    }));
+
+    res.json({ success: true, workspaces: enriched, capacities: enrichedCaps });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
