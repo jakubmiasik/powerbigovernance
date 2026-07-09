@@ -64,4 +64,56 @@ function resetAuthCache() {
   appCache.clear();
 }
 
-module.exports = { getAccessTokenForSP, getFabricTokenForSP, resetAuthCache };
+// ── Delegated (user-based) auth for migration ──
+// Uses the Entra ID app registration configured via environment variables
+
+let delegatedMsalApp = null;
+
+function getDelegatedClient() {
+  if (delegatedMsalApp) return delegatedMsalApp;
+
+  const clientId = process.env.ENTRA_CLIENT_ID;
+  const clientSecret = process.env.ENTRA_CLIENT_SECRET;
+  const tenantId = process.env.ENTRA_TENANT_ID;
+
+  if (!clientId || !clientSecret || !tenantId) {
+    throw new Error('Delegated auth not configured. Set ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET, and ENTRA_TENANT_ID.');
+  }
+
+  delegatedMsalApp = new msal.ConfidentialClientApplication({
+    auth: {
+      clientId,
+      clientSecret,
+      authority: `https://login.microsoftonline.com/${tenantId}`,
+    },
+  });
+  return delegatedMsalApp;
+}
+
+function getDelegatedAuthUrl(redirectUri, state) {
+  const app = getDelegatedClient();
+  return app.getAuthCodeUrl({
+    scopes: ['https://analysis.windows.net/powerbi/api/Tenant.ReadWrite.All'],
+    redirectUri,
+    state,
+    prompt: 'consent',
+  });
+}
+
+async function acquireDelegatedToken(code, redirectUri) {
+  const app = getDelegatedClient();
+  const result = await app.acquireTokenByCode({
+    code,
+    scopes: ['https://analysis.windows.net/powerbi/api/Tenant.ReadWrite.All'],
+    redirectUri,
+  });
+  if (!result || !result.accessToken) {
+    throw new Error('Failed to acquire delegated Power BI token');
+  }
+  return result.accessToken;
+}
+
+module.exports = {
+  getAccessTokenForSP, getFabricTokenForSP, resetAuthCache,
+  getDelegatedAuthUrl, acquireDelegatedToken,
+};
