@@ -132,7 +132,7 @@
             %>
             <% capTabSets.forEach(function(tabSet, ti) { %>
               <div class="tab-pane fade <%= ti === 0 ? 'show active' : '' %>" id="cap-tab-<%= tabSet.id %>" role="tabpanel">
-                <div class="table-responsive">
+                <div class="table-responsive" style="max-height: 210px; overflow-y: auto;">
                   <table class="table table-sm mb-0 cap-filter-table">
                     <thead><tr><th>Name</th><th>SKU</th><th>License</th><th>State</th><th>Region</th></tr></thead>
                     <tbody>
