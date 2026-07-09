@@ -136,12 +136,12 @@ router.post('/execute', async (req, res) => {
     const migrationResults = [];
 
     if (action === 'assign') {
-      // Use Admin API: POST /admin/capacities/{capacityId}/AssignWorkspaces
-      // This can assign multiple workspaces in one call
+      // Use Admin API: POST /admin/capacities/AssignWorkspaces
+      // Body: { capacityId: "...", workspacesToAssign: ["id1", "id2"] }
       try {
         await axios.post(
-          PBI_ADMIN + '/capacities/' + targetCapacityId + '/AssignWorkspaces',
-          { workspacesToAssign: workspaceIds },
+          PBI_ADMIN + '/capacities/AssignWorkspaces',
+          { capacityMigrationAssignments: [{ targetCapacityObjectId: targetCapacityId, workspacesToAssign: workspaceIds }] },
           {
             headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
             timeout: 120000,
@@ -157,8 +157,8 @@ router.post('/execute', async (req, res) => {
         for (const wsId of workspaceIds) {
           try {
             await axios.post(
-              PBI_ADMIN + '/capacities/' + targetCapacityId + '/AssignWorkspaces',
-              { workspacesToAssign: [wsId] },
+              PBI_ADMIN + '/capacities/AssignWorkspaces',
+              { capacityMigrationAssignments: [{ targetCapacityObjectId: targetCapacityId, workspacesToAssign: [wsId] }] },
               {
                 headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
                 timeout: 60000,
