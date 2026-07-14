@@ -207,40 +207,20 @@ async function deleteAnalysisRun(id) {
 }
 
 // Capacity Schedules
-async function ensureCapacitySchedulesTable() {
-  const conn = await getConnection();
-  try {
-    await execSql(conn, `IF NOT EXISTS (SELECT * FROM sys.tables WHERE name='capacity_schedules')
-      CREATE TABLE capacity_schedules (
-        id INT IDENTITY(1,1) PRIMARY KEY,
-        capacity_name NVARCHAR(200) NOT NULL,
-        subscription_id NVARCHAR(200) NOT NULL,
-        resource_group NVARCHAR(200) NOT NULL,
-        action NVARCHAR(20) NOT NULL,
-        schedule_type NVARCHAR(20) NOT NULL,
-        schedule_hour INT NULL,
-        schedule_minute INT NULL,
-        schedule_day NVARCHAR(20) NULL,
-        enabled BIT DEFAULT 1,
-        created_at DATETIME DEFAULT GETDATE()
-      )`);
-  } finally {
-    conn.close();
-  }
-}
-
 async function getCapacitySchedules() {
-  await ensureCapacitySchedulesTable();
   const conn = await getConnection();
   try {
     return await execSql(conn, 'SELECT * FROM capacity_schedules ORDER BY capacity_name, action');
+  } catch (err) {
+    // Table may not exist yet
+    if (err.message && err.message.includes('Invalid object name')) return [];
+    throw err;
   } finally {
     conn.close();
   }
 }
 
 async function saveCapacitySchedule(schedule) {
-  await ensureCapacitySchedulesTable();
   const conn = await getConnection();
   try {
     await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled)
