@@ -1,9 +1,10 @@
 const axios = require('axios');
-const { getAccessTokenForSP, getFabricTokenForSP } = require('./authService');
+const { getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP } = require('./authService');
 
 const PBI_BASE = 'https://api.powerbi.com/v1.0/myorg';
 const PBI_ADMIN = PBI_BASE + '/admin';
 const FABRIC_ADMIN = 'https://api.fabric.microsoft.com/v1/admin';
+const ARM_BASE = 'https://management.azure.com';
 
 async function safeGet(token, url, params = {}) {
   try {
@@ -310,6 +311,40 @@ function createPowerBIService(spConfig) {
     } catch { return []; }
   }
 
+  // ── Azure Management API: Capacity operations (pause/resume/details) ──
+  async function getArmToken() {
+    return getAzureManagementTokenForSP(spConfig);
+  }
+
+  // List all Fabric capacities in the subscription via ARM
+  async function listArmCapacities(subscriptionId) {
+    const token = await getArmToken();
+    const url = `${ARM_BASE}/subscriptions/${subscriptionId}/providers/Microsoft.Fabric/capacities?api-version=2023-11-01`;
+    const data = await safeGet(token, url);
+    return data.value || [];
+  }
+
+  // Get capacity details from ARM
+  async function getArmCapacityDetail(subscriptionId, resourceGroup, capacityName) {
+    const token = await getArmToken();
+    const url = `${ARM_BASE}/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Fabric/capacities/${capacityName}?api-version=2023-11-01`;
+    return safeGet(token, url);
+  }
+
+  // Suspend (pause) a capacity
+  async function suspendCapacity(subscriptionId, resourceGroup, capacityName) {
+    const token = await getArmToken();
+    const url = `${ARM_BASE}/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Fabric/capacities/${capacityName}/suspend?api-version=2023-11-01`;
+    return safePost(token, url, {});
+  }
+
+  // Resume a capacity
+  async function resumeCapacity(subscriptionId, resourceGroup, capacityName) {
+    const token = await getArmToken();
+    const url = `${ARM_BASE}/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Fabric/capacities/${capacityName}/resume?api-version=2023-11-01`;
+    return safePost(token, url, {});
+  }
+
   return {
     getWorkspaces,
     getWorkspaceById,
@@ -327,6 +362,10 @@ function createPowerBIService(spConfig) {
     getScanResult,
     getItemConnections: getWorkspaceLineage,
     getWorkspaceLineage,
+    listArmCapacities,
+    getArmCapacityDetail,
+    suspendCapacity,
+    resumeCapacity,
     assignToCapacity,
     unassignFromCapacity,
     addWorkspaceAdmin,

@@ -206,6 +206,83 @@ async function deleteAnalysisRun(id) {
   }
 }
 
+// Capacity Schedules
+async function ensureCapacitySchedulesTable() {
+  const conn = await getConnection();
+  try {
+    await execSql(conn, `IF NOT EXISTS (SELECT * FROM sys.tables WHERE name='capacity_schedules')
+      CREATE TABLE capacity_schedules (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        capacity_name NVARCHAR(200) NOT NULL,
+        subscription_id NVARCHAR(200) NOT NULL,
+        resource_group NVARCHAR(200) NOT NULL,
+        action NVARCHAR(20) NOT NULL,
+        schedule_type NVARCHAR(20) NOT NULL,
+        schedule_hour INT NULL,
+        schedule_minute INT NULL,
+        schedule_day NVARCHAR(20) NULL,
+        enabled BIT DEFAULT 1,
+        created_at DATETIME DEFAULT GETDATE()
+      )`);
+  } finally {
+    conn.close();
+  }
+}
+
+async function getCapacitySchedules() {
+  await ensureCapacitySchedulesTable();
+  const conn = await getConnection();
+  try {
+    return await execSql(conn, 'SELECT * FROM capacity_schedules ORDER BY capacity_name, action');
+  } finally {
+    conn.close();
+  }
+}
+
+async function saveCapacitySchedule(schedule) {
+  await ensureCapacitySchedulesTable();
+  const conn = await getConnection();
+  try {
+    await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled)
+      VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled)`, [
+      { name: 'name', type: TYPES.NVarChar, value: schedule.capacityName },
+      { name: 'sub', type: TYPES.NVarChar, value: schedule.subscriptionId },
+      { name: 'rg', type: TYPES.NVarChar, value: schedule.resourceGroup },
+      { name: 'action', type: TYPES.NVarChar, value: schedule.action },
+      { name: 'type', type: TYPES.NVarChar, value: schedule.scheduleType },
+      { name: 'hour', type: TYPES.Int, value: schedule.hour != null ? schedule.hour : null },
+      { name: 'minute', type: TYPES.Int, value: schedule.minute != null ? schedule.minute : null },
+      { name: 'day', type: TYPES.NVarChar, value: schedule.day || null },
+      { name: 'enabled', type: TYPES.Bit, value: schedule.enabled !== false },
+    ]);
+  } finally {
+    conn.close();
+  }
+}
+
+async function deleteCapacitySchedule(id) {
+  const conn = await getConnection();
+  try {
+    await execSql(conn, 'DELETE FROM capacity_schedules WHERE id=@id', [
+      { name: 'id', type: TYPES.Int, value: id },
+    ]);
+  } finally {
+    conn.close();
+  }
+}
+
+async function toggleCapacitySchedule(id, enabled) {
+  const conn = await getConnection();
+  try {
+    await execSql(conn, 'UPDATE capacity_schedules SET enabled=@enabled WHERE id=@id', [
+      { name: 'id', type: TYPES.Int, value: id },
+      { name: 'enabled', type: TYPES.Bit, value: enabled },
+    ]);
+  } finally {
+    conn.close();
+  }
+}
+
 module.exports = {
   getServicePrincipals,
   getServicePrincipalById,
@@ -216,4 +293,8 @@ module.exports = {
   getAnalysisRuns,
   getAnalysisRunById,
   deleteAnalysisRun,
+  getCapacitySchedules,
+  saveCapacitySchedule,
+  deleteCapacitySchedule,
+  toggleCapacitySchedule,
 };

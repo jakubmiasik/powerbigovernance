@@ -104,7 +104,10 @@
       <div class="card h-100">
         <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
           <span><i class="bi bi-lightning me-2"></i>Capacities</span>
-          <input type="text" class="form-control form-control-sm" style="max-width: 180px;" placeholder="Filter..." oninput="filterCapacities(this)">
+          <div class="d-flex gap-1">
+            <button class="btn btn-sm btn-outline-primary" onclick="refreshCapacities()" title="Refresh capacity states"><i class="bi bi-arrow-clockwise"></i></button>
+            <input type="text" class="form-control form-control-sm" style="max-width: 140px;" placeholder="Filter..." oninput="filterCapacities(this)">
+          </div>
         </div>
         <%
           var allCaps = governanceSummary.capacities || [];
@@ -138,10 +141,10 @@
                     <tbody>
                       <% tabSet.caps.forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared'; var licColor = licType === 'Fabric' ? 'success' : licType === 'Premium' ? 'warning' : licType === 'PPU' ? 'info' : 'secondary'; %>
                         <tr data-filter="<%= [cap.displayName || '', cap.sku || '', licType, cap.state || '', cap.region || ''].join(' ').toLowerCase() %>">
-                          <td class="small"><%= cap.displayName || 'Unnamed' %></td>
+                          <td class="small"><a href="/capacities/<%= cap.id %>" class="text-decoration-none fw-semibold"><%= cap.displayName || 'Unnamed' %></a></td>
                           <td><code><%= cap.sku || '-' %></code></td>
                           <td><span class="badge bg-<%= licColor %>"><%= licType %></span></td>
-                          <td><span class="badge bg-<%= cap.state === 'Active' ? 'success' : 'warning' %>"><%= cap.state || '-' %></span></td>
+                          <td><span class="badge bg-<%= cap.state === 'Active' ? 'success' : 'warning' %> cap-state-<%= (cap.id || '').toLowerCase() %>"><%= cap.state || '-' %></span></td>
                           <td class="small"><%= cap.region || '-' %></td>
                         </tr>
                       <% }) %>
@@ -215,4 +218,22 @@
     Data from analysis run #<%= run.id %> on <%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %>. <a href="/analysis">Run a new analysis</a> to refresh.
   </div>
 <% } %>
+
+<script>
+async function refreshCapacities() {
+  try {
+    var resp = await fetch('/capacities/refresh');
+    var data = await resp.json();
+    if (data.success && data.capacities) {
+      data.capacities.forEach(function(cap) {
+        var badges = document.querySelectorAll('.cap-state-' + (cap.id || '').toLowerCase());
+        badges.forEach(function(badge) {
+          badge.textContent = cap.state || '-';
+          badge.className = 'badge bg-' + (cap.state === 'Active' ? 'success' : 'warning') + ' cap-state-' + (cap.id || '').toLowerCase();
+        });
+      });
+    }
+  } catch (e) { console.error(e); }
+}
+</script>
 <%- include('../partials/footer') %>

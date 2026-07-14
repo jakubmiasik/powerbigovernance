@@ -113,7 +113,19 @@ async function acquireDelegatedToken(code, redirectUri) {
   return result.accessToken;
 }
 
+// ── Azure Management API token (for capacity pause/resume) ──
+async function getAzureManagementTokenForSP(spConfig) {
+  const app = getConfidentialClient(spConfig);
+  const result = await app.acquireTokenByClientCredential({
+    scopes: ['https://management.azure.com/.default'],
+  });
+  if (!result || !result.accessToken) {
+    throw new Error('Failed to acquire Azure Management access token');
+  }
+  return result.accessToken;
+}
+
 module.exports = {
-  getAccessTokenForSP, getFabricTokenForSP, resetAuthCache,
+  getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, resetAuthCache,
   getDelegatedAuthUrl, acquireDelegatedToken,
 };

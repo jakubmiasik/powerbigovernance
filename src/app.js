@@ -110,6 +110,7 @@ const workspaceRoutes = require('./routes/workspaces');
 const governanceRoutes = require('./routes/governance');
 const analysisRoutes = require('./routes/analysis');
 const migrateRoutes = require('./routes/migrate');
+const capacityRoutes = require('./routes/capacities');
 
 app.use('/', indexRoutes);
 app.use('/settings', configRoutes);
@@ -117,6 +118,7 @@ app.use('/workspaces', workspaceRoutes);
 app.use('/governance', governanceRoutes);
 app.use('/analysis', analysisRoutes);
 app.use('/migrate', migrateRoutes);
+app.use('/capacities', capacityRoutes);
 
 // Error handler
 app.use((err, req, res, _next) => {
@@ -127,5 +129,9 @@ app.use((err, req, res, _next) => {
     message: err.message || 'An unexpected error occurred.',
   });
 });
+
+// Start capacity scheduler
+const { startScheduler } = require('./services/schedulerService');
+startScheduler();
 
 module.exports = app;

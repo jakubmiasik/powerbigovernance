@@ -1,0 +1,341 @@
+<%- include('../partials/header') %>
+<%
+  var cap = capacity || {};
+  var arm = armDetail || null;
+  var armError = arm && arm.error ? arm.error : null;
+  var armProps = arm && arm.properties ? arm.properties : null;
+  var capName = cap.displayName || 'Unknown';
+  var capState = cap.state || 'Unknown';
+  var stateColor = capState === 'Active' ? 'success' : capState === 'Paused' || capState === 'Suspended' ? 'warning' : 'secondary';
+  var sku = (cap.sku || '').toUpperCase();
+  var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared';
+
+  // ARM resource info
+  var armRg = '';
+  var armSub = subscriptionId || '';
+  if (arm && arm.id) {
+    var parts = arm.id.split('/');
+    var rgIdx = parts.indexOf('resourceGroups');
+    if (rgIdx >= 0) armRg = parts[rgIdx + 1] || '';
+  }
+%>
+
+<div class="mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <div>
+    <h2><i class="bi bi-lightning me-2"></i><%= capName %></h2>
+    <p class="text-muted mb-0">Capacity details and management</p>
+  </div>
+  <a href="/governance" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<!-- Status & Actions -->
+<div class="row g-3 mb-4">
+  <div class="col-sm-3">
+    <div class="card text-center h-100 stat-card">
+      <div class="card-body py-3">
+        <div class="text-muted small mb-1">State</div>
+        <span class="badge bg-<%= stateColor %> fs-6" id="cap-state-badge"><%= capState %></span>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-3">
+    <div class="card text-center h-100 stat-card">
+      <div class="card-body py-3">
+        <div class="text-muted small mb-1">SKU</div>
+        <code class="fs-5"><%= sku || '-' %></code>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-3">
+    <div class="card text-center h-100 stat-card">
+      <div class="card-body py-3">
+        <div class="text-muted small mb-1">License</div>
+        <span class="badge bg-<%= licType === 'Fabric' ? 'success' : licType === 'Premium' ? 'warning' : 'secondary' %> fs-6"><%= licType %></span>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-3">
+    <div class="card text-center h-100 stat-card">
+      <div class="card-body py-3">
+        <div class="text-muted small mb-1">Region</div>
+        <span class="fs-6"><%= cap.region || '-' %></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Actions: Pause / Resume / Refresh -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-gear me-2"></i>Actions</div>
+  <div class="card-body">
+    <% if (!armSub || !armRg) { %>
+      <div class="alert alert-info small mb-3">
+        <i class="bi bi-info-circle me-1"></i>
+        To enable Pause/Resume, set <code>AZURE_SUBSCRIPTION_ID</code> in App Settings and ensure the capacity is discovered via ARM.
+        <% if (!armRg && armSub) { %>The capacity was not found in your subscription. Ensure the service principal has Reader role on the Fabric capacity resource.<% } %>
+      </div>
+    <% } %>
+
+    <div class="row g-2 align-items-end">
+      <div class="col-auto">
+        <label class="form-label small">Subscription ID</label>
+        <input type="text" class="form-control form-control-sm" id="armSubscription" value="<%= armSub %>" style="width:300px;" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+      </div>
+      <div class="col-auto">
+        <label class="form-label small">Resource Group</label>
+        <input type="text" class="form-control form-control-sm" id="armResourceGroup" value="<%= armRg %>" style="width:200px;" placeholder="rg-my-fabric">
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-sm btn-outline-success" onclick="resumeCapacity()" id="btnResume">
+          <i class="bi bi-play-fill me-1"></i>Resume
+        </button>
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-sm btn-outline-warning" onclick="suspendCapacity()" id="btnSuspend">
+          <i class="bi bi-pause-fill me-1"></i>Pause
+        </button>
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-sm btn-outline-primary" onclick="refreshState()">
+          <i class="bi bi-arrow-clockwise me-1"></i>Refresh State
+        </button>
+      </div>
+    </div>
+    <div id="actionResult" class="mt-2"></div>
+  </div>
+</div>
+
+<!-- Capacity Details -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-info-circle me-2"></i>All Available Metadata</div>
+  <div class="card-body">
+    <table class="table table-sm table-hover mb-0">
+      <tbody>
+        <tr><td class="text-muted" style="width:200px;">ID</td><td><code><%= cap.id %></code></td></tr>
+        <tr><td class="text-muted">Display Name</td><td><%= cap.displayName || '-' %></td></tr>
+        <tr><td class="text-muted">SKU</td><td><code><%= cap.sku || '-' %></code></td></tr>
+        <tr><td class="text-muted">State</td><td><%= cap.state || '-' %></td></tr>
+        <tr><td class="text-muted">Region</td><td><%= cap.region || '-' %></td></tr>
+        <% if (cap.admins && cap.admins.length) { %>
+          <tr><td class="text-muted">Admins</td><td><%= cap.admins.join(', ') %></td></tr>
+        <% } %>
+        <% if (cap.capacityUserAccessRight) { %>
+          <tr><td class="text-muted">Your Access</td><td><%= cap.capacityUserAccessRight %></td></tr>
+        <% } %>
+        <% if (cap.tenantKeyId) { %>
+          <tr><td class="text-muted">Tenant Key ID</td><td><code><%= cap.tenantKeyId %></code></td></tr>
+        <% } %>
+      </tbody>
+    </table>
+
+    <% if (armProps) { %>
+      <h6 class="mt-3 mb-2">Azure Resource Manager Details</h6>
+      <table class="table table-sm table-hover mb-0">
+        <tbody>
+          <tr><td class="text-muted" style="width:200px;">ARM Resource ID</td><td><code class="small"><%= arm.id %></code></td></tr>
+          <tr><td class="text-muted">Location</td><td><%= arm.location || '-' %></td></tr>
+          <tr><td class="text-muted">Provisioning State</td><td><%= armProps.provisioningState || '-' %></td></tr>
+          <tr><td class="text-muted">State</td><td><%= armProps.state || '-' %></td></tr>
+          <% if (armProps.administration && armProps.administration.members) { %>
+            <tr><td class="text-muted">Capacity Admins</td><td><%= armProps.administration.members.join(', ') %></td></tr>
+          <% } %>
+          <% if (arm.sku) { %>
+            <tr><td class="text-muted">ARM SKU Name</td><td><code><%= arm.sku.name %></code></td></tr>
+            <tr><td class="text-muted">ARM SKU Tier</td><td><%= arm.sku.tier || '-' %></td></tr>
+          <% } %>
+          <% if (arm.tags) { %>
+            <tr><td class="text-muted">Tags</td><td><%= JSON.stringify(arm.tags) %></td></tr>
+          <% } %>
+        </tbody>
+      </table>
+    <% } else if (armError) { %>
+      <div class="alert alert-warning small mt-3 mb-0"><i class="bi bi-exclamation-triangle me-1"></i>ARM lookup: <%= armError %></div>
+    <% } %>
+  </div>
+</div>
+
+<!-- Schedules -->
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span><i class="bi bi-calendar-event me-2"></i>Pause / Resume Schedules</span>
+  </div>
+  <div class="card-body">
+    <div class="row g-2 align-items-end mb-3">
+      <div class="col-auto">
+        <label class="form-label small">Action</label>
+        <select class="form-select form-select-sm" id="schedAction" style="width:120px;">
+          <option value="suspend">Pause</option>
+          <option value="resume">Resume</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small">Frequency</label>
+        <select class="form-select form-select-sm" id="schedType" style="width:120px;" onchange="toggleSchedFields()">
+          <option value="daily">Daily</option>
+          <option value="hourly">Hourly</option>
+          <option value="weekdays">Weekdays</option>
+          <option value="weekly">Weekly</option>
+        </select>
+      </div>
+      <div class="col-auto" id="schedHourCol">
+        <label class="form-label small">Hour (UTC)</label>
+        <input type="number" class="form-control form-control-sm" id="schedHour" min="0" max="23" value="18" style="width:70px;">
+      </div>
+      <div class="col-auto" id="schedMinCol">
+        <label class="form-label small">Minute</label>
+        <input type="number" class="form-control form-control-sm" id="schedMin" min="0" max="59" value="0" style="width:70px;">
+      </div>
+      <div class="col-auto d-none" id="schedDayCol">
+        <label class="form-label small">Day</label>
+        <select class="form-select form-select-sm" id="schedDay" style="width:120px;">
+          <option value="Monday">Monday</option>
+          <option value="Tuesday">Tuesday</option>
+          <option value="Wednesday">Wednesday</option>
+          <option value="Thursday">Thursday</option>
+          <option value="Friday">Friday</option>
+          <option value="Saturday">Saturday</option>
+          <option value="Sunday">Sunday</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-sm btn-primary" onclick="addSchedule()"><i class="bi bi-plus me-1"></i>Add</button>
+      </div>
+    </div>
+
+    <% if (schedules.length) { %>
+      <table class="table table-sm table-hover mb-0">
+        <thead><tr><th>Action</th><th>Frequency</th><th>Time (UTC)</th><th>Day</th><th>Enabled</th><th></th></tr></thead>
+        <tbody>
+          <% schedules.forEach(function(s) { %>
+            <tr>
+              <td><span class="badge bg-<%= s.action === 'resume' ? 'success' : 'warning' %>"><%= s.action === 'resume' ? 'Resume' : 'Pause' %></span></td>
+              <td><%= s.schedule_type %></td>
+              <td><%= s.schedule_hour != null ? String(s.schedule_hour).padStart(2, '0') + ':' + String(s.schedule_minute || 0).padStart(2, '0') : '-' %></td>
+              <td><%= s.schedule_day || '-' %></td>
+              <td>
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" <%= s.enabled ? 'checked' : '' %> onchange="toggleSchedule(<%= s.id %>, this.checked)">
+                </div>
+              </td>
+              <td><button class="btn btn-sm btn-outline-danger p-0 px-1" onclick="deleteSchedule(<%= s.id %>)"><i class="bi bi-trash"></i></button></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    <% } else { %>
+      <p class="text-muted small mb-0">No schedules configured. Add one above to automate pause/resume.</p>
+    <% } %>
+  </div>
+</div>
+
+<script>
+var capName = '<%= capName.replace(/'/g, "\\'") %>';
+
+function getArmParams() {
+  return {
+    subscriptionId: document.getElementById('armSubscription').value.trim(),
+    resourceGroup: document.getElementById('armResourceGroup').value.trim(),
+  };
+}
+
+function showResult(msg, isError) {
+  var el = document.getElementById('actionResult');
+  el.innerHTML = '<div class="alert alert-' + (isError ? 'danger' : 'success') + ' small py-1 mb-0">' + msg + '</div>';
+  setTimeout(function() { el.innerHTML = ''; }, 5000);
+}
+
+async function suspendCapacity() {
+  var params = getArmParams();
+  if (!params.subscriptionId || !params.resourceGroup) { showResult('Subscription ID and Resource Group required.', true); return; }
+  document.getElementById('btnSuspend').disabled = true;
+  try {
+    var resp = await fetch('/capacities/' + encodeURIComponent(capName) + '/suspend', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    });
+    var data = await resp.json();
+    showResult(data.message || (data.success ? 'Pause initiated' : 'Failed'), !data.success);
+  } catch (e) { showResult(e.message, true); }
+  document.getElementById('btnSuspend').disabled = false;
+}
+
+async function resumeCapacity() {
+  var params = getArmParams();
+  if (!params.subscriptionId || !params.resourceGroup) { showResult('Subscription ID and Resource Group required.', true); return; }
+  document.getElementById('btnResume').disabled = true;
+  try {
+    var resp = await fetch('/capacities/' + encodeURIComponent(capName) + '/resume', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    });
+    var data = await resp.json();
+    showResult(data.message || (data.success ? 'Resume initiated' : 'Failed'), !data.success);
+  } catch (e) { showResult(e.message, true); }
+  document.getElementById('btnResume').disabled = false;
+}
+
+async function refreshState() {
+  try {
+    var resp = await fetch('/capacities/refresh');
+    var data = await resp.json();
+    if (data.success) {
+      var cap = (data.capacities || []).find(function(c) { return (c.displayName || '').toLowerCase() === capName.toLowerCase(); });
+      if (cap) {
+        var badge = document.getElementById('cap-state-badge');
+        badge.textContent = cap.state || 'Unknown';
+        badge.className = 'badge fs-6 bg-' + (cap.state === 'Active' ? 'success' : 'warning');
+        showResult('State refreshed: ' + cap.state, false);
+      } else { showResult('Capacity not found in refresh response.', true); }
+    } else { showResult(data.message, true); }
+  } catch (e) { showResult(e.message, true); }
+}
+
+function toggleSchedFields() {
+  var type = document.getElementById('schedType').value;
+  document.getElementById('schedDayCol').classList.toggle('d-none', type !== 'weekly');
+  document.getElementById('schedHourCol').classList.toggle('d-none', type === 'hourly');
+}
+
+async function addSchedule() {
+  var params = getArmParams();
+  if (!params.subscriptionId || !params.resourceGroup) { showResult('Fill in Subscription ID and Resource Group first.', true); return; }
+  var body = {
+    subscriptionId: params.subscriptionId,
+    resourceGroup: params.resourceGroup,
+    action: document.getElementById('schedAction').value,
+    scheduleType: document.getElementById('schedType').value,
+    hour: parseInt(document.getElementById('schedHour').value) || 0,
+    minute: parseInt(document.getElementById('schedMin').value) || 0,
+    day: document.getElementById('schedDay').value,
+  };
+  try {
+    var resp = await fetch('/capacities/' + encodeURIComponent(capName) + '/schedule', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    var data = await resp.json();
+    if (data.success) location.reload();
+    else showResult(data.message, true);
+  } catch (e) { showResult(e.message, true); }
+}
+
+async function deleteSchedule(id) {
+  if (!confirm('Delete this schedule?')) return;
+  try {
+    var resp = await fetch('/capacities/schedule/' + id, { method: 'DELETE' });
+    var data = await resp.json();
+    if (data.success) location.reload();
+    else showResult(data.message, true);
+  } catch (e) { showResult(e.message, true); }
+}
+
+async function toggleSchedule(id, enabled) {
+  try {
+    await fetch('/capacities/schedule/' + id + '/toggle', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: enabled })
+    });
+  } catch (e) { showResult(e.message, true); }
+}
+</script>
+
+<%- include('../partials/footer') %>
