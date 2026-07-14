@@ -221,6 +221,9 @@
 
 <script>
 async function refreshCapacities() {
+  var modal = new bootstrap.Modal(document.getElementById('refreshCapModal'));
+  document.getElementById('refreshCapStatus').innerHTML = '<div class="spinner-border text-primary"></div><p class="mt-2 text-muted">Fetching capacity states from API...</p>';
+  modal.show();
   try {
     var resp = await fetch('/capacities/refresh');
     var data = await resp.json();
@@ -232,8 +235,32 @@ async function refreshCapacities() {
           badge.className = 'badge bg-' + (cap.state === 'Active' ? 'success' : 'warning') + ' cap-state-' + (cap.id || '').toLowerCase();
         });
       });
+      var html = '<i class="bi bi-check-circle text-success fs-3"></i><p class="mt-2 mb-1 fw-semibold">Refresh Complete</p>';
+      html += '<table class="table table-sm mt-2 mb-0"><thead><tr><th>Capacity</th><th>State</th></tr></thead><tbody>';
+      data.capacities.forEach(function(cap) {
+        html += '<tr><td>' + (cap.displayName || '-') + '</td><td><span class="badge bg-' + (cap.state === 'Active' ? 'success' : 'warning') + '">' + (cap.state || '-') + '</span></td></tr>';
+      });
+      html += '</tbody></table>';
+      document.getElementById('refreshCapStatus').innerHTML = html;
+    } else {
+      document.getElementById('refreshCapStatus').innerHTML = '<i class="bi bi-exclamation-triangle text-warning fs-3"></i><p class="mt-2 text-danger">' + (data.message || 'Failed to refresh') + '</p>';
     }
-  } catch (e) { console.error(e); }
+  } catch (e) {
+    document.getElementById('refreshCapStatus').innerHTML = '<i class="bi bi-exclamation-triangle text-danger fs-3"></i><p class="mt-2 text-danger">' + e.message + '</p>';
+  }
 }
 </script>
+
+<!-- Refresh Capacities Modal -->
+<div class="modal fade" id="refreshCapModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-arrow-clockwise me-2"></i>Refresh Capacities</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body text-center py-4" id="refreshCapStatus"></div>
+    </div>
+  </div>
+</div>
 <%- include('../partials/footer') %>
