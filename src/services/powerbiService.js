@@ -95,51 +95,74 @@ function createPowerBIService(spConfig) {
     return fabricTokenPromise;
   }
 
-  // ── Workspaces: Fabric Admin API ──
-  // GET https://api.fabric.microsoft.com/v1/admin/workspaces
+  // ── Workspaces: try Fabric Admin API first, fallback to PBI Admin API ──
   async function getWorkspaces() {
-    const token = await getFabricToken();
+    // Try Fabric Admin API with Fabric token
     try {
-      const data = await safeGet(token, FABRIC_ADMIN + '/workspaces');
+      const fabricToken = await getFabricToken();
+      const data = await safeGet(fabricToken, FABRIC_ADMIN + '/workspaces');
       return data.workspaces || data.value || [];
-    } catch (err) {
-      // Fallback to PBI token if Fabric token fails
-      const pbiToken = await getToken();
-      const data = await safeGet(pbiToken, FABRIC_ADMIN + '/workspaces');
-      return data.workspaces || data.value || [];
-    }
+    } catch { /* fall through */ }
+    // Fallback: PBI Admin API (uses PBI scope, different auth context)
+    const pbiToken = await getToken();
+    const data = await safeGet(pbiToken, PBI_ADMIN + '/groups', { $top: 5000 });
+    return data.value || [];
   }
 
   // ── Single workspace detail ──
-  // GET https://api.fabric.microsoft.com/v1/admin/workspaces/{id}
   async function getWorkspaceById(workspaceId) {
-    const token = await getFabricToken();
     try {
-      return await safeGet(token, FABRIC_ADMIN + '/workspaces/' + workspaceId);
+      const fabricToken = await getFabricToken();
+      return await safeGet(fabricToken, FABRIC_ADMIN + '/workspaces/' + workspaceId);
+    } catch { /* fall through */ }
+    try {
+      const pbiToken = await getToken();
+      return await safeGet(pbiToken, PBI_ADMIN + '/groups/' + workspaceId);
     } catch {
       return { id: workspaceId, name: 'Workspace' };
     }
   }
 
-  // ── Items by workspace: Fabric Admin API (paginated) ──
-  // GET https://api.fabric.microsoft.com/v1/admin/items?workspaceId={id}
+  // ── Items: try Fabric Admin API, fallback to PBI Admin API ──
   async function getItemsByWorkspace(workspaceId) {
-    const token = await getFabricToken();
-    return fetchAllPaged(token, FABRIC_ADMIN + '/items', { workspaceId });
+    try {
+      const fabricToken = await getFabricToken();
+      return await fetchAllPaged(fabricToken, FABRIC_ADMIN + '/items', { workspaceId });
+    } catch { /* fall through */ }
+    // PBI fallback: get reports + datasets + dashboards + dataflows individually
+    const pbiToken = await getToken();
+    const items = [];
+    try {
+      const r = await safeGet(pbiToken, PBI_ADMIN + '/groups/' + workspaceId + '/reports');
+      (r.value || []).forEach(i => items.push({ ...i, type: 'Report', workspaceId }));
+    } catch {}
+    try {
+      const d = await safeGet(pbiToken, PBI_ADMIN + '/groups/' + workspaceId + '/datasets');
+      (d.value || []).forEach(i => items.push({ ...i, type: 'SemanticModel', workspaceId }));
+    } catch {}
+    try {
+      const db = await safeGet(pbiToken, PBI_ADMIN + '/groups/' + workspaceId + '/dashboards');
+      (db.value || []).forEach(i => items.push({ ...i, type: 'Dashboard', workspaceId }));
+    } catch {}
+    return items;
   }
 
-  // ── Items by type: Fabric Admin API (paginated) ──
-  // GET https://api.fabric.microsoft.com/v1/admin/items?type={type}
   async function getItemsByType(type) {
-    const token = await getFabricToken();
-    return fetchAllPaged(token, FABRIC_ADMIN + '/items', { type });
+    try {
+      const fabricToken = await getFabricToken();
+      return await fetchAllPaged(fabricToken, FABRIC_ADMIN + '/items', { type });
+    } catch {
+      return [];
+    }
   }
 
-  // ── All items: Fabric Admin API (paginated) ──
-  // GET https://api.fabric.microsoft.com/v1/admin/items
   async function getAllItems() {
-    const token = await getFabricToken();
-    return fetchAllPaged(token, FABRIC_ADMIN + '/items');
+    try {
+      const fabricToken = await getFabricToken();
+      return await fetchAllPaged(fabricToken, FABRIC_ADMIN + '/items');
+    } catch { /* fall through */ }
+    // PBI fallback: not available for all items at once, return empty
+    return [];
   }
 
   // ── Workspace users: PBI Admin API ──
