@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="<%= typeof theme !== 'undefined' && theme === 'dark' ? 'dark' : 'light' %>">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,43 +10,112 @@
   <link href="/css/style.css" rel="stylesheet">
 </head>
 <body>
-  <nav class="navbar navbar-expand-lg">
-    <div class="container-fluid">
-      <a class="navbar-brand d-flex align-items-center gap-2" href="/">
-        <span class="brand-logo">G</span>
-        Power BI Governance
+<%
+  var pagePath = typeof currentPath !== 'undefined' ? currentPath : '';
+  var breadcrumbItems = typeof breadcrumb !== 'undefined' ? breadcrumb : [];
+%>
+
+<div class="app-layout">
+  <!-- Sidebar backdrop (mobile) -->
+  <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="toggleSidebar()"></div>
+
+  <!-- Sidebar -->
+  <aside class="sidebar" id="appSidebar">
+    <a href="/" class="sidebar-brand">
+      <span class="brand-logo">G</span>
+      <span class="brand-text">Power BI Governance<small>Admin Portal</small></span>
+    </a>
+
+    <nav class="sidebar-nav">
+      <p class="nav-section-title">Main</p>
+      <a href="/" class="sidebar-link <%= pagePath === '/' || pagePath === '/home' ? 'active' : '' %>">
+        <i class="bi bi-house"></i> Home
       </a>
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"><span class="navbar-toggler-icon"></span></button>
-      <div class="collapse navbar-collapse" id="navbarNav">
-        <ul class="navbar-nav me-auto">
-          <li class="nav-item"><a class="nav-link" href="/workspaces"><i class="bi bi-collection me-1"></i>Workspaces</a></li>
-          <li class="nav-item"><a class="nav-link" href="/governance"><i class="bi bi-shield-check me-1"></i>Governance</a></li>
-          <li class="nav-item"><a class="nav-link" href="/analysis"><i class="bi bi-play-circle me-1"></i>Run Analysis</a></li>
-          <li class="nav-item"><a class="nav-link" href="/migrate"><i class="bi bi-arrow-left-right me-1"></i>Migrate</a></li>
-          <li class="nav-item"><a class="nav-link" href="/settings"><i class="bi bi-gear me-1"></i>Settings</a></li>
-        </ul>
-        <ul class="navbar-nav">
-          <% if (currentUser) { %>
-            <li class="nav-item dropdown">
-              <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown"><i class="bi bi-person-circle me-1"></i><%= currentUser.name %></a>
-              <ul class="dropdown-menu dropdown-menu-end">
-                <li><span class="dropdown-item-text small text-muted"><%= currentUser.email %></span></li>
-                <li><hr class="dropdown-divider"></li>
-                <li><a class="dropdown-item" href="/.auth/logout?post_logout_redirect_uri=/"><i class="bi bi-box-arrow-right me-2"></i>Sign Out</a></li>
-              </ul>
-            </li>
-          <% } else { %>
-            <li class="nav-item"><a class="nav-link" href="/.auth/login/aad?post_login_redirect_uri=<%= encodeURIComponent('/') %>"><i class="bi bi-box-arrow-in-right me-1"></i>Sign In</a></li>
-          <% } %>
-        </ul>
-      </div>
+      <a href="/workspaces" class="sidebar-link <%= pagePath.startsWith('/workspaces') ? 'active' : '' %>">
+        <i class="bi bi-collection"></i> Workspaces
+      </a>
+      <a href="/governance" class="sidebar-link <%= pagePath.startsWith('/governance') ? 'active' : '' %>">
+        <i class="bi bi-shield-check"></i> Governance
+      </a>
+
+      <p class="nav-section-title">Operations</p>
+      <a href="/analysis" class="sidebar-link <%= pagePath.startsWith('/analysis') ? 'active' : '' %>">
+        <i class="bi bi-play-circle"></i> Run Analysis
+      </a>
+      <a href="/migrate" class="sidebar-link <%= pagePath.startsWith('/migrate') ? 'active' : '' %>">
+        <i class="bi bi-arrow-left-right"></i> Migrate
+      </a>
+      <a href="/capacities" class="sidebar-link <%= pagePath.startsWith('/capacities') ? 'active' : '' %>">
+        <i class="bi bi-lightning"></i> Capacities
+      </a>
+
+      <p class="nav-section-title">Settings</p>
+      <a href="/settings" class="sidebar-link <%= pagePath.startsWith('/settings') ? 'active' : '' %>">
+        <i class="bi bi-gear"></i> Configuration
+      </a>
+    </nav>
+
+    <!-- Sidebar footer: user info -->
+    <div class="sidebar-footer">
+      <% if (currentUser) { %>
+        <div class="sidebar-user">
+          <div class="sidebar-user-avatar"><%= (currentUser.name || 'U').charAt(0).toUpperCase() %></div>
+          <div class="sidebar-user-info">
+            <div class="sidebar-user-name"><%= currentUser.name %></div>
+            <div class="sidebar-user-email"><%= currentUser.email || '' %></div>
+          </div>
+        </div>
+        <a href="/.auth/logout?post_logout_redirect_uri=/" class="sidebar-link mt-1" style="font-size:0.8rem;">
+          <i class="bi bi-box-arrow-right"></i> Sign Out
+        </a>
+      <% } else { %>
+        <a href="/.auth/login/aad?post_login_redirect_uri=<%= encodeURIComponent('/') %>" class="sidebar-link">
+          <i class="bi bi-box-arrow-in-right"></i> Sign In
+        </a>
+      <% } %>
     </div>
-  </nav>
-  <% if (typeof availableRuns !== 'undefined' && availableRuns && availableRuns.length > 0) { %>
-    <div class="run-selector-bar px-3 py-2">
-      <div class="container-fluid d-flex align-items-center gap-3 flex-wrap">
+  </aside>
+
+  <!-- Main content -->
+  <div class="main-content">
+    <!-- Top bar -->
+    <header class="topbar">
+      <button class="btn btn-sm mobile-toggle" onclick="toggleSidebar()" style="border:1px solid var(--color-border);width:34px;height:34px;display:none;">
+        <i class="bi bi-list"></i>
+      </button>
+
+      <!-- Breadcrumb -->
+      <nav class="topbar-breadcrumb">
+        <a href="/"><i class="bi bi-house-fill"></i></a>
+        <% if (breadcrumbItems.length) { %>
+          <% breadcrumbItems.forEach(function(item, idx) { %>
+            <span class="separator">/</span>
+            <% if (idx === breadcrumbItems.length - 1) { %>
+              <span class="current"><%= item.label %></span>
+            <% } else { %>
+              <a href="<%= item.href %>"><%= item.label %></a>
+            <% } %>
+          <% }) %>
+        <% } %>
+      </nav>
+
+      <!-- Top bar actions -->
+      <div class="topbar-actions">
+        <span class="topbar-timestamp" id="lastRefreshed"></span>
+        <button class="btn-density-toggle" onclick="toggleDensity()" title="Toggle compact/comfortable view (Ctrl+D)">
+          <i class="bi bi-distribute-vertical" id="densityIcon"></i>
+        </button>
+        <button class="btn-theme-toggle" onclick="toggleTheme()" title="Toggle dark/light mode (Ctrl+Shift+D)">
+          <i class="bi bi-moon" id="themeIcon"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Run selector -->
+    <% if (typeof availableRuns !== 'undefined' && availableRuns && availableRuns.length > 0) { %>
+      <div class="run-selector-bar">
         <span class="fw-bold small text-nowrap" style="color: var(--color-primary);"><i class="bi bi-building me-1"></i>Tenant / Scan:</span>
-        <select class="form-select form-select-sm" style="max-width: 500px;" id="globalRunSelector" onchange="switchGlobalRun(this.value)">
+        <select class="form-select form-select-sm" style="max-width: 440px;" id="globalRunSelector" onchange="switchGlobalRun(this.value)">
           <% availableRuns.forEach(function(r) { %>
             <option value="<%= r.id %>" <%= (typeof selectedRunId !== 'undefined' && selectedRunId === r.id) ? 'selected' : '' %>>
               <%= r.sp_name %> (<%= r.tenant_id %>) &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
@@ -58,15 +127,71 @@
           <span class="small" style="color: var(--color-text-muted);">Workspaces: <%= globalRun.total_workspaces || '-' %> | Reports: <%= globalRun.total_reports || '-' %></span>
         <% } %>
       </div>
-    </div>
-  <% } %>
-  <main class="container-fluid py-4">
-  <script>
-  function switchGlobalRun(runId) {
-    fetch('/api/select-run', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ runId: parseInt(runId) })
-    }).then(function() { window.location.reload(); });
+    <% } %>
+
+    <!-- Page content -->
+    <div class="page-content">
+
+<script>
+function switchGlobalRun(runId) {
+  fetch('/api/select-run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ runId: parseInt(runId) })
+  }).then(function() { window.location.reload(); });
+}
+
+function toggleSidebar() {
+  document.getElementById('appSidebar').classList.toggle('show');
+  document.getElementById('sidebarBackdrop').classList.toggle('show');
+}
+
+// Theme
+function toggleTheme() {
+  var html = document.documentElement;
+  var current = html.getAttribute('data-theme');
+  var next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('pbi-gov-theme', next);
+  updateThemeIcon(next);
+  showToast('Theme switched to ' + next + ' mode', 'info');
+}
+function updateThemeIcon(theme) {
+  var icon = document.getElementById('themeIcon');
+  icon.className = theme === 'dark' ? 'bi bi-sun' : 'bi bi-moon';
+}
+
+// Density
+function toggleDensity() {
+  var body = document.body;
+  var current = body.getAttribute('data-density');
+  var next = current === 'compact' ? 'comfortable' : 'compact';
+  body.setAttribute('data-density', next);
+  localStorage.setItem('pbi-gov-density', next);
+  var icon = document.getElementById('densityIcon');
+  icon.className = next === 'compact' ? 'bi bi-distribute-horizontal' : 'bi bi-distribute-vertical';
+  showToast('View: ' + next, 'info');
+}
+
+// Apply saved preferences
+(function() {
+  var savedTheme = localStorage.getItem('pbi-gov-theme');
+  if (savedTheme) {
+    document.documentElement.setAttribute('data-theme', savedTheme);
+    updateThemeIcon(savedTheme);
+  } else {
+    updateThemeIcon('light');
   }
-  </script>
+  var savedDensity = localStorage.getItem('pbi-gov-density');
+  if (savedDensity) {
+    document.body.setAttribute('data-density', savedDensity);
+    if (savedDensity === 'compact') {
+      var icon = document.getElementById('densityIcon');
+      if (icon) icon.className = 'bi bi-distribute-horizontal';
+    }
+  }
+  // Last refreshed timestamp
+  var ts = document.getElementById('lastRefreshed');
+  if (ts) ts.textContent = new Date().toLocaleTimeString();
+})();
+</script>

@@ -48,6 +48,27 @@ app.use(flash());
 // Parse EasyAuth user from headers (Azure App Service built-in auth)
 app.use(parseEasyAuthUser);
 
+// Global context: current path for sidebar highlighting + auto-breadcrumb
+app.use((req, res, next) => {
+  res.locals.currentPath = req.path;
+  // Auto-generate breadcrumb from path segments
+  const segments = req.path.split('/').filter(Boolean);
+  const labelMap = {
+    workspaces: 'Workspaces', governance: 'Governance', analysis: 'Run Analysis',
+    migrate: 'Migrate', capacities: 'Capacities', settings: 'Configuration',
+    overview: 'Overview', users: 'Users', artifacts: 'Artifacts'
+  };
+  const breadcrumb = [];
+  let href = '';
+  segments.forEach((seg, i) => {
+    href += '/' + seg;
+    const label = labelMap[seg] || (seg.length > 20 ? seg.substring(0, 20) + '…' : seg);
+    breadcrumb.push({ label, href });
+  });
+  res.locals.breadcrumb = breadcrumb;
+  next();
+});
+
 // Global context: selected run + available runs, loaded once per request
 app.use(async (req, res, next) => {
   res.locals.currentUser = req.user;
@@ -127,6 +148,8 @@ app.use((err, req, res, _next) => {
     title: 'Error',
     user: req.user,
     message: err.message || 'An unexpected error occurred.',
+    currentPath: req.path,
+    breadcrumb: [{ label: 'Error', href: '#' }],
   });
 });
 

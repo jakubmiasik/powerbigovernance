@@ -1,77 +1,187 @@
-</main>
-  <footer class="text-center text-muted py-3 border-top mt-4">
-    <small>Power BI Governance App &copy; <%= new Date().getFullYear() %></small>
-  </footer>
-  <script>
-  function filterTable(input, tableId) {
-    var filter = (input.value || '').toLowerCase();
-    document.querySelectorAll('#' + tableId + ' tbody tr').forEach(function(row) {
-      var text = (row.getAttribute('data-filter') || row.textContent || '').toLowerCase();
-      row.style.display = text.includes(filter) ? '' : 'none';
-    });
-  }
+    </div><!-- /.page-content -->
 
-  function filterCapacities(input) {
-    var filter = (input.value || '').toLowerCase();
-    document.querySelectorAll('.cap-filter-table tbody tr').forEach(function(row) {
-      var text = (row.getAttribute('data-filter') || row.textContent || '').toLowerCase();
-      row.style.display = text.includes(filter) ? '' : 'none';
-    });
-  }
+    <footer class="app-footer">
+      Power BI Governance App &copy; <%= new Date().getFullYear() %> &nbsp;|&nbsp;
+      <span class="kbd-hint">?</span> Keyboard shortcuts
+    </footer>
+  </div><!-- /.main-content -->
+</div><!-- /.app-layout -->
 
-  // Sortable table headers — add class "sortable" to any <table> to enable
-  document.addEventListener('DOMContentLoaded', function() {
-    document.querySelectorAll('table').forEach(function(table) {
-      var headers = table.querySelectorAll('thead th');
-      headers.forEach(function(th, colIndex) {
-        if (th.textContent.trim() === '' || th.textContent.trim() === 'Actions' || th.textContent.trim() === 'Details') return;
-        th.style.cursor = 'pointer';
-        th.style.userSelect = 'none';
-        th.title = 'Click to sort';
-        var sortIcon = document.createElement('i');
-        sortIcon.className = 'bi bi-chevron-expand ms-1 small text-muted';
-        th.appendChild(sortIcon);
+<!-- Toast container -->
+<div class="toast-container" id="toastContainer"></div>
 
-        th.addEventListener('click', function() {
-          var tbody = table.querySelector('tbody');
-          if (!tbody) return;
-          var rows = Array.from(tbody.querySelectorAll('tr'));
-          var asc = th.getAttribute('data-sort-dir') !== 'asc';
+<!-- Keyboard shortcuts modal -->
+<div class="modal fade" id="kbdModal" tabindex="-1">
+  <div class="modal-dialog modal-sm modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title">Keyboard Shortcuts</h6>
+        <button type="button" class="btn-close btn-close-sm" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-3" style="font-size:0.82rem;">
+        <table class="table table-sm mb-0">
+          <tbody>
+            <tr><td><span class="kbd-hint">/</span></td><td>Focus search</td></tr>
+            <tr><td><span class="kbd-hint">R</span></td><td>Refresh data</td></tr>
+            <tr><td><span class="kbd-hint">G then H</span></td><td>Go to Home</td></tr>
+            <tr><td><span class="kbd-hint">G then W</span></td><td>Go to Workspaces</td></tr>
+            <tr><td><span class="kbd-hint">G then G</span></td><td>Go to Governance</td></tr>
+            <tr><td><span class="kbd-hint">G then M</span></td><td>Go to Migrate</td></tr>
+            <tr><td><span class="kbd-hint">Ctrl+Shift+D</span></td><td>Toggle dark mode</td></tr>
+            <tr><td><span class="kbd-hint">Ctrl+D</span></td><td>Toggle density</td></tr>
+            <tr><td><span class="kbd-hint">?</span></td><td>Show this help</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
 
-          // Reset all header icons in this table
-          headers.forEach(function(h) {
-            var icon = h.querySelector('i.bi');
-            if (icon) { icon.className = 'bi bi-chevron-expand ms-1 small text-muted'; }
-            h.removeAttribute('data-sort-dir');
-          });
+<script>
+// ──── Toast notification system ────
+function showToast(message, type) {
+  type = type || 'info';
+  var container = document.getElementById('toastContainer');
+  var toast = document.createElement('div');
+  toast.className = 'toast-item toast-' + type;
+  var iconMap = { success: 'bi-check-circle-fill text-success', error: 'bi-x-circle-fill text-danger', info: 'bi-info-circle-fill text-primary' };
+  toast.innerHTML = '<i class="bi ' + (iconMap[type] || iconMap.info) + '"></i><span>' + message + '</span>';
+  container.appendChild(toast);
+  setTimeout(function() {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateX(100%)';
+    toast.style.transition = 'all .3s ease';
+    setTimeout(function() { toast.remove(); }, 300);
+  }, 3500);
+}
 
-          th.setAttribute('data-sort-dir', asc ? 'asc' : 'desc');
-          sortIcon.className = asc ? 'bi bi-chevron-up ms-1 small' : 'bi bi-chevron-down ms-1 small';
+// ──── Table filter (global helper) ────
+function filterTable(input, tableId) {
+  var filter = (input.value || '').toLowerCase();
+  document.querySelectorAll('#' + tableId + ' tbody tr').forEach(function(row) {
+    var text = (row.getAttribute('data-filter') || row.textContent || '').toLowerCase();
+    row.style.display = text.includes(filter) ? '' : 'none';
+  });
+}
 
-          rows.sort(function(a, b) {
-            var aCell = a.cells[colIndex];
-            var bCell = b.cells[colIndex];
-            if (!aCell || !bCell) return 0;
-            var aVal = (aCell.getAttribute('data-sort-value') || aCell.textContent || '').trim();
-            var bVal = (bCell.getAttribute('data-sort-value') || bCell.textContent || '').trim();
-            // Try numeric comparison
-            var aNum = parseFloat(aVal);
-            var bNum = parseFloat(bVal);
-            if (!isNaN(aNum) && !isNaN(bNum)) {
-              return asc ? aNum - bNum : bNum - aNum;
-            }
-            // String comparison
-            var cmp = aVal.localeCompare(bVal, undefined, { sensitivity: 'base' });
-            return asc ? cmp : -cmp;
-          });
+function filterCapacities(input) {
+  var filter = (input.value || '').toLowerCase();
+  document.querySelectorAll('.cap-filter-table tbody tr').forEach(function(row) {
+    var text = (row.getAttribute('data-filter') || row.textContent || '').toLowerCase();
+    row.style.display = text.includes(filter) ? '' : 'none';
+  });
+}
 
-          rows.forEach(function(row) { tbody.appendChild(row); });
+// ──── Sortable table headers ────
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('table').forEach(function(table) {
+    var headers = table.querySelectorAll('thead th');
+    headers.forEach(function(th, colIndex) {
+      if (th.textContent.trim() === '' || th.textContent.trim() === 'Actions' || th.textContent.trim() === 'Details') return;
+      th.style.cursor = 'pointer';
+      th.style.userSelect = 'none';
+      th.title = 'Click to sort';
+      var sortIcon = document.createElement('i');
+      sortIcon.className = 'bi bi-chevron-expand ms-1 small text-muted';
+      th.appendChild(sortIcon);
+
+      th.addEventListener('click', function() {
+        var tbody = table.querySelector('tbody');
+        if (!tbody) return;
+        var rows = Array.from(tbody.querySelectorAll('tr'));
+        var asc = th.getAttribute('data-sort-dir') !== 'asc';
+        headers.forEach(function(h) {
+          var icon = h.querySelector('i.bi');
+          if (icon) icon.className = 'bi bi-chevron-expand ms-1 small text-muted';
+          h.removeAttribute('data-sort-dir');
         });
+        th.setAttribute('data-sort-dir', asc ? 'asc' : 'desc');
+        sortIcon.className = asc ? 'bi bi-chevron-up ms-1 small' : 'bi bi-chevron-down ms-1 small';
+        rows.sort(function(a, b) {
+          var aCell = a.cells[colIndex], bCell = b.cells[colIndex];
+          if (!aCell || !bCell) return 0;
+          var aVal = (aCell.getAttribute('data-sort-value') || aCell.textContent || '').trim();
+          var bVal = (bCell.getAttribute('data-sort-value') || bCell.textContent || '').trim();
+          var aNum = parseFloat(aVal), bNum = parseFloat(bVal);
+          if (!isNaN(aNum) && !isNaN(bNum)) return asc ? aNum - bNum : bNum - aNum;
+          var cmp = aVal.localeCompare(bVal, undefined, { sensitivity: 'base' });
+          return asc ? cmp : -cmp;
+        });
+        rows.forEach(function(row) { tbody.appendChild(row); });
       });
     });
   });
-  </script>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="/js/app.js"></script>
+});
+
+// ──── Keyboard shortcuts ────
+(function() {
+  var gPressed = false;
+  var gTimeout = null;
+
+  document.addEventListener('keydown', function(e) {
+    // Ignore when typing in inputs
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
+
+    // ? — show shortcuts modal
+    if (e.key === '?' && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      var modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('kbdModal'));
+      modal.toggle();
+      return;
+    }
+
+    // Ctrl+Shift+D — dark mode
+    if (e.key === 'D' && e.ctrlKey && e.shiftKey) {
+      e.preventDefault();
+      toggleTheme();
+      return;
+    }
+
+    // Ctrl+D — density (prevent browser bookmark)
+    if (e.key === 'd' && e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      toggleDensity();
+      return;
+    }
+
+    // / — focus search
+    if (e.key === '/') {
+      var searchInput = document.querySelector('.table-search input, input[type="search"], input[placeholder*="earch"], input[placeholder*="ilter"]');
+      if (searchInput) {
+        e.preventDefault();
+        searchInput.focus();
+        return;
+      }
+    }
+
+    // R — refresh (click first refresh button)
+    if (e.key === 'r' || e.key === 'R') {
+      if (!e.ctrlKey && !e.altKey && !e.metaKey) {
+        var refreshBtn = document.querySelector('[onclick*="refresh"], button[title*="Refresh"]');
+        if (refreshBtn) { e.preventDefault(); refreshBtn.click(); return; }
+      }
+    }
+
+    // G then ... navigation
+    if (e.key === 'g' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (gPressed) return;
+      gPressed = true;
+      clearTimeout(gTimeout);
+      gTimeout = setTimeout(function() { gPressed = false; }, 1000);
+      return;
+    }
+
+    if (gPressed) {
+      gPressed = false;
+      clearTimeout(gTimeout);
+      var navMap = { h: '/', w: '/workspaces', g: '/governance', m: '/migrate', a: '/analysis', c: '/capacities', s: '/settings' };
+      var dest = navMap[e.key];
+      if (dest) { e.preventDefault(); window.location.href = dest; }
+    }
+  });
+})();
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/js/app.js"></script>
 </body>
 </html>
