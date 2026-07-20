@@ -98,15 +98,22 @@ function createPowerBIService(spConfig) {
   // ── Workspaces: Fabric Admin API ──
   // GET https://api.fabric.microsoft.com/v1/admin/workspaces
   async function getWorkspaces() {
-    const token = await getToken();
-    const data = await safeGet(token, FABRIC_ADMIN + '/workspaces');
-    return data.workspaces || data.value || [];
+    const token = await getFabricToken();
+    try {
+      const data = await safeGet(token, FABRIC_ADMIN + '/workspaces');
+      return data.workspaces || data.value || [];
+    } catch (err) {
+      // Fallback to PBI token if Fabric token fails
+      const pbiToken = await getToken();
+      const data = await safeGet(pbiToken, FABRIC_ADMIN + '/workspaces');
+      return data.workspaces || data.value || [];
+    }
   }
 
   // ── Single workspace detail ──
   // GET https://api.fabric.microsoft.com/v1/admin/workspaces/{id}
   async function getWorkspaceById(workspaceId) {
-    const token = await getToken();
+    const token = await getFabricToken();
     try {
       return await safeGet(token, FABRIC_ADMIN + '/workspaces/' + workspaceId);
     } catch {
@@ -117,21 +124,21 @@ function createPowerBIService(spConfig) {
   // ── Items by workspace: Fabric Admin API (paginated) ──
   // GET https://api.fabric.microsoft.com/v1/admin/items?workspaceId={id}
   async function getItemsByWorkspace(workspaceId) {
-    const token = await getToken();
+    const token = await getFabricToken();
     return fetchAllPaged(token, FABRIC_ADMIN + '/items', { workspaceId });
   }
 
   // ── Items by type: Fabric Admin API (paginated) ──
   // GET https://api.fabric.microsoft.com/v1/admin/items?type={type}
   async function getItemsByType(type) {
-    const token = await getToken();
+    const token = await getFabricToken();
     return fetchAllPaged(token, FABRIC_ADMIN + '/items', { type });
   }
 
   // ── All items: Fabric Admin API (paginated) ──
   // GET https://api.fabric.microsoft.com/v1/admin/items
   async function getAllItems() {
-    const token = await getToken();
+    const token = await getFabricToken();
     return fetchAllPaged(token, FABRIC_ADMIN + '/items');
   }
 
