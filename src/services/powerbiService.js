@@ -77,10 +77,14 @@ async function fetchAllPaged(token, url, params = {}) {
 function createPowerBIService(spConfig) {
   let tokenPromise = null;
   let fabricTokenPromise = null;
+  let fabricApiAvailable = null; // null = unknown, true/false = tested
 
   async function getToken() {
     if (!tokenPromise) {
-      tokenPromise = getAccessTokenForSP(spConfig);
+      tokenPromise = getAccessTokenForSP(spConfig).catch(err => {
+        tokenPromise = null;
+        throw err;
+      });
       setTimeout(() => { tokenPromise = null; }, 50 * 60 * 1000);
     }
     return tokenPromise;
@@ -89,21 +93,34 @@ function createPowerBIService(spConfig) {
   // Separate token for Fabric Core API write operations (migration)
   async function getFabricToken() {
     if (!fabricTokenPromise) {
-      fabricTokenPromise = getFabricTokenForSP(spConfig);
+      fabricTokenPromise = getFabricTokenForSP(spConfig).catch(err => {
+        fabricTokenPromise = null;
+        throw err;
+      });
       setTimeout(() => { fabricTokenPromise = null; }, 50 * 60 * 1000);
     }
     return fabricTokenPromise;
   }
 
+  // Try Fabric Admin API; if it fails, mark as unavailable and skip future attempts
+  async function tryFabricGet(path, params) {
+    if (fabricApiAvailable === false) return null;
+    try {
+      const token = await getFabricToken();
+      const data = await safeGet(token, FABRIC_ADMIN + path, params || {});
+      fabricApiAvailable = true;
+      return data;
+    } catch {
+      fabricApiAvailable = false;
+      return null;
+    }
+  }
+
   // ── Workspaces: try Fabric Admin API first, fallback to PBI Admin API ──
   async function getWorkspaces() {
-    // Try Fabric Admin API with Fabric token
-    try {
-      const fabricToken = await getFabricToken();
-      const data = await safeGet(fabricToken, FABRIC_ADMIN + '/workspaces');
-      return data.workspaces || data.value || [];
-    } catch { /* fall through */ }
-    // Fallback: PBI Admin API (uses PBI scope, different auth context)
+    const fabricData = await tryFabricGet('/workspaces');
+    if (fabricData) return fabricData.workspaces || fabricData.value || [];
+    // Fallback: PBI Admin API
     const pbiToken = await getToken();
     const data = await safeGet(pbiToken, PBI_ADMIN + '/groups', { $top: 5000 });
     return data.value || [];
@@ -111,10 +128,8 @@ function createPowerBIService(spConfig) {
 
   // ── Single workspace detail ──
   async function getWorkspaceById(workspaceId) {
-    try {
-      const fabricToken = await getFabricToken();
-      return await safeGet(fabricToken, FABRIC_ADMIN + '/workspaces/' + workspaceId);
-    } catch { /* fall through */ }
+    const fabricData = await tryFabricGet('/workspaces/' + workspaceId);
+    if (fabricData && fabricData.id) return fabricData;
     try {
       const pbiToken = await getToken();
       return await safeGet(pbiToken, PBI_ADMIN + '/groups/' + workspaceId);
@@ -125,11 +140,15 @@ function createPowerBIService(spConfig) {
 
   // ── Items: try Fabric Admin API, fallback to PBI Admin API ──
   async function getItemsByWorkspace(workspaceId) {
-    try {
-      const fabricToken = await getFabricToken();
-      return await fetchAllPaged(fabricToken, FABRIC_ADMIN + '/items', { workspaceId });
-    } catch { /* fall through */ }
-    // PBI fallback: get reports + datasets + dashboards + dataflows individually
+    if (fabricApiAvailable !== false) {
+      try {
+        const token = await getFabricToken();
+        const items = await fetchAllPaged(token, FABRIC_ADMIN + '/items', { workspaceId });
+        fabricApiAvailable = true;
+        return items;
+      } catch { fabricApiAvailable = false; }
+    }
+    // PBI fallback: get reports + datasets + dashboards individually
     const pbiToken = await getToken();
     const items = [];
     try {
@@ -148,20 +167,26 @@ function createPowerBIService(spConfig) {
   }
 
   async function getItemsByType(type) {
-    try {
-      const fabricToken = await getFabricToken();
-      return await fetchAllPaged(fabricToken, FABRIC_ADMIN + '/items', { type });
-    } catch {
-      return [];
+    if (fabricApiAvailable !== false) {
+      try {
+        const token = await getFabricToken();
+        const items = await fetchAllPaged(token, FABRIC_ADMIN + '/items', { type });
+        fabricApiAvailable = true;
+        return items;
+      } catch { fabricApiAvailable = false; }
     }
+    return [];
   }
 
   async function getAllItems() {
-    try {
-      const fabricToken = await getFabricToken();
-      return await fetchAllPaged(fabricToken, FABRIC_ADMIN + '/items');
-    } catch { /* fall through */ }
-    // PBI fallback: not available for all items at once, return empty
+    if (fabricApiAvailable !== false) {
+      try {
+        const token = await getFabricToken();
+        const items = await fetchAllPaged(token, FABRIC_ADMIN + '/items');
+        fabricApiAvailable = true;
+        return items;
+      } catch { fabricApiAvailable = false; }
+    }
     return [];
   }
 
