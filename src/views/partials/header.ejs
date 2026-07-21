@@ -205,9 +205,12 @@ function toggleDensity() {
       if (icon) icon.className = 'bi bi-distribute-horizontal';
     }
   }
-  // Sidebar collapse state
+  // Sidebar: collapsed by default
   var savedSidebar = localStorage.getItem('pbi-gov-sidebar');
-  if (savedSidebar === 'collapsed') {
+  if (savedSidebar === 'expanded') {
+    // user explicitly expanded — keep it open
+  } else {
+    // default or saved as collapsed
     var sidebar = document.getElementById('appSidebar');
     if (sidebar) { sidebar.classList.add('collapsed'); document.body.classList.add('sidebar-collapsed'); }
     var ci = document.getElementById('collapseIcon');

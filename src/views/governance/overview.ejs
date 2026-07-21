@@ -6,6 +6,7 @@
   var inactiveWs = (governanceSummary.totalWorkspaces || 0) - activeWs;
   var cards = [
     { label: 'Workspaces', count: governanceSummary.totalWorkspaces || 0, color: 'primary', icon: 'collection', href: '#workspace-governance-card', sub: activeWs + ' Active' + (inactiveWs > 0 ? ' / ' + inactiveWs + ' Inactive' : '') },
+    { label: 'Capacities', count: (governanceSummary.capacities || []).length, color: 'warning', icon: 'lightning', href: '/capacities', sub: (governanceSummary.capacities || []).filter(function(c){return c.state==='Active';}).length + ' Active / ' + (governanceSummary.capacities || []).filter(function(c){return c.state!=='Active';}).length + ' Suspended' },
     { label: 'Total Items', count: governanceSummary.totalItems || 0, color: 'dark', icon: 'boxes', href: '/governance/artifacts?type=all' + (runId ? '&runId=' + runId : '') },
     { label: 'Reports', count: governanceSummary.totalReports || 0, color: 'primary', icon: 'file-earmark-bar-graph', href: '/governance/artifacts?type=Report' + (runId ? '&runId=' + runId : '') },
     { label: 'Semantic Models', count: governanceSummary.totalDatasets || 0, color: 'success', icon: 'database', href: '/governance/artifacts?type=SemanticModel' + (runId ? '&runId=' + runId : '') },
@@ -102,45 +103,23 @@
     </div>
     <div class="col-lg-4">
       <div class="card h-100">
-        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-          <span><i class="bi bi-lightning me-2"></i>Capacities</span>
-          <button class="btn btn-sm btn-outline-primary" onclick="refreshCapacities()" title="Refresh capacity states"><i class="bi bi-arrow-clockwise"></i></button>
-        </div>
-        <%
-          var allCaps = governanceSummary.capacities || [];
-          var activeCaps = allCaps.filter(function(c) { return c.state === 'Active'; });
-          var suspendedCaps = allCaps.filter(function(c) { return c.state !== 'Active'; });
-        %>
-        <% if (allCaps.length) { %>
-          <div class="card-body p-0">
-            <div class="table-responsive" style="max-height: 210px; overflow-y: auto;">
-              <table class="table table-sm mb-0">
-                <thead><tr><th>Name</th><th>SKU</th><th>Region</th><th>State</th></tr></thead>
-                <tbody>
-                  <% activeCaps.forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); %>
-                    <tr>
-                      <td class="small"><a href="/capacities/<%= cap.id %>" class="text-decoration-none fw-semibold"><%= cap.displayName || 'Unnamed' %></a></td>
-                      <td><code><%= sku || '-' %></code></td>
-                      <td class="small"><%= cap.region || '-' %></td>
-                      <td><span class="badge bg-success cap-state-<%= (cap.id || '').toLowerCase() %>">Active</span></td>
-                    </tr>
-                  <% }) %>
-                </tbody>
-              </table>
-            </div>
-            <% if (suspendedCaps.length) { %>
-              <div class="px-3 py-2 border-top" style="background: var(--color-surface-offset);">
-                <span class="badge bg-warning me-1"><%= suspendedCaps.length %></span>
-                <span class="small text-muted">Suspended / Paused</span>
-                <% suspendedCaps.forEach(function(cap) { %>
-                  <a href="/capacities/<%= cap.id %>" class="badge bg-light text-dark text-decoration-none ms-1" title="<%= cap.state || 'Suspended' %>"><%= cap.displayName || 'Unnamed' %></a>
-                <% }) %>
-              </div>
-            <% } %>
+        <div class="card-header"><i class="bi bi-lightning me-2"></i>Capacities</div>
+        <div class="card-body text-center py-4">
+          <%
+            var allCaps = governanceSummary.capacities || [];
+            var activeCaps = allCaps.filter(function(c) { return c.state === 'Active'; });
+            var suspendedCaps = allCaps.filter(function(c) { return c.state !== 'Active'; });
+          %>
+          <div class="mb-2">
+            <span class="fs-2 fw-bold" style="color: var(--color-primary);"><%= allCaps.length %></span>
+            <span class="small text-muted d-block">Total Capacities</span>
           </div>
-        <% } else { %>
-          <div class="card-body text-muted small">No dedicated capacities found.</div>
-        <% } %>
+          <div class="d-flex justify-content-center gap-3 mb-3">
+            <div><span class="badge bg-success fs-6"><%= activeCaps.length %></span><br><small class="text-muted">Active</small></div>
+            <div><span class="badge bg-warning fs-6"><%= suspendedCaps.length %></span><br><small class="text-muted">Suspended</small></div>
+          </div>
+          <a href="/capacities" class="btn btn-sm btn-outline-primary"><i class="bi bi-arrow-right me-1"></i>Manage Capacities</a>
+        </div>
         <div class="card-footer small" style="background: var(--color-surface-offset);">
           Dedicated: <strong><%= governanceSummary.workspacesOnCapacity || 0 %></strong> workspaces | Shared: <strong><%= governanceSummary.workspacesOnSharedCapacity || 0 %></strong> workspaces
         </div>
@@ -203,48 +182,4 @@
   </div>
 <% } %>
 
-<script>
-async function refreshCapacities() {
-  var modal = new bootstrap.Modal(document.getElementById('refreshCapModal'));
-  document.getElementById('refreshCapStatus').innerHTML = '<div class="spinner-border text-primary"></div><p class="mt-2 text-muted">Fetching capacity states from API...</p>';
-  modal.show();
-  try {
-    var resp = await fetch('/capacities/refresh');
-    var data = await resp.json();
-    if (data.success && data.capacities) {
-      data.capacities.forEach(function(cap) {
-        var badges = document.querySelectorAll('.cap-state-' + (cap.id || '').toLowerCase());
-        badges.forEach(function(badge) {
-          badge.textContent = cap.state || '-';
-          badge.className = 'badge bg-' + (cap.state === 'Active' ? 'success' : 'warning') + ' cap-state-' + (cap.id || '').toLowerCase();
-        });
-      });
-      var html = '<i class="bi bi-check-circle text-success fs-3"></i><p class="mt-2 mb-1 fw-semibold">Refresh Complete</p>';
-      html += '<table class="table table-sm mt-2 mb-0"><thead><tr><th>Capacity</th><th>State</th></tr></thead><tbody>';
-      data.capacities.forEach(function(cap) {
-        html += '<tr><td>' + (cap.displayName || '-') + '</td><td><span class="badge bg-' + (cap.state === 'Active' ? 'success' : 'warning') + '">' + (cap.state || '-') + '</span></td></tr>';
-      });
-      html += '</tbody></table>';
-      document.getElementById('refreshCapStatus').innerHTML = html;
-    } else {
-      document.getElementById('refreshCapStatus').innerHTML = '<i class="bi bi-exclamation-triangle text-warning fs-3"></i><p class="mt-2 text-danger">' + (data.message || 'Failed to refresh') + '</p>';
-    }
-  } catch (e) {
-    document.getElementById('refreshCapStatus').innerHTML = '<i class="bi bi-exclamation-triangle text-danger fs-3"></i><p class="mt-2 text-danger">' + e.message + '</p>';
-  }
-}
-</script>
-
-<!-- Refresh Capacities Modal -->
-<div class="modal fade" id="refreshCapModal" tabindex="-1">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title"><i class="bi bi-arrow-clockwise me-2"></i>Refresh Capacities</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-      </div>
-      <div class="modal-body text-center py-4" id="refreshCapStatus"></div>
-    </div>
-  </div>
-</div>
 <%- include('../partials/footer') %>
