@@ -4,9 +4,18 @@
   var runId = run && run.id ? run.id : '';
   var activeWs = (governanceSummary.workspacesByState || {})['Active'] || 0;
   var inactiveWs = (governanceSummary.totalWorkspaces || 0) - activeWs;
+  // Format bytes helper
+  function formatBytesEjs(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+  }
+
   var cards = [
     { label: 'Workspaces', count: governanceSummary.totalWorkspaces || 0, color: 'primary', icon: 'collection', href: '#workspace-governance-card', sub: activeWs + ' Active' + (inactiveWs > 0 ? ' / ' + inactiveWs + ' Inactive' : '') },
     { label: 'Capacities', count: (governanceSummary.capacities || []).length, color: 'warning', icon: 'lightning', href: '/capacities', sub: (governanceSummary.capacities || []).filter(function(c){return c.state==='Active';}).length + ' Active / ' + (governanceSummary.capacities || []).filter(function(c){return c.state!=='Active';}).length + ' Suspended' },
+    { label: 'OneLake Storage', count: formatBytesEjs(governanceSummary.totalStorageSize || 0), color: 'teal', icon: 'hdd', href: '#tenant-storage-card', sub: (governanceSummary.storageScannedCount || 0) + ' workspaces with data' },
     { label: 'Total Items', count: governanceSummary.totalItems || 0, color: 'dark', icon: 'boxes', href: '/governance/artifacts?type=all' + (runId ? '&runId=' + runId : '') },
     { label: 'Reports', count: governanceSummary.totalReports || 0, color: 'primary', icon: 'file-earmark-bar-graph', href: '/governance/artifacts?type=Report' + (runId ? '&runId=' + runId : '') },
     { label: 'Semantic Models', count: governanceSummary.totalDatasets || 0, color: 'success', icon: 'database', href: '/governance/artifacts?type=SemanticModel' + (runId ? '&runId=' + runId : '') },
@@ -128,50 +137,55 @@
   </div>
 
   <!-- Tenant Storage Summary -->
-  <div class="card mb-4">
+  <div class="card mb-4" id="tenant-storage-card">
     <div class="card-header d-flex justify-content-between align-items-center">
-      <span><i class="bi bi-hdd me-1"></i>Tenant OneLake Storage</span>
-      <button class="btn btn-sm btn-outline-primary" onclick="calculateTenantStorage()" id="calcTenantStorageBtn"><i class="bi bi-calculator me-1"></i>Calculate Tenant Storage</button>
+      <span><i class="bi bi-hdd me-1"></i>OneLake Storage Summary</span>
     </div>
     <div class="card-body py-3">
-      <div class="text-muted text-center" id="tenantStoragePlaceholder">
-        <i class="bi bi-hdd fs-3"></i>
-        <p class="mt-1 mb-0 small">Click <strong>Calculate Tenant Storage</strong> to scan OneLake across all workspaces.<br>
-        <span class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>This scans each workspace sequentially and may take several minutes. Consumes capacity units.</span></p>
-      </div>
-      <div class="d-none" id="tenantStorageLoading">
-        <div class="text-center py-2">
-          <div class="spinner-border spinner-border-sm text-primary"></div>
-          <span class="ms-2" id="tenantStorageProgress">Scanning workspace 0 / 0 ...</span>
-        </div>
-        <div class="progress mt-2" style="height:4px;"><div class="progress-bar bg-primary" id="tenantStorageProgressBar" style="width:0%"></div></div>
-      </div>
-      <div class="d-none" id="tenantStorageResults">
+      <% if (governanceSummary.totalStorageSize) { %>
         <div class="row g-3 text-center mb-3">
           <div class="col-sm-3">
-            <div class="fs-4 fw-bold text-primary" id="tenantTotalSize">-</div>
+            <div class="fs-4 fw-bold text-primary"><%= formatBytesEjs(governanceSummary.totalStorageSize) %></div>
             <div class="text-muted small">Total Tenant Storage</div>
           </div>
           <div class="col-sm-3">
-            <div class="fs-4 fw-bold text-success" id="tenantTotalFiles">-</div>
+            <div class="fs-4 fw-bold text-success"><%= (governanceSummary.totalStorageFiles || 0).toLocaleString() %></div>
             <div class="text-muted small">Total Files</div>
           </div>
           <div class="col-sm-3">
-            <div class="fs-4 fw-bold text-info" id="tenantWsScanned">-</div>
-            <div class="text-muted small">Workspaces Scanned</div>
+            <div class="fs-4 fw-bold text-info"><%= governanceSummary.storageScannedCount || 0 %></div>
+            <div class="text-muted small">Workspaces With Data</div>
           </div>
           <div class="col-sm-3">
-            <div class="fs-4 fw-bold text-warning" id="tenantWsWithData">-</div>
-            <div class="text-muted small">With OneLake Data</div>
+            <div class="fs-4 fw-bold text-dark"><%= governanceSummary.totalWorkspaces || 0 %></div>
+            <div class="text-muted small">Workspaces Scanned</div>
           </div>
         </div>
-        <div class="table-responsive" style="max-height: 350px;">
-          <table class="table table-sm table-hover mb-0">
-            <thead><tr><th>Workspace</th><th>Items</th><th>Files</th><th>Size</th><th>% of Total</th></tr></thead>
-            <tbody id="tenantStorageBody"></tbody>
-          </table>
+        <% var storageWs = workspaces.filter(function(w) { return w.storageSize > 0; }).sort(function(a, b) { return (b.storageSize || 0) - (a.storageSize || 0); }); %>
+        <% if (storageWs.length) { %>
+          <div class="table-responsive" style="max-height: 300px;">
+            <table class="table table-sm table-hover mb-0">
+              <thead><tr><th>Workspace</th><th>Files</th><th>Size</th><th>% of Total</th></tr></thead>
+              <tbody>
+                <% storageWs.forEach(function(ws) { var pct = governanceSummary.totalStorageSize > 0 ? ((ws.storageSize / governanceSummary.totalStorageSize) * 100).toFixed(1) : '0'; %>
+                  <tr>
+                    <td><a href="/workspaces/<%= ws.id %>"><%= ws.name %></a></td>
+                    <td><%= (ws.storageFiles || 0).toLocaleString() %></td>
+                    <td class="fw-bold"><%= formatBytesEjs(ws.storageSize) %></td>
+                    <td><div class="progress" style="height:18px;min-width:80px;"><div class="progress-bar bg-primary" style="width:<%= pct %>%"><%= pct %>%</div></div></td>
+                  </tr>
+                <% }) %>
+              </tbody>
+            </table>
+          </div>
+        <% } %>
+      <% } else { %>
+        <div class="text-muted text-center">
+          <i class="bi bi-hdd fs-3"></i>
+          <p class="mt-1 mb-0 small">Storage data will be calculated during the next analysis run.<br>
+          You can also use <strong>Calculate Storage</strong> on individual workspace pages.</p>
         </div>
-      </div>
+      <% } %>
     </div>
   </div>
 
@@ -187,38 +201,40 @@
             <th>Workspace</th>
             <th>License</th>
             <th>State</th>
-            <th>Items</th>
-            <th>Reports</th>
-            <th>Models</th>
-            <th>Dashboards</th>
-            <th>Dataflows</th>
-            <th>Lakehouses</th>
-            <th>Notebooks</th>
-            <th>Pipelines</th>
-            <th>Warehouses</th>
-            <th>Users</th>
-            <th></th>
-          </tr>
+           <th>Size</th>
+           <th>Items</th>
+           <th>Reports</th>
+           <th>Models</th>
+           <th>Dashboards</th>
+           <th>Dataflows</th>
+           <th>Lakehouses</th>
+           <th>Notebooks</th>
+           <th>Pipelines</th>
+           <th>Warehouses</th>
+           <th>Users</th>
+           <th></th>
+         </tr>
         </thead>
         <tbody>
-          <% workspaces.forEach(function(ws) { var license = ws.licenseType || 'Pro'; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
-            <tr data-filter="<%= [ws.name || '', license, ws.state || ''].join(' ').toLowerCase() %>">
-              <td class="small"><%= ws.name || 'Unnamed' %></td>
-              <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
-              <td><span class="badge bg-<%= ws.state === 'Active' ? 'success' : 'warning' %>"><%= ws.state || '-' %></span></td>
-              <td><%= ws.totalItems || 0 %></td>
-              <td><%= ws.reportCount || 0 %></td>
-              <td><%= ws.datasetCount || 0 %></td>
-              <td><%= ws.dashboardCount || 0 %></td>
-              <td><%= ws.dataflowCount || 0 %></td>
-              <td><%= ws.lakehouseCount || 0 %></td>
-              <td><%= ws.notebookCount || 0 %></td>
-              <td><%= ws.pipelineCount || 0 %></td>
-              <td><%= ws.warehouseCount || 0 %></td>
-              <td><%= ws.userCount || 0 %></td>
-              <td><a href="/workspaces/<%= ws.id %>" class="btn btn-sm btn-outline-primary">Details</a></td>
-            </tr>
-          <% }) %>
+         <% workspaces.forEach(function(ws) { var license = ws.licenseType || 'Pro'; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
+           <tr data-filter="<%= [ws.name || '', license, ws.state || ''].join(' ').toLowerCase() %>">
+             <td class="small"><a href="/workspaces/<%= ws.id %>"><%= ws.name || 'Unnamed' %></a></td>
+             <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
+             <td><span class="badge bg-<%= ws.state === 'Active' ? 'success' : 'warning' %>"><%= ws.state || '-' %></span></td>
+             <td class="small"><%= ws.storageSize ? formatBytesEjs(ws.storageSize) : '-' %></td>
+             <td><%= ws.totalItems || 0 %></td>
+             <td><%= ws.reportCount || 0 %></td>
+             <td><%= ws.datasetCount || 0 %></td>
+             <td><%= ws.dashboardCount || 0 %></td>
+             <td><%= ws.dataflowCount || 0 %></td>
+             <td><%= ws.lakehouseCount || 0 %></td>
+             <td><%= ws.notebookCount || 0 %></td>
+             <td><%= ws.pipelineCount || 0 %></td>
+             <td><%= ws.warehouseCount || 0 %></td>
+             <td><%= ws.userCount || 0 %></td>
+             <td><a href="/workspaces/<%= ws.id %>" class="btn btn-sm btn-outline-primary">Details</a></td>
+           </tr>
+         <% }) %>
         </tbody>
       </table>
     </div>
@@ -229,96 +245,5 @@
     Data from analysis run #<%= run.id %> on <%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %>. <a href="/analysis">Run a new analysis</a> to refresh.
   </div>
 <% } %>
-
-<script>
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 B';
-  var units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  var i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 2 : 0) + ' ' + units[i];
-}
-
-async function calculateTenantStorage() {
-  document.getElementById('tenantStoragePlaceholder').classList.add('d-none');
-  document.getElementById('tenantStorageLoading').classList.remove('d-none');
-  document.getElementById('tenantStorageResults').classList.add('d-none');
-  document.getElementById('calcTenantStorageBtn').disabled = true;
-
-  // Get list of all workspace IDs from the table rows
-  var wsRows = document.querySelectorAll('#governance-workspaces-table tbody tr[data-filter]');
-  var workspaces = [];
-  wsRows.forEach(function(row) {
-    var link = row.querySelector('td a[href^="/workspaces/"]');
-    if (link) {
-      var href = link.getAttribute('href');
-      var id = href.replace('/workspaces/', '');
-      var name = link.textContent.trim();
-      workspaces.push({ id: id, name: name });
-    }
-  });
-
-  if (!workspaces.length) {
-    document.getElementById('tenantStorageLoading').classList.add('d-none');
-    document.getElementById('calcTenantStorageBtn').disabled = false;
-    if (typeof showToast === 'function') showToast('No workspaces found. Run an analysis first.', 'warning');
-    document.getElementById('tenantStoragePlaceholder').classList.remove('d-none');
-    return;
-  }
-
-  var totalSize = 0, totalFiles = 0, wsScanned = 0, wsWithData = 0;
-  var wsStorage = [];
-
-  for (var i = 0; i < workspaces.length; i++) {
-    var ws = workspaces[i];
-    document.getElementById('tenantStorageProgress').textContent = 'Scanning workspace ' + (i + 1) + ' / ' + workspaces.length + ' — ' + ws.name;
-    document.getElementById('tenantStorageProgressBar').style.width = Math.round(((i + 1) / workspaces.length) * 100) + '%';
-
-    try {
-      var resp = await fetch('/workspaces/' + ws.id + '/storage');
-      var data = await resp.json();
-      wsScanned++;
-      if (data.success && data.totalSize > 0) {
-        wsWithData++;
-        totalSize += data.totalSize;
-        totalFiles += data.totalFiles;
-        wsStorage.push({ name: ws.name, id: ws.id, size: data.totalSize, files: data.totalFiles, items: Object.keys(data.items || {}).length });
-      }
-    } catch (e) { wsScanned++; }
-  }
-
-  document.getElementById('tenantStorageLoading').classList.add('d-none');
-  document.getElementById('calcTenantStorageBtn').disabled = false;
-
-  // Show results
-  document.getElementById('tenantTotalSize').textContent = formatBytes(totalSize);
-  document.getElementById('tenantTotalFiles').textContent = totalFiles.toLocaleString();
-  document.getElementById('tenantWsScanned').textContent = wsScanned;
-  document.getElementById('tenantWsWithData').textContent = wsWithData;
-
-  wsStorage.sort(function(a, b) { return b.size - a.size; });
-  var tbody = document.getElementById('tenantStorageBody');
-  tbody.innerHTML = '';
-  wsStorage.forEach(function(ws) {
-    var pct = totalSize > 0 ? ((ws.size / totalSize) * 100).toFixed(1) : '0';
-    var tr = document.createElement('tr');
-    tr.innerHTML =
-      '<td><a href="/workspaces/' + ws.id + '">' + escapeHtml(ws.name) + '</a></td>' +
-      '<td>' + ws.items + '</td>' +
-      '<td>' + ws.files.toLocaleString() + '</td>' +
-      '<td class="fw-bold">' + formatBytes(ws.size) + '</td>' +
-      '<td><div class="progress" style="height:18px;min-width:80px;"><div class="progress-bar bg-primary" style="width:' + pct + '%">' + pct + '%</div></div></td>';
-    tbody.appendChild(tr);
-  });
-
-  document.getElementById('tenantStorageResults').classList.remove('d-none');
-  if (typeof showToast === 'function') showToast('Storage scan complete: ' + formatBytes(totalSize) + ' across ' + wsWithData + ' workspaces', 'success');
-}
-
-function escapeHtml(s) {
-  var div = document.createElement('div');
-  div.textContent = s || '';
-  return div.innerHTML;
-}
-</script>
 
 <%- include('../partials/footer') %>

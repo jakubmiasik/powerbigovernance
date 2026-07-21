@@ -268,8 +268,54 @@ async function runAnalysis(runId, sp) {
       }
       usersFetched = Math.min(i + batchSize, workspaces.length);
       progress.current = usersFetched;
-      progress.progress = 80 + Math.round((usersFetched / Math.max(workspaces.length, 1)) * 20);
+      progress.progress = 80 + Math.round((usersFetched / Math.max(workspaces.length, 1)) * 10);
       progress.message = 'Fetching users: ' + usersFetched + ' / ' + workspaces.length + ' workspaces...';
+    }
+
+    // ── OneLake Storage Scan ──
+    progress.progress = 90;
+    progress.message = 'Scanning OneLake storage sizes...';
+    let totalStorageSize = 0;
+    let totalStorageFiles = 0;
+    let storageScannedCount = 0;
+
+    const storageTypes = new Set([
+      'Lakehouse', 'Warehouse', 'SQLDatabase', 'SemanticModel', 'Dataset',
+      'Dataflow', 'DataflowGen2', 'KQLDatabase', 'Notebook',
+      'Environment', 'EventStream', 'DataPipeline', 'SparkJobDefinition',
+    ]);
+
+    for (let i = 0; i < workspaceDetails.length; i++) {
+      ensureNotCancelled(progress);
+      const wsDetail = workspaceDetails[i];
+      const storageItems = (wsDetail.items || []).filter(it => storageTypes.has(it.type));
+      if (!storageItems.length) continue;
+
+      let wsStorageSize = 0;
+      let wsStorageFiles = 0;
+      const wsItemSizes = {};
+
+      for (const item of storageItems) {
+        try {
+          const result = await pbi.getItemStorageSize(wsDetail.id, item.id);
+          if (result.success && result.totalSize > 0) {
+            wsItemSizes[item.id] = { size: result.totalSize, files: result.fileCount, name: item.name, type: item.type };
+            wsStorageSize += result.totalSize;
+            wsStorageFiles += result.fileCount;
+          }
+        } catch { /* skip items that fail */ }
+      }
+
+      wsDetail.storageSize = wsStorageSize;
+      wsDetail.storageFiles = wsStorageFiles;
+      wsDetail.storagItems = wsItemSizes;
+
+      if (wsStorageSize > 0) storageScannedCount++;
+      totalStorageSize += wsStorageSize;
+      totalStorageFiles += wsStorageFiles;
+
+      progress.progress = 90 + Math.round(((i + 1) / workspaceDetails.length) * 10);
+      progress.message = 'Scanning storage: ' + (i + 1) + ' / ' + workspaceDetails.length + ' workspaces...';
     }
 
     const summary = {
@@ -284,6 +330,9 @@ async function runAnalysis(runId, sp) {
       totalPipelines,
       totalWarehouses,
       totalUsers: allUsers.size,
+      totalStorageSize,
+      totalStorageFiles,
+      storageScannedCount,
       hasFabric,
       itemTypeCounts,
       capacities: capacities.map((capacity) => ({
