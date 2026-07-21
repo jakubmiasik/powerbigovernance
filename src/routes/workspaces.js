@@ -159,4 +159,102 @@ router.get('/:workspaceId/lineage/:itemId', async (req, res) => {
   }
 });
 
+// ── Workspace Role Assignments (Fabric API) ──
+
+// GET role assignments for a workspace
+router.get('/:workspaceId/roles', async (req, res) => {
+  try {
+    const sps = await db.getServicePrincipals();
+    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
+    const globalRun = res.locals.globalRun;
+    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
+    const pbi = createPowerBIService(sp);
+    const roles = await pbi.getRoleAssignments(req.params.workspaceId);
+    res.json({ success: true, roles });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// POST add role assignment
+router.post('/:workspaceId/roles', async (req, res) => {
+  try {
+    const { principalId, principalType, role } = req.body;
+    if (!principalId || !principalType || !role) {
+      return res.json({ success: false, message: 'Missing principalId, principalType, or role.' });
+    }
+    const sps = await db.getServicePrincipals();
+    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
+    const globalRun = res.locals.globalRun;
+    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
+    const pbi = createPowerBIService(sp);
+    const result = await pbi.addRoleAssignment(req.params.workspaceId, principalId, principalType, role);
+    res.json({ success: true, result });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// PATCH update role assignment
+router.patch('/:workspaceId/roles/:roleAssignmentId', async (req, res) => {
+  try {
+    const { role } = req.body;
+    if (!role) return res.json({ success: false, message: 'Missing role.' });
+    const sps = await db.getServicePrincipals();
+    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
+    const globalRun = res.locals.globalRun;
+    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
+    const pbi = createPowerBIService(sp);
+    const result = await pbi.updateRoleAssignment(req.params.workspaceId, req.params.roleAssignmentId, role);
+    res.json({ success: true, result });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// DELETE role assignment
+router.delete('/:workspaceId/roles/:roleAssignmentId', async (req, res) => {
+  try {
+    const sps = await db.getServicePrincipals();
+    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
+    const globalRun = res.locals.globalRun;
+    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
+    const pbi = createPowerBIService(sp);
+    await pbi.deleteRoleAssignment(req.params.workspaceId, req.params.roleAssignmentId);
+    res.json({ success: true });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ── Entra ID Search (Microsoft Graph API) ──
+
+router.get('/:workspaceId/entra/search', async (req, res) => {
+  try {
+    const { q, type } = req.query;
+    if (!q || q.length < 2) return res.json({ success: true, results: [] });
+    const sps = await db.getServicePrincipals();
+    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
+    const globalRun = res.locals.globalRun;
+    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
+    const pbi = createPowerBIService(sp);
+
+    let results = [];
+    if (type === 'ServicePrincipal') {
+      const spResults = await pbi.searchEntraServicePrincipals(q);
+      results = spResults.map(s => ({ id: s.id, displayName: s.displayName, detail: s.appId, type: 'ServicePrincipal' }));
+    } else if (type === 'Group') {
+      const groups = await pbi.searchEntraGroups(q);
+      results = groups.map(g => ({ id: g.id, displayName: g.displayName, detail: g.securityEnabled ? 'Security Group' : 'Distribution Group', type: 'Group' }));
+    } else {
+      // Default: search users
+      const users = await pbi.searchEntraUsers(q);
+      results = users.map(u => ({ id: u.id, displayName: u.displayName, detail: u.userPrincipalName || u.mail, type: 'User' }));
+    }
+    res.json({ success: true, results });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;

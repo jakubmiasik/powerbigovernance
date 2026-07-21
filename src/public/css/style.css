@@ -509,9 +509,15 @@ body.sidebar-collapsed .main-content {
   font-size: 0.85rem;
 }
 .table-responsive {
-  overflow-x: auto;
+  overflow: auto;
   -webkit-overflow-scrolling: touch;
+  max-height: 70vh;
 }
+/* Ensure the scrollbar is always visible */
+.table-responsive::-webkit-scrollbar { width: 8px; height: 8px; }
+.table-responsive::-webkit-scrollbar-track { background: var(--color-surface-offset); }
+.table-responsive::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
+.table-responsive::-webkit-scrollbar-thumb:hover { background: var(--color-text-subtle); }
 
 /* ──── Collapsible sections ──── */
 .section-toggle {

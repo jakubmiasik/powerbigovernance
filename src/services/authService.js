@@ -113,6 +113,18 @@ async function acquireDelegatedToken(code, redirectUri) {
   return result.accessToken;
 }
 
+// ── Microsoft Graph API token (for user/SP search) ──
+async function getGraphTokenForSP(spConfig) {
+  const app = getConfidentialClient(spConfig);
+  const result = await app.acquireTokenByClientCredential({
+    scopes: ['https://graph.microsoft.com/.default'],
+  });
+  if (!result || !result.accessToken) {
+    throw new Error('Failed to acquire Microsoft Graph access token');
+  }
+  return result.accessToken;
+}
+
 // ── Azure Management API token (for capacity pause/resume) ──
 async function getAzureManagementTokenForSP(spConfig) {
   const app = getConfidentialClient(spConfig);
@@ -126,6 +138,6 @@ async function getAzureManagementTokenForSP(spConfig) {
 }
 
 module.exports = {
-  getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, resetAuthCache,
+  getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP, resetAuthCache,
   getDelegatedAuthUrl, acquireDelegatedToken,
 };

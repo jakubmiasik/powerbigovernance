@@ -1,9 +1,11 @@
 const axios = require('axios');
-const { getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP } = require('./authService');
+const { getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP } = require('./authService');
 
 const PBI_BASE = 'https://api.powerbi.com/v1.0/myorg';
 const PBI_ADMIN = PBI_BASE + '/admin';
-const FABRIC_ADMIN = 'https://api.fabric.microsoft.com/v1/admin';
+const FABRIC_CORE = 'https://api.fabric.microsoft.com/v1';
+const FABRIC_ADMIN = FABRIC_CORE + '/admin';
+const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 const ARM_BASE = 'https://management.azure.com';
 
 async function safeGet(token, url, params = {}) {
@@ -40,6 +42,20 @@ async function safeDelete(token, url) {
   try {
     const response = await axios.delete(url, {
       headers: { Authorization: 'Bearer ' + token },
+      timeout: 60000,
+    });
+    return response.data;
+  } catch (err) {
+    const status = err.response?.status;
+    const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+    throw new Error('API error (' + (status || 'unknown') + '): ' + message);
+  }
+}
+
+async function safePatch(token, url, body) {
+  try {
+    const response = await axios.patch(url, body, {
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
       timeout: 60000,
     });
     return response.data;
@@ -400,6 +416,83 @@ function createPowerBIService(spConfig) {
     return safePost(token, url, {});
   }
 
+  // ── Workspace Role Assignments: Fabric Core API ──
+  async function getRoleAssignments(workspaceId) {
+    const token = await getFabricToken();
+    const all = [];
+    let url = `${FABRIC_CORE}/workspaces/${workspaceId}/roleAssignments`;
+    while (url) {
+      const data = await safeGet(token, url);
+      all.push(...(data.value || []));
+      url = data.continuationUri || null;
+    }
+    return all;
+  }
+
+  async function addRoleAssignment(workspaceId, principalId, principalType, role) {
+    const token = await getFabricToken();
+    return safePost(token, `${FABRIC_CORE}/workspaces/${workspaceId}/roleAssignments`, {
+      principal: { id: principalId, type: principalType },
+      role,
+    });
+  }
+
+  async function updateRoleAssignment(workspaceId, roleAssignmentId, role) {
+    const token = await getFabricToken();
+    return safePatch(token, `${FABRIC_CORE}/workspaces/${workspaceId}/roleAssignments/${roleAssignmentId}`, { role });
+  }
+
+  async function deleteRoleAssignment(workspaceId, roleAssignmentId) {
+    const token = await getFabricToken();
+    return safeDelete(token, `${FABRIC_CORE}/workspaces/${workspaceId}/roleAssignments/${roleAssignmentId}`);
+  }
+
+  // ── Microsoft Graph API: search users and service principals ──
+  let graphTokenPromise = null;
+  async function getGraphToken() {
+    if (!graphTokenPromise) {
+      graphTokenPromise = getGraphTokenForSP(spConfig).catch(err => {
+        graphTokenPromise = null;
+        throw err;
+      });
+      setTimeout(() => { graphTokenPromise = null; }, 50 * 60 * 1000);
+    }
+    return graphTokenPromise;
+  }
+
+  async function searchEntraUsers(query) {
+    const token = await getGraphToken();
+    const filter = `startswith(displayName,'${query}') or startswith(userPrincipalName,'${query}')`;
+    const data = await safeGet(token, `${GRAPH_BASE}/users`, {
+      $filter: filter,
+      $select: 'id,displayName,userPrincipalName,mail',
+      $top: 15,
+    });
+    return data.value || [];
+  }
+
+  async function searchEntraServicePrincipals(query) {
+    const token = await getGraphToken();
+    const filter = `startswith(displayName,'${query}')`;
+    const data = await safeGet(token, `${GRAPH_BASE}/servicePrincipals`, {
+      $filter: filter,
+      $select: 'id,displayName,appId,servicePrincipalType',
+      $top: 15,
+    });
+    return data.value || [];
+  }
+
+  async function searchEntraGroups(query) {
+    const token = await getGraphToken();
+    const filter = `startswith(displayName,'${query}')`;
+    const data = await safeGet(token, `${GRAPH_BASE}/groups`, {
+      $filter: filter,
+      $select: 'id,displayName,mailEnabled,securityEnabled',
+      $top: 15,
+    });
+    return data.value || [];
+  }
+
   return {
     getWorkspaces,
     getWorkspaceById,
@@ -425,6 +518,13 @@ function createPowerBIService(spConfig) {
     unassignFromCapacity,
     addWorkspaceAdmin,
     removeWorkspaceUser,
+    getRoleAssignments,
+    addRoleAssignment,
+    updateRoleAssignment,
+    deleteRoleAssignment,
+    searchEntraUsers,
+    searchEntraServicePrincipals,
+    searchEntraGroups,
   };
 }
 
