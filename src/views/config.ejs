@@ -38,41 +38,32 @@
 
     <% servicePrincipals.forEach(function(sp) { %>
       <div class="card mb-3">
-        <div class="card-body">
-          <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
-           <div>
-             <h6 class="mb-1"><i class="bi bi-key me-2"></i><%= sp.name %></h6>
-             <div class="text-muted small">
-               <span class="me-3"><strong>Tenant:</strong> <%= sp.tenant_id %></span>
-               <span class="me-3"><strong>Client ID:</strong> <%= sp.client_id %></span>
-               <% if (sp.enterprise_app_object_id) { %><span><strong>Enterprise App Object ID:</strong> <%= sp.enterprise_app_object_id %></span><% } %>
-             </div>
-           </div>
-           <div class="btn-group btn-group-sm ms-auto">
-             <button class="btn btn-outline-secondary" onclick="testSP(<%= sp.id %>)">
-               <i class="bi bi-plug me-1"></i>Test
-             </button>
-             <button
-               class="btn btn-outline-primary"
-               data-bs-toggle="modal"
-               data-bs-target="#spModal"
-               data-sp-id="<%= sp.id %>"
-               data-sp-name="<%= sp.name %>"
-               data-sp-tenant-id="<%= sp.tenant_id %>"
-               data-sp-client-id="<%= sp.client_id %>"
-               data-sp-eaoid="<%= sp.enterprise_app_object_id || '' %>"
-               onclick="openSpForm(this)"
-             >
-               <i class="bi bi-pencil me-1"></i>Edit
-             </button>
-             <button class="btn btn-outline-danger" onclick="if(confirm('Delete this service principal?')) document.getElementById('delete-sp-<%= sp.id %>').submit()">
-               <i class="bi bi-trash me-1"></i>Delete
-             </button>
-           </div>
-           <form id="delete-sp-<%= sp.id %>" method="POST" action="/settings/sp/delete/<%= sp.id %>" style="display:none;"></form>
+        <div class="card-body py-2 d-flex justify-content-between align-items-center gap-3 flex-wrap">
+          <h6 class="mb-0"><i class="bi bi-key me-2"></i><%= sp.name %></h6>
+          <div class="btn-group btn-group-sm ms-auto">
+           <button class="btn btn-outline-secondary" onclick="testSP(<%= sp.id %>)">
+             <i class="bi bi-plug me-1"></i>Test
+           </button>
+           <button
+             class="btn btn-outline-primary"
+             data-bs-toggle="modal"
+             data-bs-target="#spModal"
+             data-sp-id="<%= sp.id %>"
+             data-sp-name="<%= sp.name %>"
+             data-sp-tenant-id="<%= sp.tenant_id %>"
+             data-sp-client-id="<%= sp.client_id %>"
+             data-sp-eaoid="<%= sp.enterprise_app_object_id || '' %>"
+             onclick="openSpForm(this)"
+           >
+             <i class="bi bi-pencil me-1"></i>Edit
+           </button>
+           <button class="btn btn-outline-danger" onclick="if(confirm('Delete this service principal?')) document.getElementById('delete-sp-<%= sp.id %>').submit()">
+             <i class="bi bi-trash me-1"></i>Delete
+           </button>
           </div>
-          <div id="test-result-<%= sp.id %>" class="mt-2" style="display:none;"></div>
+          <form id="delete-sp-<%= sp.id %>" method="POST" action="/settings/sp/delete/<%= sp.id %>" style="display:none;"></form>
         </div>
+        <div id="test-result-<%= sp.id %>" class="px-3 pb-2" style="display:none;"></div>
       </div>
     <% }) %>
   </div>

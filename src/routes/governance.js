@@ -94,17 +94,12 @@ router.get('/', async (req, res) => {
   try {
     const { run, results } = await loadGlobalResults(res);
 
-    // Get SP enterprise object ID for access check
-    const sps = await db.getServicePrincipals();
-    const spEnterpriseObjectId = (sps.length > 0 && sps[0].enterprise_app_object_id) ? sps[0].enterprise_app_object_id : '';
-
     if (!run || !results || !results.summary) {
       return res.render('governance/overview', {
         title: 'Governance Overview', user: req.user,
         governance: null, workspaces: [], run: null,
         noData: true,
         creatorCount: 0, explorerCount: 0,
-        spEnterpriseObjectId,
       });
     }
 
@@ -118,7 +113,6 @@ router.get('/', async (req, res) => {
       governance: results.summary, workspaces: allWorkspaces, run,
       noData: false,
       creatorCount, explorerCount,
-      spEnterpriseObjectId,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });

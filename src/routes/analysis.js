@@ -407,4 +407,28 @@ async function runAnalysis(runId, sp) {
   setTimeout(() => activeAnalyses.delete(runId), 5 * 60 * 1000);
 }
 
+// Get workspace list for grant-access modal (from latest completed run)
+router.get('/workspaces-for-grant', async (req, res) => {
+  try {
+    const runs = await db.getAnalysisRuns();
+    const lastCompleted = runs.find(r => r.status === 'completed');
+    if (!lastCompleted) return res.json({ success: false, message: 'No completed analysis run found. Run an analysis first.' });
+
+    const run = await db.getAnalysisRunById(lastCompleted.id);
+    if (!run || !run.results_json) return res.json({ success: false, message: 'No results available.' });
+
+    const results = JSON.parse(run.results_json);
+    const sps = await db.getServicePrincipals();
+    const eaoid = (sps.length > 0) ? sps[0].enterprise_app_object_id : '';
+
+    const workspaces = (results.workspaces || []).map(ws => ({
+      id: ws.id, name: ws.name || ws.displayName || 'Unnamed', state: ws.state || 'Active',
+    }));
+
+    res.json({ success: true, workspaces, spObjectId: eaoid });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;
