@@ -25,13 +25,13 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/sp/save', async (req, res) => {
-  const { id, name, tenantId, clientId, clientSecret } = req.body;
+  const { id, name, tenantId, clientId, clientSecret, enterpriseAppObjectId } = req.body;
   if (!name || !tenantId || !clientId || !clientSecret) {
     req.flash('error', 'All fields are required.');
     return res.redirect('/settings');
   }
   try {
-    await db.saveServicePrincipal({ id: id ? parseInt(id) : null, name, tenantId, clientId, clientSecret });
+    await db.saveServicePrincipal({ id: id ? parseInt(id) : null, name, tenantId, clientId, clientSecret, enterpriseAppObjectId: enterpriseAppObjectId || null });
     req.flash('success', 'Service principal saved.');
   } catch (err) {
     req.flash('error', 'Failed to save: ' + err.message);

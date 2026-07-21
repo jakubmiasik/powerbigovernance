@@ -308,7 +308,7 @@ async function runAnalysis(runId, sp) {
 
       wsDetail.storageSize = wsStorageSize;
       wsDetail.storageFiles = wsStorageFiles;
-      wsDetail.storagItems = wsItemSizes;
+      wsDetail.storageItems = wsItemSizes;
 
       if (wsStorageSize > 0) storageScannedCount++;
       totalStorageSize += wsStorageSize;

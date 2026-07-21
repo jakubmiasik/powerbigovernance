@@ -157,4 +157,8 @@ app.use((err, req, res, _next) => {
 const { startScheduler } = require('./services/schedulerService');
 startScheduler();
 
+// Run DB migrations
+const { runMigrations } = require('./services/databaseService');
+runMigrations().catch(err => console.warn('[App] Migration error:', err.message));
+
 module.exports = app;

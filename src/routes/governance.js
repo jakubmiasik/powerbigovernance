@@ -94,12 +94,17 @@ router.get('/', async (req, res) => {
   try {
     const { run, results } = await loadGlobalResults(res);
 
+    // Get SP enterprise object ID for access check
+    const sps = await db.getServicePrincipals();
+    const spEnterpriseObjectId = (sps.length > 0 && sps[0].enterprise_app_object_id) ? sps[0].enterprise_app_object_id : '';
+
     if (!run || !results || !results.summary) {
       return res.render('governance/overview', {
         title: 'Governance Overview', user: req.user,
         governance: null, workspaces: [], run: null,
         noData: true,
         creatorCount: 0, explorerCount: 0,
+        spEnterpriseObjectId,
       });
     }
 
@@ -113,6 +118,7 @@ router.get('/', async (req, res) => {
       governance: results.summary, workspaces: allWorkspaces, run,
       noData: false,
       creatorCount, explorerCount,
+      spEnterpriseObjectId,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -161,6 +167,46 @@ router.get('/artifacts', async (req, res) => {
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
+  }
+});
+
+// Grant SP access to workspaces (batch)
+const { createPowerBIService } = require('../services/powerbiService');
+router.post('/grant-sp-access', async (req, res) => {
+  try {
+    const { workspaceIds } = req.body;
+    if (!workspaceIds || !workspaceIds.length) {
+      return res.json({ success: false, message: 'No workspaces selected.' });
+    }
+
+    const sps = await db.getServicePrincipals();
+    if (!sps.length) return res.json({ success: false, message: 'No service principal configured.' });
+    const sp = sps[0];
+
+    if (!sp.enterprise_app_object_id) {
+      return res.json({ success: false, message: 'Enterprise Application Object ID not configured. Go to Settings to add it.' });
+    }
+
+    const pbi = createPowerBIService(sp);
+    const results = [];
+    for (const wsId of workspaceIds) {
+      try {
+        await pbi.addWorkspaceAdmin(wsId, sp.enterprise_app_object_id, 'App');
+        results.push({ workspaceId: wsId, success: true });
+      } catch (err) {
+        results.push({ workspaceId: wsId, success: false, error: err.message });
+      }
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    const failCount = results.filter(r => !r.success).length;
+    res.json({
+      success: true,
+      message: `Granted access to ${successCount} workspace(s).${failCount > 0 ? ` ${failCount} failed.` : ''}`,
+      results,
+    });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
   }
 });
 

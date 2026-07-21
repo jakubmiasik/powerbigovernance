@@ -120,7 +120,7 @@
   // Check if storage data is available from analysis
   var wsStorageSize = workspace.storageSize || 0;
   var wsStorageFiles = workspace.storageFiles || 0;
-  var wsStorageItems = workspace.storagItems || {};
+  var wsStorageItems = workspace.storageItems || {};
   var hasStorageData = wsStorageSize > 0;
 
   function formatBytesWs(bytes) {
@@ -934,12 +934,22 @@ async function submitUpdateRole() {
 }
 
 // ── Delete Role ──
-async function confirmDeleteRole(assignmentId, name) {
-  if (!confirm('Remove role assignment for "' + name + '"? This cannot be undone.')) return;
-  showRoleStatus('Removing role assignment...');
+var pendingDeleteId = null;
+var pendingDeleteName = '';
+function confirmDeleteRole(assignmentId, name) {
+  pendingDeleteId = assignmentId;
+  pendingDeleteName = name;
+  document.getElementById('deleteRoleName').textContent = name;
+  var modal = new bootstrap.Modal(document.getElementById('deleteRoleModal'));
+  modal.show();
+}
+async function executeDeleteRole() {
+  if (!pendingDeleteId) return;
+  bootstrap.Modal.getInstance(document.getElementById('deleteRoleModal')).hide();
+  showRoleStatus('Removing role assignment for "' + pendingDeleteName + '"...');
 
   try {
-    var resp = await fetch('/workspaces/' + WORKSPACE_ID + '/roles/' + assignmentId, { method: 'DELETE' });
+    var resp = await fetch('/workspaces/' + WORKSPACE_ID + '/roles/' + pendingDeleteId, { method: 'DELETE' });
     var data = await resp.json();
     if (!data.success) throw new Error(data.message);
     showRoleStatusResult(true, 'Role assignment removed');
@@ -1009,6 +1019,26 @@ async function calculateStorage() {
   }
 }
 </script>
+<!-- Delete Role Confirmation Modal -->
+<div class="modal fade" id="deleteRoleModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header bg-danger text-white">
+        <h5 class="modal-title"><i class="bi bi-exclamation-triangle me-2"></i>Remove Role Assignment</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p>Are you sure you want to remove the role assignment for <strong id="deleteRoleName"></strong>?</p>
+        <p class="text-muted small mb-0">This action cannot be undone. The user/principal will lose access to this workspace.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger" onclick="executeDeleteRole()"><i class="bi bi-trash me-1"></i>Remove</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal fade" id="lineageModal" tabindex="-1">
   <div class="modal-dialog modal-lg modal-dialog-centered">
     <div class="modal-content">

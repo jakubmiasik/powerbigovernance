@@ -70,7 +70,7 @@ function execSql(conn, sql, params = []) {
 async function getServicePrincipals() {
   const conn = await getConnection();
   try {
-    return await execSql(conn, 'SELECT id, name, tenant_id, client_id, client_secret, created_at, updated_at FROM service_principals ORDER BY name');
+    return await execSql(conn, 'SELECT id, name, tenant_id, client_id, client_secret, enterprise_app_object_id, created_at, updated_at FROM service_principals ORDER BY name');
   } finally {
     conn.close();
   }
@@ -79,7 +79,7 @@ async function getServicePrincipals() {
 async function getServicePrincipalById(id) {
   const conn = await getConnection();
   try {
-    const rows = await execSql(conn, 'SELECT id, name, tenant_id, client_id, client_secret FROM service_principals WHERE id = @id', [
+    const rows = await execSql(conn, 'SELECT id, name, tenant_id, client_id, client_secret, enterprise_app_object_id FROM service_principals WHERE id = @id', [
       { name: 'id', type: TYPES.Int, value: id },
     ]);
     return rows[0] || null;
@@ -88,30 +88,32 @@ async function getServicePrincipalById(id) {
   }
 }
 
-async function saveServicePrincipal({ id, name, tenantId, clientId, clientSecret }) {
+async function saveServicePrincipal({ id, name, tenantId, clientId, clientSecret, enterpriseAppObjectId }) {
   const conn = await getConnection();
   try {
     if (id) {
       await execSql(
         conn,
-        `UPDATE service_principals SET name=@name, tenant_id=@tenantId, client_id=@clientId, client_secret=@clientSecret, updated_at=GETUTCDATE() WHERE id=@id`,
+        `UPDATE service_principals SET name=@name, tenant_id=@tenantId, client_id=@clientId, client_secret=@clientSecret, enterprise_app_object_id=@eaoid, updated_at=GETUTCDATE() WHERE id=@id`,
         [
           { name: 'id', type: TYPES.Int, value: id },
           { name: 'name', type: TYPES.NVarChar, value: name },
           { name: 'tenantId', type: TYPES.NVarChar, value: tenantId },
           { name: 'clientId', type: TYPES.NVarChar, value: clientId },
           { name: 'clientSecret', type: TYPES.NVarChar, value: clientSecret },
+          { name: 'eaoid', type: TYPES.NVarChar, value: enterpriseAppObjectId || null },
         ]
       );
     } else {
       await execSql(
         conn,
-        `INSERT INTO service_principals (name, tenant_id, client_id, client_secret) VALUES (@name, @tenantId, @clientId, @clientSecret)`,
+        `INSERT INTO service_principals (name, tenant_id, client_id, client_secret, enterprise_app_object_id) VALUES (@name, @tenantId, @clientId, @clientSecret, @eaoid)`,
         [
           { name: 'name', type: TYPES.NVarChar, value: name },
           { name: 'tenantId', type: TYPES.NVarChar, value: tenantId },
           { name: 'clientId', type: TYPES.NVarChar, value: clientId },
           { name: 'clientSecret', type: TYPES.NVarChar, value: clientSecret },
+          { name: 'eaoid', type: TYPES.NVarChar, value: enterpriseAppObjectId || null },
         ]
       );
     }
@@ -323,7 +325,22 @@ async function getScheduleHistory(capacityName, days) {
   }
 }
 
+// Auto-migration: ensure schema is up to date
+async function runMigrations() {
+  const conn = await getConnection();
+  try {
+    // Add enterprise_app_object_id column if missing
+    await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'enterprise_app_object_id') ALTER TABLE service_principals ADD enterprise_app_object_id NVARCHAR(255) NULL`);
+    console.log('[DB] Migrations complete.');
+  } catch (err) {
+    console.warn('[DB] Migration warning:', err.message);
+  } finally {
+    conn.close();
+  }
+}
+
 module.exports = {
+  runMigrations,
   getServicePrincipals,
   getServicePrincipalById,
   saveServicePrincipal,

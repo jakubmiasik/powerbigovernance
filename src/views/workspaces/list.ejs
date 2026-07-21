@@ -16,6 +16,13 @@
     var activeCount = (stats.byState || {})['Active'] || 0;
     var otherStates = [];
     Object.entries(stats.byState || {}).forEach(function(e) { if (e[0] !== 'Active') otherStates.push(e); });
+    var totalStorageSizeWs = workspaces.reduce(function(acc, ws) { return acc + (ws.storageSize || 0); }, 0);
+    function formatBytesListPage(bytes) {
+      if (!bytes || bytes === 0) return '0 B';
+      var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      var i = Math.floor(Math.log(bytes) / Math.log(1024));
+      return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+    }
   %>
   <div class="row g-3 mb-4">
     <div class="col-sm-3 col-lg-2">
@@ -32,6 +39,19 @@
         </div>
       </div>
     </div>
+    <% if (totalStorageSizeWs > 0) { %>
+      <div class="col-sm-3 col-lg-2">
+        <div class="card text-center h-100 stat-card">
+          <div class="card-body py-3">
+            <div class="fs-3 fw-bold" style="color: var(--color-teal);"><%= formatBytesListPage(totalStorageSizeWs) %></div>
+            <div class="text-muted small">Total Storage</div>
+            <div style="font-size: 0.75rem; color: var(--color-text-muted); margin-top: 0.25rem;">
+              <span class="badge bg-info"><%= workspaces.filter(function(w) { return w.storageSize > 0; }).length %> workspaces with data</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    <% } %>
     <% Object.entries(stats.byLicense || {}).forEach(function(entry) { var license = entry[0]; var count = entry[1]; var color = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
       <div class="col-sm-3 col-lg-2">
         <div class="card text-center h-100 stat-card">
@@ -72,6 +92,7 @@
             <th>License Type</th>
             <th>SKU</th>
             <th>State</th>
+            <th>Size</th>
             <th>Items</th>
             <th>Reports</th>
             <th>Models</th>
@@ -87,6 +108,7 @@
               <td>
                 <span class="badge bg-<%= ws.state === 'Active' ? 'success' : ws.state === 'Deleted' ? 'danger' : 'warning' %>"><%= ws.state || 'Unknown' %></span>
               </td>
+              <td class="small text-nowrap" data-sort-value="<%= ws.storageSize || 0 %>"><%= ws.storageSize ? formatBytesListPage(ws.storageSize) : '-' %></td>
               <td data-sort-value="<%= ws.totalItems || 0 %>"><%= ws.totalItems || 0 %></td>
               <td data-sort-value="<%= ws.reportCount || 0 %>"><%= ws.reportCount || 0 %></td>
               <td data-sort-value="<%= ws.datasetCount || 0 %>"><%= ws.datasetCount || 0 %></td>

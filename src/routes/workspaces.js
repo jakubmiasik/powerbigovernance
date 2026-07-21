@@ -178,7 +178,6 @@ router.get('/:workspaceId/storage', async (req, res) => {
       if (ws && ws.items) items = ws.items;
     }
     if (!items.length) {
-      // Fallback: fetch items from API
       try {
         items = await pbi.getItemsByWorkspace(req.params.workspaceId);
       } catch { /* no items available */ }
@@ -189,6 +188,45 @@ router.get('/:workspaceId/storage', async (req, res) => {
     }
 
     const storage = await pbi.getWorkspaceStorageSize(req.params.workspaceId, items);
+
+    // Save storage results back to analysis run if available
+    if (globalRun && globalRun.id && savedWorkspaces) {
+      try {
+        const ws = savedWorkspaces.find(w => w.id === req.params.workspaceId);
+        if (ws) {
+          ws.storageSize = storage.totalSize;
+          ws.storageFiles = storage.totalFiles;
+          ws.storageItems = storage.items;
+          // Recalculate totals
+          const run = await db.getAnalysisRunById(globalRun.id);
+          if (run && run.results_json) {
+            const results = JSON.parse(run.results_json);
+            const wsInResults = (results.workspaces || []).find(w => w.id === req.params.workspaceId);
+            if (wsInResults) {
+              wsInResults.storageSize = storage.totalSize;
+              wsInResults.storageFiles = storage.totalFiles;
+              wsInResults.storageItems = storage.items;
+              // Update summary totals
+              results.summary.totalStorageSize = (results.workspaces || []).reduce((s, w) => s + (w.storageSize || 0), 0);
+              results.summary.totalStorageFiles = (results.workspaces || []).reduce((s, w) => s + (w.storageFiles || 0), 0);
+              results.summary.storageScannedCount = (results.workspaces || []).filter(w => w.storageSize > 0).length;
+              await db.updateAnalysisRun(globalRun.id, {
+                status: run.status,
+                totalWorkspaces: run.total_workspaces,
+                totalReports: run.total_reports,
+                totalDatasets: run.total_datasets,
+                totalDashboards: run.total_dashboards,
+                totalDataflows: run.total_dataflows,
+                totalUsers: run.total_users,
+                resultsJson: JSON.stringify(results),
+              });
+            }
+          }
+        }
+      } catch (saveErr) {
+        console.warn('[Storage] Failed to save custom storage results:', saveErr.message);
+      }
+    }
 
     res.json({
       success: true,
