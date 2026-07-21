@@ -28,30 +28,35 @@
 
     <nav class="sidebar-nav">
       <p class="nav-section-title">Main</p>
-      <a href="/" class="sidebar-link <%= pagePath === '/' || pagePath === '/home' ? 'active' : '' %>">
-        <i class="bi bi-house"></i> Home
+      <a href="/" class="sidebar-link <%= pagePath === '/' || pagePath === '/home' ? 'active' : '' %>" title="Home">
+        <i class="bi bi-house"></i> <span>Home</span>
       </a>
-      <a href="/workspaces" class="sidebar-link <%= pagePath.startsWith('/workspaces') ? 'active' : '' %>">
-        <i class="bi bi-collection"></i> Workspaces
+      <a href="/workspaces" class="sidebar-link <%= pagePath.startsWith('/workspaces') ? 'active' : '' %>" title="Workspaces">
+        <i class="bi bi-collection"></i> <span>Workspaces</span>
       </a>
-      <a href="/governance" class="sidebar-link <%= pagePath.startsWith('/governance') ? 'active' : '' %>">
-        <i class="bi bi-shield-check"></i> Governance
+      <a href="/governance" class="sidebar-link <%= pagePath.startsWith('/governance') ? 'active' : '' %>" title="Governance">
+        <i class="bi bi-shield-check"></i> <span>Governance</span>
       </a>
 
       <p class="nav-section-title">Operations</p>
-      <a href="/analysis" class="sidebar-link <%= pagePath.startsWith('/analysis') ? 'active' : '' %>">
-        <i class="bi bi-play-circle"></i> Run Analysis
+      <a href="/analysis" class="sidebar-link <%= pagePath.startsWith('/analysis') ? 'active' : '' %>" title="Run Analysis">
+        <i class="bi bi-play-circle"></i> <span>Run Analysis</span>
       </a>
-      <a href="/migrate" class="sidebar-link <%= pagePath.startsWith('/migrate') ? 'active' : '' %>">
-        <i class="bi bi-arrow-left-right"></i> Migrate
+      <a href="/migrate" class="sidebar-link <%= pagePath.startsWith('/migrate') ? 'active' : '' %>" title="Migrate">
+        <i class="bi bi-arrow-left-right"></i> <span>Migrate</span>
       </a>
-      <a href="/capacities" class="sidebar-link <%= pagePath.startsWith('/capacities') ? 'active' : '' %>">
-        <i class="bi bi-lightning"></i> Capacities
+      <a href="/capacities" class="sidebar-link <%= pagePath.startsWith('/capacities') ? 'active' : '' %>" title="Capacities">
+        <i class="bi bi-lightning"></i> <span>Capacities</span>
       </a>
 
       <p class="nav-section-title">Settings</p>
-      <a href="/settings" class="sidebar-link <%= pagePath.startsWith('/settings') ? 'active' : '' %>">
-        <i class="bi bi-gear"></i> Configuration
+      <a href="/settings" class="sidebar-link <%= pagePath.startsWith('/settings') ? 'active' : '' %>" title="Configuration">
+        <i class="bi bi-gear"></i> <span>Configuration</span>
+      </a>
+
+      <!-- Collapse toggle -->
+      <a href="#" class="sidebar-link mt-2" onclick="collapseSidebar(event)" title="Collapse sidebar" id="collapseLink">
+        <i class="bi bi-layout-sidebar-inset" id="collapseIcon"></i> <span>Collapse</span>
       </a>
     </nav>
 
@@ -66,11 +71,11 @@
           </div>
         </div>
         <a href="/.auth/logout?post_logout_redirect_uri=/" class="sidebar-link mt-1" style="font-size:0.8rem;">
-          <i class="bi bi-box-arrow-right"></i> Sign Out
+          <i class="bi bi-box-arrow-right"></i> <span>Sign Out</span>
         </a>
       <% } else { %>
         <a href="/.auth/login/aad?post_login_redirect_uri=<%= encodeURIComponent('/') %>" class="sidebar-link">
-          <i class="bi bi-box-arrow-in-right"></i> Sign In
+          <i class="bi bi-box-arrow-in-right"></i> <span>Sign In</span>
         </a>
       <% } %>
     </div>
@@ -146,6 +151,16 @@ function toggleSidebar() {
   document.getElementById('sidebarBackdrop').classList.toggle('show');
 }
 
+function collapseSidebar(e) {
+  if (e) e.preventDefault();
+  var sidebar = document.getElementById('appSidebar');
+  var isCollapsed = sidebar.classList.toggle('collapsed');
+  document.body.classList.toggle('sidebar-collapsed', isCollapsed);
+  localStorage.setItem('pbi-gov-sidebar', isCollapsed ? 'collapsed' : 'expanded');
+  var icon = document.getElementById('collapseIcon');
+  icon.className = isCollapsed ? 'bi bi-layout-sidebar-inset-reverse' : 'bi bi-layout-sidebar-inset';
+}
+
 // Theme
 function toggleTheme() {
   var html = document.documentElement;
@@ -189,6 +204,14 @@ function toggleDensity() {
       var icon = document.getElementById('densityIcon');
       if (icon) icon.className = 'bi bi-distribute-horizontal';
     }
+  }
+  // Sidebar collapse state
+  var savedSidebar = localStorage.getItem('pbi-gov-sidebar');
+  if (savedSidebar === 'collapsed') {
+    var sidebar = document.getElementById('appSidebar');
+    if (sidebar) { sidebar.classList.add('collapsed'); document.body.classList.add('sidebar-collapsed'); }
+    var ci = document.getElementById('collapseIcon');
+    if (ci) ci.className = 'bi bi-layout-sidebar-inset-reverse';
   }
   // Last refreshed timestamp
   var ts = document.getElementById('lastRefreshed');

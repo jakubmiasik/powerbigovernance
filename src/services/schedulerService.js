@@ -9,6 +9,7 @@ async function executeSchedule(schedule) {
     const sps = await db.getServicePrincipals();
     if (sps.length === 0) {
       console.log('[Scheduler] No SP configured, skipping schedule', schedule.id);
+      await db.logScheduleExecution(schedule.id, schedule.capacity_name, schedule.action, 'error', 'No service principal configured');
       return;
     }
     const pbi = createPowerBIService(sps[0]);
@@ -23,8 +24,10 @@ async function executeSchedule(schedule) {
     }
 
     console.log(`[Scheduler] ${action} completed for "${capacity_name}"`);
+    await db.logScheduleExecution(schedule.id, capacity_name, action, 'success', `${action} completed successfully`);
   } catch (err) {
     console.error(`[Scheduler] Error executing schedule ${schedule.id}:`, err.message);
+    await db.logScheduleExecution(schedule.id, schedule.capacity_name, schedule.action, 'error', err.message);
   }
 }
 

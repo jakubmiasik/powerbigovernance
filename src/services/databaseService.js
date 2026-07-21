@@ -263,6 +263,66 @@ async function toggleCapacitySchedule(id, enabled) {
   }
 }
 
+async function updateCapacitySchedule(id, fields) {
+  const conn = await getConnection();
+  try {
+    const sets = [];
+    const params = [{ name: 'id', type: TYPES.Int, value: id }];
+    if (fields.action !== undefined) { sets.push('action=@action'); params.push({ name: 'action', type: TYPES.NVarChar, value: fields.action }); }
+    if (fields.scheduleType !== undefined) { sets.push('schedule_type=@type'); params.push({ name: 'type', type: TYPES.NVarChar, value: fields.scheduleType }); }
+    if (fields.hour !== undefined) { sets.push('schedule_hour=@hour'); params.push({ name: 'hour', type: TYPES.Int, value: fields.hour }); }
+    if (fields.minute !== undefined) { sets.push('schedule_minute=@minute'); params.push({ name: 'minute', type: TYPES.Int, value: fields.minute }); }
+    if (fields.day !== undefined) { sets.push('schedule_day=@day'); params.push({ name: 'day', type: TYPES.NVarChar, value: fields.day }); }
+    if (sets.length === 0) return;
+    await execSql(conn, 'UPDATE capacity_schedules SET ' + sets.join(', ') + ' WHERE id=@id', params);
+  } finally {
+    conn.close();
+  }
+}
+
+// Schedule execution history
+async function logScheduleExecution(scheduleId, capacityName, action, status, message) {
+  const conn = await getConnection();
+  try {
+    await execSql(conn, `INSERT INTO capacity_schedule_history (schedule_id, capacity_name, action, status, message, executed_at)
+      VALUES (@sid, @name, @action, @status, @msg, GETUTCDATE())`, [
+      { name: 'sid', type: TYPES.Int, value: scheduleId },
+      { name: 'name', type: TYPES.NVarChar, value: capacityName },
+      { name: 'action', type: TYPES.NVarChar, value: action },
+      { name: 'status', type: TYPES.NVarChar, value: status },
+      { name: 'msg', type: TYPES.NVarChar, value: message || null },
+    ]);
+  } catch (err) {
+    if (err.message && err.message.includes('Invalid object name')) {
+      console.warn('[DB] capacity_schedule_history table not found, skipping log');
+    } else {
+      console.error('[DB] Error logging schedule execution:', err.message);
+    }
+  } finally {
+    conn.close();
+  }
+}
+
+async function getScheduleHistory(capacityName, days) {
+  days = days || 5;
+  const conn = await getConnection();
+  try {
+    return await execSql(conn,
+      `SELECT TOP 50 * FROM capacity_schedule_history
+       WHERE capacity_name=@name AND executed_at >= DATEADD(day, -@days, GETUTCDATE())
+       ORDER BY executed_at DESC`,
+      [
+        { name: 'name', type: TYPES.NVarChar, value: capacityName },
+        { name: 'days', type: TYPES.Int, value: days },
+      ]);
+  } catch (err) {
+    if (err.message && err.message.includes('Invalid object name')) return [];
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
 module.exports = {
   getServicePrincipals,
   getServicePrincipalById,
@@ -275,6 +335,9 @@ module.exports = {
   deleteAnalysisRun,
   getCapacitySchedules,
   saveCapacitySchedule,
+  updateCapacitySchedule,
   deleteCapacitySchedule,
   toggleCapacitySchedule,
+  logScheduleExecution,
+  getScheduleHistory,
 };

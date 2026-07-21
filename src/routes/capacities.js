@@ -18,6 +18,28 @@ async function getPbiService(res) {
   return createPowerBIService(sp);
 }
 
+// ── Capacities list page ──
+router.get('/', async (req, res) => {
+  try {
+    const pbi = await getPbiService(res);
+    const capacities = await pbi.getCapacities();
+    res.render('capacities/list', {
+      title: 'Capacities',
+      user: req.user,
+      capacities,
+      breadcrumb: [{ label: 'Capacities', href: '/capacities' }],
+    });
+  } catch (err) {
+    res.render('capacities/list', {
+      title: 'Capacities',
+      user: req.user,
+      capacities: [],
+      breadcrumb: [{ label: 'Capacities', href: '/capacities' }],
+      error: err.message,
+    });
+  }
+});
+
 // ── Refresh capacities (AJAX) ──
 router.get('/refresh', async (req, res) => {
   try {
@@ -72,13 +94,18 @@ router.get('/:id', async (req, res) => {
       (s.capacity_name || '').toLowerCase() === (capacity.displayName || '').toLowerCase()
     );
 
+    // Get execution history
+    const history = await db.getScheduleHistory(capacity.displayName || '', 5);
+
     res.render('capacities/detail', {
       title: 'Capacity: ' + (capacity.displayName || 'Unknown'),
       user: req.user,
       capacity,
       armDetail,
       schedules,
+      history,
       subscriptionId: subscriptionId || '',
+      breadcrumb: [{ label: 'Capacities', href: '/capacities' }, { label: capacity.displayName || 'Detail', href: '#' }],
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -149,6 +176,23 @@ router.delete('/schedule/:id', async (req, res) => {
   }
 });
 
+// ── Update schedule ──
+router.put('/schedule/:id', async (req, res) => {
+  try {
+    const { action, scheduleType, hour, minute, day } = req.body;
+    await db.updateCapacitySchedule(parseInt(req.params.id), {
+      action,
+      scheduleType,
+      hour: hour != null ? parseInt(hour) : undefined,
+      minute: minute != null ? parseInt(minute) : undefined,
+      day: day || undefined,
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
 // ── Toggle schedule ──
 router.post('/schedule/:id/toggle', async (req, res) => {
   try {
@@ -156,6 +200,16 @@ router.post('/schedule/:id/toggle', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     res.json({ success: false, message: err.message });
+  }
+});
+
+// ── Schedule history ──
+router.get('/history/:capacityName', async (req, res) => {
+  try {
+    const history = await db.getScheduleHistory(req.params.capacityName, 5);
+    res.json({ success: true, history });
+  } catch (err) {
+    res.json({ success: false, message: err.message, history: [] });
   }
 });
 

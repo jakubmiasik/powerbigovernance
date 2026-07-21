@@ -172,7 +172,9 @@
 
 <!-- Schedules -->
 <div class="card mb-4">
-  <div class="card-header"><i class="bi bi-calendar-event me-2"></i>Pause / Resume Schedules</div>
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span><i class="bi bi-calendar-event me-2"></i>Pause / Resume Schedules</span>
+  </div>
   <div class="card-body">
     <div class="row g-2 align-items-end mb-3">
       <div class="col-auto">
@@ -184,10 +186,10 @@
       </div>
       <div class="col-auto">
         <label class="form-label small">Frequency</label>
-        <select class="form-select form-select-sm" id="schedType" style="width:120px;" onchange="toggleSchedFields()">
+        <select class="form-select form-select-sm" id="schedType" style="width:120px;" onchange="toggleSchedFields('schedType','schedHourCol','schedMinCol','schedDayCol')">
           <option value="daily">Daily</option>
           <option value="hourly">Hourly</option>
-          <option value="weekdays">Weekdays</option>
+          <option value="weekdays">Weekdays (Mon–Fri)</option>
           <option value="weekly">Weekly</option>
         </select>
       </div>
@@ -218,16 +220,25 @@
 
     <% if (schedules.length) { %>
       <table class="table table-sm table-hover mb-0">
-        <thead><tr><th>Action</th><th>Frequency</th><th>Time (UTC)</th><th>Day</th><th>Enabled</th><th></th></tr></thead>
+        <thead><tr><th>Action</th><th>Frequency</th><th>Time (UTC)</th><th>Days</th><th>Enabled</th><th>Actions</th></tr></thead>
         <tbody>
-          <% schedules.forEach(function(s) { %>
+          <% schedules.forEach(function(s) {
+            var dayLabel = '-';
+            if (s.schedule_type === 'daily') dayLabel = 'Mon–Sun';
+            else if (s.schedule_type === 'weekdays') dayLabel = 'Mon–Fri';
+            else if (s.schedule_type === 'weekly') dayLabel = s.schedule_day || '-';
+            else if (s.schedule_type === 'hourly') dayLabel = 'Every hour';
+          %>
             <tr>
               <td><span class="badge bg-<%= s.action === 'resume' ? 'success' : 'warning' %>"><%= s.action === 'resume' ? 'Resume' : 'Pause' %></span></td>
               <td><%= s.schedule_type %></td>
               <td><%= s.schedule_hour != null ? String(s.schedule_hour).padStart(2, '0') + ':' + String(s.schedule_minute || 0).padStart(2, '0') : '-' %></td>
-              <td><%= s.schedule_day || '-' %></td>
+              <td><%= dayLabel %></td>
               <td><div class="form-check form-switch"><input class="form-check-input" type="checkbox" <%= s.enabled ? 'checked' : '' %> onchange="toggleSchedule(<%= s.id %>, this.checked)"></div></td>
-              <td><button class="btn btn-sm btn-outline-danger p-0 px-1" onclick="deleteSchedule(<%= s.id %>)"><i class="bi bi-trash"></i></button></td>
+              <td>
+                <button class="btn btn-sm btn-outline-primary p-0 px-1 me-1" onclick="openEditSchedule(<%= s.id %>, '<%= s.action %>', '<%= s.schedule_type %>', <%= s.schedule_hour != null ? s.schedule_hour : 'null' %>, <%= s.schedule_minute != null ? s.schedule_minute : 0 %>, '<%= s.schedule_day || '' %>')" title="Edit"><i class="bi bi-pencil"></i></button>
+                <button class="btn btn-sm btn-outline-danger p-0 px-1" onclick="deleteSchedule(<%= s.id %>)" title="Delete"><i class="bi bi-trash"></i></button>
+              </td>
             </tr>
           <% }) %>
         </tbody>
@@ -236,6 +247,33 @@
       <p class="text-muted small mb-0">No schedules configured yet.</p>
     <% } %>
   </div>
+</div>
+
+<!-- Execution History (last 5 days) -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-clock-history me-2"></i>Schedule Execution History (Last 5 Days)</div>
+  <% var hist = typeof history !== 'undefined' ? history : []; %>
+  <% if (hist.length) { %>
+    <div class="card-body p-0">
+      <div class="table-responsive" style="max-height:300px; overflow-y:auto;">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Time (UTC)</th><th>Action</th><th>Status</th><th>Message</th></tr></thead>
+          <tbody>
+            <% hist.forEach(function(h) { %>
+              <tr>
+                <td class="small"><%= h.executed_at ? new Date(h.executed_at).toLocaleString() : '-' %></td>
+                <td><span class="badge bg-<%= h.action === 'resume' ? 'success' : 'warning' %>"><%= h.action === 'resume' ? 'Resume' : 'Pause' %></span></td>
+                <td><span class="badge bg-<%= h.status === 'success' ? 'success' : 'danger' %>"><%= h.status %></span></td>
+                <td class="small"><%= h.message || '-' %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  <% } else { %>
+    <div class="card-body text-muted small">No executions recorded yet. History appears after scheduled actions run.</div>
+  <% } %>
 </div>
 
 <!-- Action Status Modal -->
@@ -251,12 +289,72 @@
   </div>
 </div>
 
+<!-- Edit Schedule Modal -->
+<div class="modal fade" id="editSchedModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title">Edit Schedule</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="editSchedId">
+        <div class="row g-2 mb-2">
+          <div class="col-6">
+            <label class="form-label small">Action</label>
+            <select class="form-select form-select-sm" id="editSchedAction">
+              <option value="suspend">Pause</option>
+              <option value="resume">Resume</option>
+            </select>
+          </div>
+          <div class="col-6">
+            <label class="form-label small">Frequency</label>
+            <select class="form-select form-select-sm" id="editSchedType" onchange="toggleSchedFields('editSchedType','editHourCol','editMinCol','editDayCol')">
+              <option value="daily">Daily</option>
+              <option value="hourly">Hourly</option>
+              <option value="weekdays">Weekdays (Mon–Fri)</option>
+              <option value="weekly">Weekly</option>
+            </select>
+          </div>
+        </div>
+        <div class="row g-2">
+          <div class="col-4" id="editHourCol">
+            <label class="form-label small">Hour (UTC)</label>
+            <input type="number" class="form-control form-control-sm" id="editSchedHour" min="0" max="23" value="18">
+          </div>
+          <div class="col-4" id="editMinCol">
+            <label class="form-label small">Minute</label>
+            <input type="number" class="form-control form-control-sm" id="editSchedMin" min="0" max="59" value="0">
+          </div>
+          <div class="col-4 d-none" id="editDayCol">
+            <label class="form-label small">Day</label>
+            <select class="form-select form-select-sm" id="editSchedDay">
+              <option value="Monday">Monday</option>
+              <option value="Tuesday">Tuesday</option>
+              <option value="Wednesday">Wednesday</option>
+              <option value="Thursday">Thursday</option>
+              <option value="Friday">Friday</option>
+              <option value="Saturday">Saturday</option>
+              <option value="Sunday">Sunday</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-sm btn-primary" onclick="saveEditSchedule()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 var capName = '<%= capName.replace(/'/g, "\\'") %>';
-var actionModal;
+var actionModal, editSchedModal;
 
 document.addEventListener('DOMContentLoaded', function() {
   actionModal = new bootstrap.Modal(document.getElementById('actionModal'));
+  editSchedModal = new bootstrap.Modal(document.getElementById('editSchedModal'));
 });
 
 function getArmParams() {
@@ -299,9 +397,8 @@ async function doAction(action) {
     return;
   }
 
-  // Pause or Resume
   if (!params.subscriptionId || !params.resourceGroup) {
-    showModal('Missing Info', '<i class="bi bi-exclamation-triangle text-warning fs-2"></i><p class="mt-2">Please fill in <strong>Subscription ID</strong> and <strong>Resource Group</strong> first.</p>');
+    showModal('Missing Info', '<i class="bi bi-exclamation-triangle text-warning fs-2"></i><p class="mt-2">Please fill in <strong>Subscription ID</strong> and <strong>Resource Group</strong>.</p>');
     return;
   }
 
@@ -327,10 +424,10 @@ async function doAction(action) {
   }
 }
 
-function toggleSchedFields() {
-  var type = document.getElementById('schedType').value;
-  document.getElementById('schedDayCol').classList.toggle('d-none', type !== 'weekly');
-  document.getElementById('schedHourCol').classList.toggle('d-none', type === 'hourly');
+function toggleSchedFields(typeId, hourColId, minColId, dayColId) {
+  var type = document.getElementById(typeId).value;
+  document.getElementById(dayColId).classList.toggle('d-none', type !== 'weekly');
+  document.getElementById(hourColId).classList.toggle('d-none', type === 'hourly');
 }
 
 async function addSchedule() {
@@ -348,14 +445,54 @@ async function addSchedule() {
     minute: parseInt(document.getElementById('schedMin').value) || 0,
     day: document.getElementById('schedDay').value,
   };
+  showModal('Adding Schedule', '<div class="spinner-border text-primary"></div><p class="mt-2 text-muted">Creating schedule...</p>');
   try {
     var resp = await fetch('/capacities/' + encodeURIComponent(capName) + '/schedule', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     });
     var data = await resp.json();
-    if (data.success) location.reload();
-    else showModal('Error', '<i class="bi bi-x-circle text-danger fs-2"></i><p class="mt-2">' + data.message + '</p>');
+    if (data.success) {
+      showModal('Schedule Added', '<i class="bi bi-check-circle text-success fs-1"></i><p class="mt-2">Schedule created successfully.</p><p class="text-muted small">' + body.action + ' — ' + body.scheduleType + ' at ' + String(body.hour).padStart(2,'0') + ':' + String(body.minute).padStart(2,'0') + ' UTC</p>');
+      setTimeout(function() { location.reload(); }, 1500);
+    } else {
+      showModal('Error', '<i class="bi bi-x-circle text-danger fs-2"></i><p class="mt-2">' + data.message + '</p>');
+    }
   } catch (e) { showModal('Error', '<p>' + e.message + '</p>'); }
+}
+
+function openEditSchedule(id, action, type, hour, minute, day) {
+  document.getElementById('editSchedId').value = id;
+  document.getElementById('editSchedAction').value = action;
+  document.getElementById('editSchedType').value = type;
+  document.getElementById('editSchedHour').value = hour != null ? hour : 18;
+  document.getElementById('editSchedMin').value = minute || 0;
+  if (day) document.getElementById('editSchedDay').value = day;
+  toggleSchedFields('editSchedType', 'editHourCol', 'editMinCol', 'editDayCol');
+  editSchedModal.show();
+}
+
+async function saveEditSchedule() {
+  var id = document.getElementById('editSchedId').value;
+  var body = {
+    action: document.getElementById('editSchedAction').value,
+    scheduleType: document.getElementById('editSchedType').value,
+    hour: parseInt(document.getElementById('editSchedHour').value) || 0,
+    minute: parseInt(document.getElementById('editSchedMin').value) || 0,
+    day: document.getElementById('editSchedDay').value,
+  };
+  try {
+    var resp = await fetch('/capacities/schedule/' + id, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    var data = await resp.json();
+    if (data.success) {
+      editSchedModal.hide();
+      showToast('Schedule updated', 'success');
+      setTimeout(function() { location.reload(); }, 800);
+    } else {
+      showToast(data.message || 'Update failed', 'error');
+    }
+  } catch (e) { showToast(e.message, 'error'); }
 }
 
 async function deleteSchedule(id) {
@@ -373,7 +510,8 @@ async function toggleSchedule(id, enabled) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: enabled })
     });
-  } catch (e) { console.error(e); }
+    showToast('Schedule ' + (enabled ? 'enabled' : 'disabled'), 'success');
+  } catch (e) { showToast(e.message, 'error'); }
 }
 </script>
 

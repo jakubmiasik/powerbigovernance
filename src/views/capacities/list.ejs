@@ -1,0 +1,82 @@
+<%- include('../partials/header') %>
+
+<div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-4">
+  <div>
+    <h2><i class="bi bi-lightning me-2"></i>Capacities</h2>
+    <p class="text-muted mb-0 small">Manage and monitor all Power BI / Fabric capacities</p>
+  </div>
+  <button class="btn btn-sm btn-outline-primary" onclick="refreshCapList()">
+    <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+  </button>
+</div>
+
+<% if (typeof error !== 'undefined' && error) { %>
+  <div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-1"></i><%= error %></div>
+<% } %>
+
+<% if (capacities.length) { %>
+  <div class="card">
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-sm mb-0" id="capTable">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>SKU</th>
+              <th>Region</th>
+              <th>State</th>
+              <th>Admins</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <% capacities.forEach(function(cap) {
+              var stateColor = cap.state === 'Active' ? 'success' : cap.state === 'Paused' || cap.state === 'Suspended' ? 'warning' : 'secondary';
+            %>
+              <tr data-filter="<%= (cap.displayName || '') + ' ' + (cap.sku || '') + ' ' + (cap.region || '') %>">
+                <td>
+                  <a href="/capacities/<%= cap.id %>" class="fw-semibold text-decoration-none"><%= cap.displayName || 'Unnamed' %></a>
+                </td>
+                <td><code><%= (cap.sku || '-').toUpperCase() %></code></td>
+                <td class="small"><%= cap.region || '-' %></td>
+                <td><span class="badge bg-<%= stateColor %> cap-state-<%= (cap.id || '').toLowerCase() %>"><%= cap.state || '-' %></span></td>
+                <td class="small"><%= (cap.admins || []).join(', ') || '-' %></td>
+                <td>
+                  <a href="/capacities/<%= cap.id %>" class="btn btn-sm btn-outline-primary py-0 px-2">
+                    <i class="bi bi-chevron-right"></i>
+                  </a>
+                </td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+<% } else if (typeof error === 'undefined' || !error) { %>
+  <div class="card">
+    <div class="card-body text-center py-5 text-muted">
+      <i class="bi bi-lightning fs-1 mb-2 d-block"></i>
+      <p>No capacities found. Run an analysis or check your service principal configuration.</p>
+    </div>
+  </div>
+<% } %>
+
+<script>
+async function refreshCapList() {
+  try {
+    showToast('Refreshing capacities...', 'info');
+    var resp = await fetch('/capacities/refresh');
+    var data = await resp.json();
+    if (data.success) {
+      location.reload();
+    } else {
+      showToast(data.message || 'Refresh failed', 'error');
+    }
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+}
+</script>
+
+<%- include('../partials/footer') %>
