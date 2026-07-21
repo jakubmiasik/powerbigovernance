@@ -159,6 +159,67 @@ router.get('/:workspaceId/lineage/:itemId', async (req, res) => {
   }
 });
 
+// ── OneLake Storage Size ──
+
+// Get storage breakdown for a workspace
+router.get('/:workspaceId/storage', async (req, res) => {
+  try {
+    const sps = await db.getServicePrincipals();
+    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
+    const globalRun = res.locals.globalRun;
+    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
+    const pbi = createPowerBIService(sp);
+
+    const storage = await pbi.getWorkspaceStorageSize(req.params.workspaceId);
+
+    // Map item folder names to actual item names if we have saved data
+    const savedWorkspaces = await loadWorkspacesFromRun(res);
+    let itemDetails = {};
+    if (savedWorkspaces) {
+      const ws = savedWorkspaces.find(w => w.id === req.params.workspaceId);
+      if (ws && ws.items) {
+        for (const item of ws.items) {
+          const id = item.id || '';
+          itemDetails[id] = { name: item.displayName || item.name || id, type: item.type || 'Unknown' };
+          // Also try lowercase for matching
+          itemDetails[id.toLowerCase()] = itemDetails[id];
+        }
+      }
+    }
+
+    // Enrich items with names
+    const enrichedItems = {};
+    for (const [key, val] of Object.entries(storage.items)) {
+      const detail = itemDetails[key] || itemDetails[key.toLowerCase()] || { name: key, type: 'Unknown' };
+      enrichedItems[key] = { ...val, name: detail.name, type: detail.type };
+    }
+
+    res.json({
+      success: true,
+      totalSize: storage.totalSize,
+      totalFiles: storage.totalFiles,
+      items: enrichedItems,
+    });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// Get storage for a specific item
+router.get('/:workspaceId/storage/:itemId', async (req, res) => {
+  try {
+    const sps = await db.getServicePrincipals();
+    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
+    const globalRun = res.locals.globalRun;
+    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
+    const pbi = createPowerBIService(sp);
+    const result = await pbi.getItemStorageSize(req.params.workspaceId, req.params.itemId);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
 // ── Workspace Role Assignments (Fabric API) ──
 
 // GET role assignments for a workspace

@@ -125,6 +125,18 @@ async function getGraphTokenForSP(spConfig) {
   return result.accessToken;
 }
 
+// ── OneLake / Azure Storage token (for item size via ADLS Gen2 API) ──
+async function getOneLakeTokenForSP(spConfig) {
+  const app = getConfidentialClient(spConfig);
+  const result = await app.acquireTokenByClientCredential({
+    scopes: ['https://storage.azure.com/.default'],
+  });
+  if (!result || !result.accessToken) {
+    throw new Error('Failed to acquire OneLake storage access token');
+  }
+  return result.accessToken;
+}
+
 // ── Azure Management API token (for capacity pause/resume) ──
 async function getAzureManagementTokenForSP(spConfig) {
   const app = getConfidentialClient(spConfig);
@@ -138,6 +150,6 @@ async function getAzureManagementTokenForSP(spConfig) {
 }
 
 module.exports = {
-  getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP, resetAuthCache,
+  getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP, getOneLakeTokenForSP, resetAuthCache,
   getDelegatedAuthUrl, acquireDelegatedToken,
 };

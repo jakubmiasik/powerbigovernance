@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP } = require('./authService');
+const { getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP, getOneLakeTokenForSP } = require('./authService');
 
 const PBI_BASE = 'https://api.powerbi.com/v1.0/myorg';
 const PBI_ADMIN = PBI_BASE + '/admin';
@@ -493,6 +493,96 @@ function createPowerBIService(spConfig) {
     return data.value || [];
   }
 
+  // ── OneLake Storage Size: ADLS Gen2 compatible API ──
+  const ONELAKE_DFS = 'https://onelake.dfs.fabric.microsoft.com';
+  let onelakeTokenPromise = null;
+
+  async function getOneLakeToken() {
+    if (!onelakeTokenPromise) {
+      onelakeTokenPromise = getOneLakeTokenForSP(spConfig).catch(err => {
+        onelakeTokenPromise = null;
+        throw err;
+      });
+      setTimeout(() => { onelakeTokenPromise = null; }, 50 * 60 * 1000);
+    }
+    return onelakeTokenPromise;
+  }
+
+  // List all paths in a workspace (or under a specific directory) via ADLS Gen2
+  async function listOneLakePaths(workspaceId, directory, maxPages) {
+    const token = await getOneLakeToken();
+    const allPaths = [];
+    let continuation = null;
+    let pages = 0;
+    const limit = maxPages || 50;
+
+    do {
+      const params = { resource: 'filesystem', recursive: 'true', maxResults: '5000' };
+      if (directory) params.directory = directory;
+      if (continuation) params.continuation = continuation;
+
+      const url = `${ONELAKE_DFS}/${workspaceId}`;
+      const response = await axios.get(url, {
+        headers: {
+          Authorization: 'Bearer ' + token,
+          'x-ms-version': '2021-06-08',
+        },
+        params,
+        timeout: 120000,
+      });
+
+      const paths = response.data.paths || [];
+      allPaths.push(...paths);
+      continuation = response.headers['x-ms-continuation'] || null;
+      pages++;
+    } while (continuation && pages < limit);
+
+    return allPaths;
+  }
+
+  // Get storage size for a single item
+  async function getItemStorageSize(workspaceId, itemId) {
+    try {
+      const paths = await listOneLakePaths(workspaceId, itemId, 20);
+      let totalSize = 0;
+      let fileCount = 0;
+      for (const p of paths) {
+        if (p.contentLength) {
+          totalSize += parseInt(p.contentLength, 10);
+          fileCount++;
+        }
+      }
+      return { itemId, totalSize, fileCount, success: true };
+    } catch (err) {
+      return { itemId, totalSize: 0, fileCount: 0, success: false, error: err.message };
+    }
+  }
+
+  // Get storage breakdown for entire workspace (groups by top-level item directory)
+  async function getWorkspaceStorageSize(workspaceId) {
+    const paths = await listOneLakePaths(workspaceId, null, 100);
+    const itemSizes = {};
+    let totalSize = 0;
+    let totalFiles = 0;
+
+    for (const p of paths) {
+      if (p.isDirectory === 'true' || p.isDirectory === true) continue;
+      const size = parseInt(p.contentLength || '0', 10);
+      totalSize += size;
+      totalFiles++;
+
+      // Group by top-level directory (item folder)
+      const topDir = (p.name || '').split('/')[0];
+      if (topDir) {
+        if (!itemSizes[topDir]) itemSizes[topDir] = { size: 0, files: 0 };
+        itemSizes[topDir].size += size;
+        itemSizes[topDir].files++;
+      }
+    }
+
+    return { totalSize, totalFiles, items: itemSizes };
+  }
+
   return {
     getWorkspaces,
     getWorkspaceById,
@@ -525,6 +615,8 @@ function createPowerBIService(spConfig) {
     searchEntraUsers,
     searchEntraServicePrincipals,
     searchEntraGroups,
+    getItemStorageSize,
+    getWorkspaceStorageSize,
   };
 }
 
