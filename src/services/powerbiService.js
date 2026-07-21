@@ -508,8 +508,8 @@ function createPowerBIService(spConfig) {
     return onelakeTokenPromise;
   }
 
-  // List all paths in a workspace (or under a specific directory) via ADLS Gen2
-  async function listOneLakePaths(workspaceId, directory, maxPages) {
+  // List all paths for a specific item in OneLake via ADLS Gen2
+  async function listOneLakePaths(workspaceId, itemId, directory, maxPages) {
     const token = await getOneLakeToken();
     const allPaths = [];
     let continuation = null;
@@ -517,23 +517,41 @@ function createPowerBIService(spConfig) {
     const limit = maxPages || 50;
 
     do {
-      const params = { resource: 'filesystem', recursive: 'true', maxResults: '5000' };
-      if (directory) params.directory = directory;
-      if (continuation) params.continuation = continuation;
+      // OneLake requires: /{workspaceId}/{itemId}?resource=filesystem&recursive=true
+      const url = `${ONELAKE_DFS}/${workspaceId}/${itemId}`;
+      const queryParams = new URLSearchParams();
+      queryParams.set('resource', 'filesystem');
+      queryParams.set('recursive', 'true');
+      if (directory) queryParams.set('directory', directory);
+      if (continuation) queryParams.set('continuation', continuation);
 
-      const url = `${ONELAKE_DFS}/${workspaceId}`;
-      const response = await axios.get(url, {
-        headers: {
-          Authorization: 'Bearer ' + token,
-          'x-ms-version': '2021-06-08',
-        },
-        params,
-        timeout: 120000,
-      });
+      try {
+        const response = await axios.get(url + '?' + queryParams.toString(), {
+          headers: { Authorization: 'Bearer ' + token },
+          timeout: 120000,
+        });
 
-      const paths = response.data.paths || [];
-      allPaths.push(...paths);
-      continuation = response.headers['x-ms-continuation'] || null;
+        const paths = response.data.paths || [];
+        allPaths.push(...paths);
+        continuation = response.headers['x-ms-continuation'] || null;
+      } catch (err) {
+        const status = err.response?.status;
+        const errBody = err.response?.data;
+        let errMsg = err.message;
+        if (errBody) {
+          if (typeof errBody === 'string') {
+            const match = errBody.match(/<Message>(.*?)<\/Message>/s);
+            errMsg = match ? match[1] : errBody.substring(0, 500);
+          } else if (errBody.error) {
+            errMsg = errBody.error.message || errBody.error.code || JSON.stringify(errBody.error);
+          } else if (errBody.Message) {
+            errMsg = errBody.Message;
+          } else {
+            errMsg = JSON.stringify(errBody).substring(0, 500);
+          }
+        }
+        throw new Error(`OneLake API error (${status || 'unknown'}): ${errMsg}`);
+      }
       pages++;
     } while (continuation && pages < limit);
 
@@ -543,7 +561,7 @@ function createPowerBIService(spConfig) {
   // Get storage size for a single item
   async function getItemStorageSize(workspaceId, itemId) {
     try {
-      const paths = await listOneLakePaths(workspaceId, itemId, 20);
+      const paths = await listOneLakePaths(workspaceId, itemId, null, 20);
       let totalSize = 0;
       let fileCount = 0;
       for (const p of paths) {
@@ -558,29 +576,46 @@ function createPowerBIService(spConfig) {
     }
   }
 
-  // Get storage breakdown for entire workspace (groups by top-level item directory)
-  async function getWorkspaceStorageSize(workspaceId) {
-    const paths = await listOneLakePaths(workspaceId, null, 100);
+  // Get storage breakdown for workspace — iterates over items that store data in OneLake
+  // Items must be passed in (from saved analysis or API)
+  async function getWorkspaceStorageSize(workspaceId, items) {
+    const storageTypes = new Set([
+      'lakehouse', 'warehouse', 'sqldatabase', 'semanticmodel', 'dataset',
+      'dataflow', 'dataflowgen2', 'datagen2', 'kqldatabase', 'notebook',
+      'environment', 'eventstream', 'datapipeline', 'sparkjobdefinition',
+    ]);
+
     const itemSizes = {};
     let totalSize = 0;
     let totalFiles = 0;
+    const errors = [];
 
-    for (const p of paths) {
-      if (p.isDirectory === 'true' || p.isDirectory === true) continue;
-      const size = parseInt(p.contentLength || '0', 10);
-      totalSize += size;
-      totalFiles++;
+    for (const item of (items || [])) {
+      const itemType = (item.type || '').toLowerCase();
+      if (!storageTypes.has(itemType)) continue;
 
-      // Group by top-level directory (item folder)
-      const topDir = (p.name || '').split('/')[0];
-      if (topDir) {
-        if (!itemSizes[topDir]) itemSizes[topDir] = { size: 0, files: 0 };
-        itemSizes[topDir].size += size;
-        itemSizes[topDir].files++;
+      const itemId = item.id;
+      if (!itemId) continue;
+
+      try {
+        const result = await getItemStorageSize(workspaceId, itemId);
+        if (result.success && result.totalSize > 0) {
+          itemSizes[itemId] = {
+            size: result.totalSize,
+            files: result.fileCount,
+            name: item.displayName || item.name || itemId,
+            type: item.type || 'Unknown',
+          };
+          totalSize += result.totalSize;
+          totalFiles += result.fileCount;
+        }
+      } catch {
+        // Skip items that fail (no OneLake storage, permissions, etc.)
+        errors.push(itemId);
       }
     }
 
-    return { totalSize, totalFiles, items: itemSizes };
+    return { totalSize, totalFiles, items: itemSizes, errors };
   }
 
   return {

@@ -170,35 +170,33 @@ router.get('/:workspaceId/storage', async (req, res) => {
     const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
     const pbi = createPowerBIService(sp);
 
-    const storage = await pbi.getWorkspaceStorageSize(req.params.workspaceId);
-
-    // Map item folder names to actual item names if we have saved data
+    // Get items for this workspace (from saved data or live API)
+    let items = [];
     const savedWorkspaces = await loadWorkspacesFromRun(res);
-    let itemDetails = {};
     if (savedWorkspaces) {
       const ws = savedWorkspaces.find(w => w.id === req.params.workspaceId);
-      if (ws && ws.items) {
-        for (const item of ws.items) {
-          const id = item.id || '';
-          itemDetails[id] = { name: item.displayName || item.name || id, type: item.type || 'Unknown' };
-          // Also try lowercase for matching
-          itemDetails[id.toLowerCase()] = itemDetails[id];
-        }
-      }
+      if (ws && ws.items) items = ws.items;
+    }
+    if (!items.length) {
+      // Fallback: fetch items from API
+      try {
+        items = await pbi.getItemsByWorkspace(req.params.workspaceId);
+      } catch { /* no items available */ }
     }
 
-    // Enrich items with names
-    const enrichedItems = {};
-    for (const [key, val] of Object.entries(storage.items)) {
-      const detail = itemDetails[key] || itemDetails[key.toLowerCase()] || { name: key, type: 'Unknown' };
-      enrichedItems[key] = { ...val, name: detail.name, type: detail.type };
+    if (!items.length) {
+      return res.json({ success: false, message: 'No items found in this workspace. Run an analysis first or ensure the SP has access.' });
     }
+
+    const storage = await pbi.getWorkspaceStorageSize(req.params.workspaceId, items);
 
     res.json({
       success: true,
       totalSize: storage.totalSize,
       totalFiles: storage.totalFiles,
-      items: enrichedItems,
+      items: storage.items,
+      scannedItems: items.length,
+      errorCount: (storage.errors || []).length,
     });
   } catch (err) {
     res.json({ success: false, message: err.message });
