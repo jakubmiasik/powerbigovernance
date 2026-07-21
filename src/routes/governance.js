@@ -169,25 +169,12 @@ const { createPowerBIService } = require('../services/powerbiService');
 const { getDelegatedAuthUrl, acquireDelegatedToken } = require('../services/authService');
 const axios = require('axios');
 
-// OAuth flow for granting SP access (same as migration)
+// OAuth flow for granting SP access — reuses migration callback URI
 router.get('/grant-auth', async (req, res) => {
   try {
-    const redirectUri = `${req.protocol}://${req.get('host')}/governance/grant-auth/callback`;
+    const redirectUri = `${req.protocol}://${req.get('host')}/migrate/auth/callback`;
     const authUrl = await getDelegatedAuthUrl(redirectUri, 'grant-sp');
     res.redirect(authUrl);
-  } catch (err) {
-    res.redirect('/analysis?error=' + encodeURIComponent(err.message));
-  }
-});
-
-router.get('/grant-auth/callback', async (req, res) => {
-  try {
-    const code = req.query.code;
-    if (!code) throw new Error('No authorization code received.');
-    const redirectUri = `${req.protocol}://${req.get('host')}/governance/grant-auth/callback`;
-    const token = await acquireDelegatedToken(code, redirectUri);
-    req.session.pbiGrantToken = token;
-    res.redirect('/analysis?grantAuth=success');
   } catch (err) {
     res.redirect('/analysis?error=' + encodeURIComponent(err.message));
   }

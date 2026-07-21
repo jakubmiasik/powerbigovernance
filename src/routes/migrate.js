@@ -135,12 +135,18 @@ router.get('/auth', async (req, res) => {
 // ── OAuth callback: exchange code for delegated token ──
 router.get('/auth/callback', async (req, res) => {
   try {
-    const { code, error, error_description } = req.query;
+    const { code, state, error, error_description } = req.query;
     if (error) {
       return res.render('error', { title: 'Auth Error', user: req.user, message: error_description || error });
     }
     const redirectUri = `${req.protocol}://${req.get('host')}/migrate/auth/callback`;
     const token = await acquireDelegatedToken(code, redirectUri);
+
+    if (state === 'grant-sp') {
+      req.session.pbiGrantToken = token;
+      return res.redirect('/analysis?grantAuth=success');
+    }
+
     req.session.pbiMigrationToken = token;
     res.redirect('/migrate');
   } catch (err) {
