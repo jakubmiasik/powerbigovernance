@@ -217,6 +217,23 @@ async function openGrantAccess() {
     alert('Enterprise Application Object ID not configured for this service principal. Go to Settings to add it.');
     return;
   }
+
+  // Check if user is authorized as Power BI Admin
+  try {
+    var authResp = await fetch('/governance/grant-auth/status');
+    var authData = await authResp.json();
+    if (!authData.authenticated) {
+      // Redirect to OAuth flow
+      if (confirm('You need to authorize as a Power BI Admin to grant workspace access. Redirect to sign in?')) {
+        window.location.href = '/governance/grant-auth';
+      }
+      return;
+    }
+  } catch (e) {
+    alert('Failed to check auth status: ' + e.message);
+    return;
+  }
+
   // Fetch workspace list
   document.getElementById('grantWsList').innerHTML = '<div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div> Loading workspaces...</div>';
   document.getElementById('grantStatusArea').classList.add('d-none');

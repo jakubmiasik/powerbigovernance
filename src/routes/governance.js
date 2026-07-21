@@ -164,13 +164,49 @@ router.get('/artifacts', async (req, res) => {
   }
 });
 
-// Grant SP access to workspaces (batch)
+// Grant SP access to workspaces (batch) — requires delegated user token
 const { createPowerBIService } = require('../services/powerbiService');
+const { getDelegatedAuthUrl, acquireDelegatedToken } = require('../services/authService');
+const axios = require('axios');
+
+// OAuth flow for granting SP access (same as migration)
+router.get('/grant-auth', async (req, res) => {
+  try {
+    const redirectUri = `${req.protocol}://${req.get('host')}/governance/grant-auth/callback`;
+    const authUrl = await getDelegatedAuthUrl(redirectUri, 'grant-sp');
+    res.redirect(authUrl);
+  } catch (err) {
+    res.redirect('/analysis?error=' + encodeURIComponent(err.message));
+  }
+});
+
+router.get('/grant-auth/callback', async (req, res) => {
+  try {
+    const code = req.query.code;
+    if (!code) throw new Error('No authorization code received.');
+    const redirectUri = `${req.protocol}://${req.get('host')}/governance/grant-auth/callback`;
+    const token = await acquireDelegatedToken(code, redirectUri);
+    req.session.pbiGrantToken = token;
+    res.redirect('/analysis?grantAuth=success');
+  } catch (err) {
+    res.redirect('/analysis?error=' + encodeURIComponent(err.message));
+  }
+});
+
+router.get('/grant-auth/status', (req, res) => {
+  res.json({ authenticated: !!req.session.pbiGrantToken });
+});
+
 router.post('/grant-sp-access', async (req, res) => {
   try {
     const { workspaceIds } = req.body;
     if (!workspaceIds || !workspaceIds.length) {
       return res.json({ success: false, message: 'No workspaces selected.' });
+    }
+
+    const token = req.session.pbiGrantToken;
+    if (!token) {
+      return res.json({ success: false, message: 'Not authorized. Click "Authorize as Power BI Admin" first.' });
     }
 
     const sps = await db.getServicePrincipals();
@@ -181,14 +217,22 @@ router.post('/grant-sp-access', async (req, res) => {
       return res.json({ success: false, message: 'Enterprise Application Object ID not configured. Go to Settings to add it.' });
     }
 
-    const pbi = createPowerBIService(sp);
     const results = [];
     for (const wsId of workspaceIds) {
       try {
-        await pbi.addWorkspaceAdmin(wsId, sp.enterprise_app_object_id, 'App');
+        await axios.post(
+          `https://api.powerbi.com/v1.0/myorg/admin/groups/${wsId}/users`,
+          {
+            groupUserAccessRight: 'Admin',
+            identifier: sp.enterprise_app_object_id,
+            principalType: 'App',
+          },
+          { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, timeout: 30000 }
+        );
         results.push({ workspaceId: wsId, success: true });
       } catch (err) {
-        results.push({ workspaceId: wsId, success: false, error: err.message });
+        const msg = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+        results.push({ workspaceId: wsId, success: false, error: msg });
       }
     }
 
@@ -200,6 +244,9 @@ router.post('/grant-sp-access', async (req, res) => {
       results,
     });
   } catch (err) {
+    if (err.message && err.message.includes('token')) {
+      req.session.pbiGrantToken = null;
+    }
     res.json({ success: false, message: err.message });
   }
 });
