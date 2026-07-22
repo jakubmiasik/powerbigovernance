@@ -17,6 +17,34 @@ async function executeSchedule(schedule) {
 
     console.log(`[Scheduler] Executing ${action} on capacity "${capacity_name}" (${resource_group})`);
 
+    // Check current state before executing to avoid 400 errors
+    try {
+      const detail = await pbi.getArmCapacityDetail(subscription_id, resource_group, capacity_name);
+      const currentState = (detail.properties && detail.properties.state) || '';
+      const provisioningState = (detail.properties && detail.properties.provisioningState) || '';
+
+      // Skip if already in target state
+      if (action === 'suspend' && (currentState === 'Paused' || currentState === 'Suspended')) {
+        console.log(`[Scheduler] Capacity "${capacity_name}" already paused/suspended, skipping.`);
+        await db.logScheduleExecution(schedule.id, capacity_name, action, 'skipped', 'Capacity already paused');
+        return;
+      }
+      if (action === 'resume' && currentState === 'Active') {
+        console.log(`[Scheduler] Capacity "${capacity_name}" already active, skipping.`);
+        await db.logScheduleExecution(schedule.id, capacity_name, action, 'skipped', 'Capacity already active');
+        return;
+      }
+      // Skip if in transitional state (provisioning, updating, etc.)
+      if (provisioningState && provisioningState !== 'Succeeded') {
+        console.log(`[Scheduler] Capacity "${capacity_name}" in transitional state (${provisioningState}), skipping.`);
+        await db.logScheduleExecution(schedule.id, capacity_name, action, 'skipped', `Capacity in transitional state: ${provisioningState}`);
+        return;
+      }
+    } catch (stateErr) {
+      console.warn(`[Scheduler] Could not check state for "${capacity_name}":`, stateErr.message);
+      // Continue anyway — worst case we get the 400 and log it
+    }
+
     if (action === 'suspend') {
       await pbi.suspendCapacity(subscription_id, resource_group, capacity_name);
     } else if (action === 'resume') {
