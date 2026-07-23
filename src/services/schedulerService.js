@@ -142,10 +142,11 @@ function getTimeInTimezone(tz) {
       parts[p.type] = p.value;
     }
     const dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    const dow = dayMap[parts.weekday] !== undefined ? dayMap[parts.weekday] : new Date().getUTCDay();
     return {
       hour: parseInt(parts.hour, 10) % 24,
       minute: parseInt(parts.minute, 10),
-      dayOfWeek: dayMap[parts.weekday] ?? new Date().getUTCDay(),
+      dayOfWeek: dow,
     };
   } catch {
     // Fallback to UTC if timezone is invalid
