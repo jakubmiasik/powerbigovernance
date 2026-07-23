@@ -133,8 +133,8 @@ router.post('/:name/suspend', async (req, res) => {
         return res.json({ success: false, message: `Capacity is in transitional state (${provisioning}). Please wait and try again.` });
       }
     } catch (stateErr) {
-      console.warn('[Capacities] State check failed:', stateErr.message);
       // Continue anyway if state check fails
+      console.warn('[Capacities] State check failed:', stateErr.message);
     }
 
     await pbi.suspendCapacity(subscriptionId, resourceGroup, req.params.name);
@@ -165,8 +165,8 @@ router.post('/:name/resume', async (req, res) => {
         return res.json({ success: false, message: `Capacity is in transitional state (${provisioning}). Please wait and try again.` });
       }
     } catch (stateErr) {
-      console.warn('[Capacities] State check failed:', stateErr.message);
       // Continue anyway if state check fails
+      console.warn('[Capacities] State check failed:', stateErr.message);
     }
 
     await pbi.resumeCapacity(subscriptionId, resourceGroup, req.params.name);
@@ -179,7 +179,7 @@ router.post('/:name/resume', async (req, res) => {
 // ── Add schedule ──
 router.post('/:name/schedule', async (req, res) => {
   try {
-    const { subscriptionId, resourceGroup, action, scheduleType, hour, minute, day } = req.body;
+    const { subscriptionId, resourceGroup, action, scheduleType, hour, minute, day, timezone } = req.body;
     if (!subscriptionId || !resourceGroup || !action || !scheduleType) {
       return res.json({ success: false, message: 'All fields are required.' });
     }
@@ -192,6 +192,7 @@ router.post('/:name/schedule', async (req, res) => {
       hour: hour != null ? parseInt(hour) : null,
       minute: minute != null ? parseInt(minute) : null,
       day: day || null,
+      timezone: timezone || 'UTC',
       enabled: true,
     });
     res.json({ success: true });
@@ -213,13 +214,14 @@ router.delete('/schedule/:id', async (req, res) => {
 // ── Update schedule ──
 router.put('/schedule/:id', async (req, res) => {
   try {
-    const { action, scheduleType, hour, minute, day } = req.body;
+    const { action, scheduleType, hour, minute, day, timezone } = req.body;
     await db.updateCapacitySchedule(parseInt(req.params.id), {
       action,
       scheduleType,
       hour: hour != null ? parseInt(hour) : undefined,
       minute: minute != null ? parseInt(minute) : undefined,
       day: day || undefined,
+      timezone: timezone || undefined,
     });
     res.json({ success: true });
   } catch (err) {
