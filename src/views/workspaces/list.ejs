@@ -82,17 +82,18 @@
   <div class="card">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
       <span><i class="bi bi-bar-chart me-2"></i>Workspace Inventory (<%= stats.total %>)</span>
-      <div class="d-flex gap-2 align-items-center">
-        <select class="form-select form-select-sm" id="chartMetric" style="max-width: 180px;" onchange="updateChart()">
-          <option value="storage">Storage Size</option>
-          <option value="reports">Reports Count</option>
-          <option value="datasets">Datasets Count</option>
-          <option value="items">Total Items</option>
+      <div class="d-flex gap-2 align-items-center flex-wrap">
+        <select class="form-select form-select-sm" id="sortMetric" style="max-width: 160px;" onchange="updateChart()">
+          <option value="name">Sort by Name</option>
+          <option value="storage">Sort by Storage</option>
+          <option value="reports">Sort by Reports</option>
+          <option value="datasets">Sort by Datasets</option>
+          <option value="items">Sort by Items</option>
         </select>
         <input type="text" class="form-control form-control-sm" style="max-width: 240px;" placeholder="Filter workspaces..." id="chartFilter" oninput="updateChart()">
       </div>
     </div>
-    <div class="card-body" style="position: relative; height: 400px;">
+    <div class="card-body" style="position: relative; min-height: 600px;">
       <canvas id="workspaceChart"></canvas>
     </div>
   </div>
@@ -104,66 +105,57 @@
 
     function getFilteredData() {
       var filterText = (document.getElementById('chartFilter').value || '').toLowerCase();
-      var metric = document.getElementById('chartMetric').value;
+      var sortMetric = document.getElementById('sortMetric').value;
       
-      return workspacesData.filter(function(ws) {
+      var filtered = workspacesData.filter(function(ws) {
         var wsName = (ws.displayName || ws.name || 'Unnamed').toLowerCase();
         var license = (ws.licenseType || 'Pro').toLowerCase();
         var sku = (ws.capacitySku || '-').toLowerCase();
         var searchText = [wsName, license, sku].join(' ');
         return searchText.includes(filterText);
-      }).sort(function(a, b) {
-        var aVal = getMetricValue(a, metric);
-        var bVal = getMetricValue(b, metric);
-        return bVal - aVal;
       });
+
+      // Sort by selected metric
+      filtered.sort(function(a, b) {
+        if (sortMetric === 'name') {
+          return (a.displayName || a.name || '').localeCompare(b.displayName || b.name || '');
+        }
+        if (sortMetric === 'storage') return (b.storageSize || 0) - (a.storageSize || 0);
+        if (sortMetric === 'reports') return (b.reportCount || 0) - (a.reportCount || 0);
+        if (sortMetric === 'datasets') return (b.datasetCount || 0) - (a.datasetCount || 0);
+        if (sortMetric === 'items') return (b.totalItems || 0) - (a.totalItems || 0);
+        return 0;
+      });
+
+      return filtered;
     }
 
-    function getMetricValue(ws, metric) {
-      if (metric === 'storage') return ws.storageSize || 0;
-      if (metric === 'reports') return ws.reportCount || 0;
-      if (metric === 'datasets') return ws.datasetCount || 0;
-      if (metric === 'items') return ws.totalItems || 0;
-      return 0;
-    }
-
-    function formatMetricValue(value, metric) {
-      if (metric === 'storage') {
-        if (!value || value === 0) return '0 B';
-        var units = ['B', 'KB', 'MB', 'GB', 'TB'];
-        var i = Math.floor(Math.log(value) / Math.log(1024));
-        return (value / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
-      }
-      return value.toString();
-    }
-
-    function getMetricLabel(metric) {
-      if (metric === 'storage') return 'Storage (GB)';
-      if (metric === 'reports') return 'Reports';
-      if (metric === 'datasets') return 'Datasets';
-      if (metric === 'items') return 'Items';
-      return metric;
+    function formatStorageGB(bytes) {
+      if (!bytes || bytes === 0) return 0;
+      return (bytes / (1024 * 1024 * 1024)).toFixed(1);
     }
 
     function updateChart() {
       var filteredData = getFilteredData();
-      var metric = document.getElementById('chartMetric').value;
       
-      var labels = filteredData.slice(0, 15).map(function(ws) {
-        return (ws.displayName || ws.name || 'Unnamed').substring(0, 20);
+      var labels = filteredData.map(function(ws) {
+        return (ws.displayName || ws.name || 'Unnamed').substring(0, 30);
       });
       
-      var values = filteredData.slice(0, 15).map(function(ws) {
-        var val = getMetricValue(ws, metric);
-        if (metric === 'storage') return val / (1024 * 1024 * 1024); // Convert to GB
-        return val;
+      var storageData = filteredData.map(function(ws) {
+        return formatStorageGB(ws.storageSize || 0);
       });
-
-      var colors = filteredData.slice(0, 15).map(function(ws) {
-        if (ws.licenseType === 'Fabric') return '#0B7285'; // Teal
-        if (ws.licenseType === 'Premium') return '#F59E0B'; // Amber
-        if (ws.licenseType === 'Premium Per User') return '#06B6D4'; // Cyan
-        return '#6B7280'; // Gray
+      
+      var reportsData = filteredData.map(function(ws) {
+        return ws.reportCount || 0;
+      });
+      
+      var datasetsData = filteredData.map(function(ws) {
+        return ws.datasetCount || 0;
+      });
+      
+      var itemsData = filteredData.map(function(ws) {
+        return ws.totalItems || 0;
       });
 
       var ctx = document.getElementById('workspaceChart').getContext('2d');
@@ -176,36 +168,80 @@
         type: 'bar',
         data: {
           labels: labels,
-          datasets: [{
-            label: getMetricLabel(metric),
-            data: values,
-            backgroundColor: colors,
-            borderColor: colors,
-            borderWidth: 1,
-            borderRadius: 4,
-          }]
+          datasets: [
+            {
+              label: 'Storage (GB)',
+              data: storageData,
+              backgroundColor: '#06B6D4',
+              borderColor: '#0891B2',
+              borderWidth: 1,
+              borderRadius: 3,
+              yAxisID: 'y'
+            },
+            {
+              label: 'Reports',
+              data: reportsData,
+              backgroundColor: '#F59E0B',
+              borderColor: '#D97706',
+              borderWidth: 1,
+              borderRadius: 3,
+              yAxisID: 'y1'
+            },
+            {
+              label: 'Datasets',
+              data: datasetsData,
+              backgroundColor: '#8B5CF6',
+              borderColor: '#7C3AED',
+              borderWidth: 1,
+              borderRadius: 3,
+              yAxisID: 'y1'
+            },
+            {
+              label: 'Total Items',
+              data: itemsData,
+              backgroundColor: '#10B981',
+              borderColor: '#059669',
+              borderWidth: 1,
+              borderRadius: 3,
+              yAxisID: 'y1'
+            }
+          ]
         },
         options: {
           indexAxis: 'y',
           responsive: true,
           maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
           plugins: {
-            legend: { display: false },
+            legend: { 
+              display: true,
+              position: 'top',
+              labels: { usePointStyle: true, padding: 15 }
+            },
             tooltip: {
               callbacks: {
                 label: function(context) {
-                  var metric = document.getElementById('chartMetric').value;
-                  if (metric === 'storage') {
-                    var val = context.raw * 1024 * 1024 * 1024;
-                    return formatMetricValue(val, 'storage');
+                  var label = context.dataset.label || '';
+                  var value = context.raw;
+                  if (label.includes('Storage')) {
+                    return label + ': ' + value + ' GB';
                   }
-                  return context.raw.toString();
+                  return label + ': ' + value;
                 }
               }
             }
           },
           scales: {
-            x: { beginAtZero: true }
+            y: {
+              type: 'category',
+              title: { display: true, text: 'Workspaces' }
+            },
+            y1: {
+              type: 'linear',
+              position: 'left',
+              title: { display: true, text: 'Counts' },
+              beginAtZero: true
+            }
           }
         }
       });
