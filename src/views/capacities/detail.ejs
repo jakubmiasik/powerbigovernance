@@ -194,7 +194,7 @@
         </select>
       </div>
       <div class="col-auto" id="schedHourCol">
-        <label class="form-label small">Hour (UTC)</label>
+        <label class="form-label small">Hour</label>
         <input type="number" class="form-control form-control-sm" id="schedHour" min="0" max="23" value="18" style="width:70px;">
       </div>
       <div class="col-auto" id="schedMinCol">
@@ -214,13 +214,29 @@
         </select>
       </div>
       <div class="col-auto">
+        <label class="form-label small">Timezone (Info Only)</label>
+        <select class="form-select form-select-sm" id="schedTimezone" style="width:200px;">
+          <option value="UTC">UTC</option>
+          <option value="Europe/London">Europe/London (GMT)</option>
+          <option value="Europe/Paris">Europe/Paris (CET)</option>
+          <option value="Europe/Berlin">Europe/Berlin (CET)</option>
+          <option value="Europe/Amsterdam">Europe/Amsterdam (CET)</option>
+          <option value="Asia/Dubai">Asia/Dubai (GST)</option>
+          <option value="Asia/Singapore">Asia/Singapore (SGT)</option>
+          <option value="Asia/Tokyo">Asia/Tokyo (JST)</option>
+          <option value="Australia/Sydney">Australia/Sydney (AEST)</option>
+          <option value="America/New_York">America/New_York (ET)</option>
+          <option value="America/Los_Angeles">America/Los_Angeles (PT)</option>
+        </select>
+      </div>
+      <div class="col-auto">
         <button class="btn btn-sm btn-primary" onclick="addSchedule()"><i class="bi bi-plus me-1"></i>Add</button>
       </div>
     </div>
 
     <% if (schedules.length) { %>
       <table class="table table-sm table-hover mb-0">
-        <thead><tr><th>Action</th><th>Frequency</th><th>Time (UTC)</th><th>Days</th><th>Enabled</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Action</th><th>Frequency</th><th>Time</th><th>Timezone</th><th>Days</th><th>Enabled</th><th>Actions</th></tr></thead>
         <tbody>
           <% schedules.forEach(function(s) {
             var dayLabel = '-';
@@ -233,6 +249,7 @@
               <td><span class="badge bg-<%= s.action === 'resume' ? 'success' : 'warning' %>"><%= s.action === 'resume' ? 'Resume' : 'Pause' %></span></td>
               <td><%= s.schedule_type %></td>
               <td><%= s.schedule_hour != null ? String(s.schedule_hour).padStart(2, '0') + ':' + String(s.schedule_minute || 0).padStart(2, '0') : '-' %></td>
+              <td><span class="badge bg-light text-dark small">UTC</span></td>
               <td><%= dayLabel %></td>
               <td><div class="form-check form-switch"><input class="form-check-input" type="checkbox" <%= s.enabled ? 'checked' : '' %> onchange="toggleSchedule(<%= s.id %>, this.checked)"></div></td>
               <td>
@@ -319,7 +336,7 @@
         </div>
         <div class="row g-2">
           <div class="col-4" id="editHourCol">
-            <label class="form-label small">Hour (UTC)</label>
+            <label class="form-label small">Hour</label>
             <input type="number" class="form-control form-control-sm" id="editSchedHour" min="0" max="23" value="18">
           </div>
           <div class="col-4" id="editMinCol">
@@ -336,6 +353,24 @@
               <option value="Friday">Friday</option>
               <option value="Saturday">Saturday</option>
               <option value="Sunday">Sunday</option>
+            </select>
+          </div>
+        </div>
+        <div class="row g-2 mt-2">
+          <div class="col-12">
+            <label class="form-label small">Timezone (Info Only)</label>
+            <select class="form-select form-select-sm" id="editSchedTimezone">
+              <option value="UTC">UTC</option>
+              <option value="Europe/London">Europe/London (GMT)</option>
+              <option value="Europe/Paris">Europe/Paris (CET)</option>
+              <option value="Europe/Berlin">Europe/Berlin (CET)</option>
+              <option value="Europe/Amsterdam">Europe/Amsterdam (CET)</option>
+              <option value="Asia/Dubai">Asia/Dubai (GST)</option>
+              <option value="Asia/Singapore">Asia/Singapore (SGT)</option>
+              <option value="Asia/Tokyo">Asia/Tokyo (JST)</option>
+              <option value="Australia/Sydney">Australia/Sydney (AEST)</option>
+              <option value="America/New_York">America/New_York (ET)</option>
+              <option value="America/Los_Angeles">America/Los_Angeles (PT)</option>
             </select>
           </div>
         </div>
