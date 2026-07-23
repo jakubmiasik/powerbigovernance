@@ -81,43 +81,139 @@
 
   <div class="card">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-      <span><i class="bi bi-table me-2"></i>Workspace Inventory (<%= stats.total %>)</span>
-      <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter workspaces..." oninput="filterTable(this, 'workspace-list-table')">
+      <span><i class="bi bi-bar-chart me-2"></i>Workspace Inventory (<%= stats.total %>)</span>
+      <div class="d-flex gap-2 align-items-center">
+        <select class="form-select form-select-sm" id="chartMetric" style="max-width: 180px;" onchange="updateChart()">
+          <option value="storage">Storage Size</option>
+          <option value="reports">Reports Count</option>
+          <option value="datasets">Datasets Count</option>
+          <option value="items">Total Items</option>
+        </select>
+        <input type="text" class="form-control form-control-sm" style="max-width: 240px;" placeholder="Filter workspaces..." id="chartFilter" oninput="updateChart()">
+      </div>
     </div>
-    <div class="table-responsive">
-      <table class="table table-hover table-striped mb-0" id="workspace-list-table">
-        <thead class="table-dark">
-          <tr>
-            <th>Name</th>
-            <th>License Type</th>
-            <th>SKU</th>
-            <th>State</th>
-            <th>Size</th>
-            <th>Items</th>
-            <th>Reports</th>
-            <th>Models</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          <% workspaces.forEach(function(ws) { var wsName = ws.displayName || ws.name || 'Unnamed'; var license = ws.licenseType || 'Pro'; var sku = ws.capacitySku || '-'; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
-            <tr data-filter="<%= [wsName, license, sku, ws.state || ''].join(' ').toLowerCase() %>">
-              <td class="small"><i class="bi bi-folder2 me-2 text-primary"></i><%= wsName %></td>
-              <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
-              <td><code><%= sku %></code></td>
-              <td>
-                <span class="badge bg-<%= ws.state === 'Active' ? 'success' : ws.state === 'Deleted' ? 'danger' : 'warning' %>"><%= ws.state || 'Unknown' %></span>
-              </td>
-              <td class="small text-nowrap" data-sort-value="<%= ws.storageSize || 0 %>"><%= ws.storageSize ? formatBytesListPage(ws.storageSize) : '-' %></td>
-              <td data-sort-value="<%= ws.totalItems || 0 %>"><%= ws.totalItems || 0 %></td>
-              <td data-sort-value="<%= ws.reportCount || 0 %>"><%= ws.reportCount || 0 %></td>
-              <td data-sort-value="<%= ws.datasetCount || 0 %>"><%= ws.datasetCount || 0 %></td>
-              <td><a href="/workspaces/<%= ws.id %>" class="btn btn-sm btn-outline-primary"><i class="bi bi-eye me-1"></i>Details</a></td>
-            </tr>
-          <% }) %>
-        </tbody>
-      </table>
+    <div class="card-body" style="position: relative; height: 400px;">
+      <canvas id="workspaceChart"></canvas>
     </div>
   </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+  <script>
+    var workspacesData = <%- JSON.stringify(workspaces) %>;
+    var chartInstance = null;
+
+    function getFilteredData() {
+      var filterText = (document.getElementById('chartFilter').value || '').toLowerCase();
+      var metric = document.getElementById('chartMetric').value;
+      
+      return workspacesData.filter(function(ws) {
+        var wsName = (ws.displayName || ws.name || 'Unnamed').toLowerCase();
+        var license = (ws.licenseType || 'Pro').toLowerCase();
+        var sku = (ws.capacitySku || '-').toLowerCase();
+        var searchText = [wsName, license, sku].join(' ');
+        return searchText.includes(filterText);
+      }).sort(function(a, b) {
+        var aVal = getMetricValue(a, metric);
+        var bVal = getMetricValue(b, metric);
+        return bVal - aVal;
+      });
+    }
+
+    function getMetricValue(ws, metric) {
+      if (metric === 'storage') return ws.storageSize || 0;
+      if (metric === 'reports') return ws.reportCount || 0;
+      if (metric === 'datasets') return ws.datasetCount || 0;
+      if (metric === 'items') return ws.totalItems || 0;
+      return 0;
+    }
+
+    function formatMetricValue(value, metric) {
+      if (metric === 'storage') {
+        if (!value || value === 0) return '0 B';
+        var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        var i = Math.floor(Math.log(value) / Math.log(1024));
+        return (value / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+      }
+      return value.toString();
+    }
+
+    function getMetricLabel(metric) {
+      if (metric === 'storage') return 'Storage (GB)';
+      if (metric === 'reports') return 'Reports';
+      if (metric === 'datasets') return 'Datasets';
+      if (metric === 'items') return 'Items';
+      return metric;
+    }
+
+    function updateChart() {
+      var filteredData = getFilteredData();
+      var metric = document.getElementById('chartMetric').value;
+      
+      var labels = filteredData.slice(0, 15).map(function(ws) {
+        return (ws.displayName || ws.name || 'Unnamed').substring(0, 20);
+      });
+      
+      var values = filteredData.slice(0, 15).map(function(ws) {
+        var val = getMetricValue(ws, metric);
+        if (metric === 'storage') return val / (1024 * 1024 * 1024); // Convert to GB
+        return val;
+      });
+
+      var colors = filteredData.slice(0, 15).map(function(ws) {
+        if (ws.licenseType === 'Fabric') return '#0B7285'; // Teal
+        if (ws.licenseType === 'Premium') return '#F59E0B'; // Amber
+        if (ws.licenseType === 'Premium Per User') return '#06B6D4'; // Cyan
+        return '#6B7280'; // Gray
+      });
+
+      var ctx = document.getElementById('workspaceChart').getContext('2d');
+      
+      if (chartInstance) {
+        chartInstance.destroy();
+      }
+
+      chartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: getMetricLabel(metric),
+            data: values,
+            backgroundColor: colors,
+            borderColor: colors,
+            borderWidth: 1,
+            borderRadius: 4,
+          }]
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: function(context) {
+                  var metric = document.getElementById('chartMetric').value;
+                  if (metric === 'storage') {
+                    var val = context.raw * 1024 * 1024 * 1024;
+                    return formatMetricValue(val, 'storage');
+                  }
+                  return context.raw.toString();
+                }
+              }
+            }
+          },
+          scales: {
+            x: { beginAtZero: true }
+          }
+        }
+      });
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+      updateChart();
+    });
+  </script>
 <% } %>
 <%- include('../partials/footer') %>
