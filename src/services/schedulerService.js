@@ -92,14 +92,16 @@ function startScheduler() {
   cron.schedule('* * * * *', async () => {
     try {
       const schedules = await db.getCapacitySchedules();
-      const now = new Date();
-      const currentMin = now.getUTCMinutes();
-      const currentHour = now.getUTCHours();
-      const currentDay = now.getUTCDay(); // 0=Sun
-      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
       for (const schedule of schedules) {
         if (!schedule.enabled) continue;
+
+        const tz = schedule.timezone || 'UTC';
+        const now = getTimeInTimezone(tz);
+        const currentMin = now.minute;
+        const currentHour = now.hour;
+        const currentDay = now.dayOfWeek; // 0=Sun
+        const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
         const type = schedule.schedule_type;
         const schedMin = schedule.schedule_minute || 0;
@@ -125,6 +127,31 @@ function startScheduler() {
       console.error('[Scheduler] Error checking schedules:', err.message);
     }
   });
+}
+
+// Get current time components in a given IANA timezone
+function getTimeInTimezone(tz) {
+  try {
+    const now = new Date();
+    const parts = {};
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour: 'numeric', minute: 'numeric', hour12: false, weekday: 'short',
+    });
+    for (const p of fmt.formatToParts(now)) {
+      parts[p.type] = p.value;
+    }
+    const dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    return {
+      hour: parseInt(parts.hour, 10) % 24,
+      minute: parseInt(parts.minute, 10),
+      dayOfWeek: dayMap[parts.weekday] ?? new Date().getUTCDay(),
+    };
+  } catch {
+    // Fallback to UTC if timezone is invalid
+    const now = new Date();
+    return { hour: now.getUTCHours(), minute: now.getUTCMinutes(), dayOfWeek: now.getUTCDay() };
+  }
 }
 
 module.exports = { startScheduler };

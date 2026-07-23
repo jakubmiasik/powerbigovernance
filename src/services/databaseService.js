@@ -225,8 +225,8 @@ async function getCapacitySchedules() {
 async function saveCapacitySchedule(schedule) {
   const conn = await getConnection();
   try {
-    await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled)
-      VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled)`, [
+    await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone)
+      VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz)`, [
       { name: 'name', type: TYPES.NVarChar, value: schedule.capacityName },
       { name: 'sub', type: TYPES.NVarChar, value: schedule.subscriptionId },
       { name: 'rg', type: TYPES.NVarChar, value: schedule.resourceGroup },
@@ -236,6 +236,7 @@ async function saveCapacitySchedule(schedule) {
       { name: 'minute', type: TYPES.Int, value: schedule.minute != null ? schedule.minute : null },
       { name: 'day', type: TYPES.NVarChar, value: schedule.day || null },
       { name: 'enabled', type: TYPES.Bit, value: schedule.enabled !== false },
+      { name: 'tz', type: TYPES.NVarChar, value: schedule.timezone || 'UTC' },
     ]);
   } finally {
     conn.close();
@@ -275,6 +276,7 @@ async function updateCapacitySchedule(id, fields) {
     if (fields.hour !== undefined) { sets.push('schedule_hour=@hour'); params.push({ name: 'hour', type: TYPES.Int, value: fields.hour }); }
     if (fields.minute !== undefined) { sets.push('schedule_minute=@minute'); params.push({ name: 'minute', type: TYPES.Int, value: fields.minute }); }
     if (fields.day !== undefined) { sets.push('schedule_day=@day'); params.push({ name: 'day', type: TYPES.NVarChar, value: fields.day }); }
+    if (fields.timezone !== undefined) { sets.push('timezone=@tz'); params.push({ name: 'tz', type: TYPES.NVarChar, value: fields.timezone }); }
     if (sets.length === 0) return;
     await execSql(conn, 'UPDATE capacity_schedules SET ' + sets.join(', ') + ' WHERE id=@id', params);
   } finally {
@@ -331,6 +333,8 @@ async function runMigrations() {
   try {
     // Add enterprise_app_object_id column if missing
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'enterprise_app_object_id') ALTER TABLE service_principals ADD enterprise_app_object_id NVARCHAR(255) NULL`);
+    // Add timezone column to capacity_schedules if missing
+    await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'timezone') ALTER TABLE capacity_schedules ADD timezone NVARCHAR(100) NULL`);
     console.log('[DB] Migrations complete.');
   } catch (err) {
     console.warn('[DB] Migration warning:', err.message);
