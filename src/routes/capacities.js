@@ -165,6 +165,7 @@ router.post('/:name/resume', async (req, res) => {
         return res.json({ success: false, message: `Capacity is in transitional state (${provisioning}). Please wait and try again.` });
       }
     } catch (stateErr) {
+      // Continue anyway if state check fails
       console.warn('[Capacities] State check failed:', stateErr.message);
     }
 
