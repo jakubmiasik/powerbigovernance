@@ -1,0 +1,249 @@
+<%- include('../partials/header') %>
+<%
+  var governanceSummary = governance || {};
+  var runId = run && run.id ? run.id : '';
+  var activeWs = (governanceSummary.workspacesByState || {})['Active'] || 0;
+  var inactiveWs = (governanceSummary.totalWorkspaces || 0) - activeWs;
+  // Format bytes helper
+  function formatBytesEjs(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+  }
+
+  var cards = [
+    { label: 'Workspaces', count: governanceSummary.totalWorkspaces || 0, color: 'primary', icon: 'collection', href: '#workspace-governance-card', sub: activeWs + ' Active' + (inactiveWs > 0 ? ' / ' + inactiveWs + ' Inactive' : '') },
+    { label: 'Capacities', count: (governanceSummary.capacities || []).length, color: 'warning', icon: 'lightning', href: '/capacities', sub: (governanceSummary.capacities || []).filter(function(c){return c.state==='Active';}).length + ' Active / ' + (governanceSummary.capacities || []).filter(function(c){return c.state!=='Active';}).length + ' Suspended' },
+    { label: 'OneLake Storage', count: formatBytesEjs(governanceSummary.totalStorageSize || 0), color: 'teal', icon: 'hdd', href: '#tenant-storage-card', sub: (governanceSummary.storageScannedCount || 0) + ' workspaces with data' },
+    { label: 'Total Items', count: governanceSummary.totalItems || 0, color: 'dark', icon: 'boxes', href: '/governance/artifacts?type=all' + (runId ? '&runId=' + runId : '') },
+    { label: 'Reports', count: governanceSummary.totalReports || 0, color: 'primary', icon: 'file-earmark-bar-graph', href: '/governance/artifacts?type=Report' + (runId ? '&runId=' + runId : '') },
+    { label: 'Semantic Models', count: governanceSummary.totalDatasets || 0, color: 'success', icon: 'database', href: '/governance/artifacts?type=SemanticModel' + (runId ? '&runId=' + runId : '') },
+    { label: 'Dashboards', count: governanceSummary.totalDashboards || 0, color: 'info', icon: 'grid-1x2', href: '/governance/artifacts?type=Dashboard' + (runId ? '&runId=' + runId : '') },
+    { label: 'Dataflows', count: governanceSummary.totalDataflows || 0, color: 'warning', icon: 'diagram-3', href: '/governance/artifacts?type=Dataflow' + (runId ? '&runId=' + runId : '') },
+    { label: 'Lakehouses', count: governanceSummary.totalLakehouses || 0, color: 'secondary', icon: 'boxes', href: '/governance/artifacts?type=Lakehouse' + (runId ? '&runId=' + runId : '') },
+    { label: 'Notebooks', count: governanceSummary.totalNotebooks || 0, color: 'secondary', icon: 'journal-code', href: '/governance/artifacts?type=Notebook' + (runId ? '&runId=' + runId : '') },
+    { label: 'Pipelines', count: governanceSummary.totalPipelines || 0, color: 'secondary', icon: 'arrow-left-right', href: '/governance/artifacts?type=DataPipeline' + (runId ? '&runId=' + runId : '') },
+    { label: 'Warehouses', count: governanceSummary.totalWarehouses || 0, color: 'secondary', icon: 'building', href: '/governance/artifacts?type=Warehouse' + (runId ? '&runId=' + runId : '') },
+    { label: 'Unique Users', count: governanceSummary.totalUsers || 0, color: 'secondary', icon: 'people', href: '/governance/users' + (runId ? '?runId=' + runId : ''), sub: '(' + (typeof creatorCount !== 'undefined' ? creatorCount : 0) + ' Creators / ' + (typeof explorerCount !== 'undefined' ? explorerCount : 0) + ' Explorers)' }
+  ];
+%>
+<div class="mb-3">
+  <h2><i class="bi bi-shield-check me-2"></i>Governance Overview</h2>
+  <p class="text-muted mb-0">Tenant-wide Power BI governance metrics.</p>
+</div>
+
+<% if (noData) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    No analysis data available. <a href="/analysis">Run an analysis</a> first to see governance metrics.
+  </div>
+<% } else { %>
+  <div class="row g-3 mb-4">
+    <% cards.forEach(function(card) { %>
+      <div class="col-sm-6 col-md-4 col-xl-2">
+        <a href="<%= card.href %>" class="text-decoration-none text-reset">
+          <div class="card text-center h-100 stat-card">
+            <div class="card-body py-3">
+              <div class="text-<%= card.color %> mb-2"><i class="bi bi-<%= card.icon %>"></i></div>
+              <div class="fs-3 fw-bold text-<%= card.color %>"><%= card.count %></div>
+              <div class="small"><%= card.label %></div>
+              <% if (card.sub) { %><div class="text-muted" style="font-size: 0.7rem;"><%= card.sub %></div><% } %>
+            </div>
+          </div>
+        </a>
+      </div>
+    <% }) %>
+  </div>
+
+  <div class="row g-4 mb-4">
+    <div class="col-lg-4">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span><i class="bi bi-pie-chart me-2"></i>Workspace States</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter states..." oninput="filterTable(this, 'governance-states-table')">
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm mb-0" id="governance-states-table">
+            <thead><tr><th>State</th><th>Count</th><th>%</th></tr></thead>
+            <tbody>
+              <% Object.entries(governanceSummary.workspacesByState || {}).forEach(function(entry) { var state = entry[0]; var count = entry[1]; %>
+                <tr data-filter="<%= [state, count].join(' ').toLowerCase() %>">
+                  <td><span class="badge bg-<%= state === 'Active' ? 'success' : state === 'Deleted' ? 'danger' : 'warning' %>"><%= state %></span></td>
+                  <td><%= count %></td>
+                  <td><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-4">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span><i class="bi bi-diagram-2 me-2"></i>License Types</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter..." oninput="filterTable(this, 'governance-types-table')">
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm mb-0" id="governance-types-table">
+            <thead><tr><th>License</th><th>SKU</th><th>Count</th><th>%</th></tr></thead>
+            <tbody>
+              <% Object.entries(governanceSummary.workspacesBySku || {}).sort(function(a,b){ return b[1]-a[1]; }).forEach(function(entry) { var sku = entry[0]; var count = entry[1]; var s = sku.toUpperCase(); var licType = s.startsWith('F') && s !== 'FREE' && s !== 'SHARED (PRO)' ? 'Fabric' : s === 'PPU' ? 'PPU' : s.startsWith('P') || s.startsWith('EM') || s.startsWith('A') ? 'Premium' : 'Pro'; var licColor = licType === 'Fabric' ? 'success' : licType === 'Premium' ? 'warning' : licType === 'PPU' ? 'info' : 'secondary'; %>
+                <tr data-filter="<%= [sku, licType, count].join(' ').toLowerCase() %>">
+                  <td><span class="badge bg-<%= licColor %>"><%= licType %></span></td>
+                  <td><code><%= sku %></code></td>
+                  <td><%= count %></td>
+                  <td><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td>
+                </tr>
+              <% }) %>
+              <% if (!governanceSummary.workspacesBySku || Object.keys(governanceSummary.workspacesBySku).length === 0) { Object.entries(governanceSummary.workspacesByLicense || governanceSummary.workspacesByType || {}).forEach(function(entry) { var license = entry[0]; var count = entry[1]; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
+                <tr data-filter="<%= [license, count].join(' ').toLowerCase() %>">
+                  <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
+                  <td>-</td>
+                  <td><%= count %></td>
+                  <td><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td>
+                </tr>
+              <% }) } %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-4">
+      <div class="card h-100">
+        <div class="card-header"><i class="bi bi-lightning me-2"></i>Capacities</div>
+        <div class="card-body text-center py-4">
+          <%
+            var allCaps = governanceSummary.capacities || [];
+            var activeCaps = allCaps.filter(function(c) { return c.state === 'Active'; });
+            var suspendedCaps = allCaps.filter(function(c) { return c.state !== 'Active'; });
+          %>
+          <div class="mb-2">
+            <span class="fs-2 fw-bold" style="color: var(--color-primary);"><%= allCaps.length %></span>
+            <span class="small text-muted d-block">Total Capacities</span>
+          </div>
+          <div class="d-flex justify-content-center gap-3 mb-3">
+            <div><span class="badge bg-success fs-6"><%= activeCaps.length %></span><br><small class="text-muted">Active</small></div>
+            <div><span class="badge bg-warning fs-6"><%= suspendedCaps.length %></span><br><small class="text-muted">Suspended</small></div>
+          </div>
+          <a href="/capacities" class="btn btn-sm btn-outline-primary"><i class="bi bi-arrow-right me-1"></i>Manage Capacities</a>
+        </div>
+        <div class="card-footer small" style="background: var(--color-surface-offset);">
+          Dedicated: <strong><%= governanceSummary.workspacesOnCapacity || 0 %></strong> workspaces | Shared: <strong><%= governanceSummary.workspacesOnSharedCapacity || 0 %></strong> workspaces
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tenant Storage Summary -->
+  <div class="card mb-4" id="tenant-storage-card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span><i class="bi bi-hdd me-1"></i>OneLake Storage Summary</span>
+    </div>
+    <div class="card-body py-3">
+      <% if (governanceSummary.totalStorageSize) { %>
+        <div class="row g-3 text-center mb-3">
+          <div class="col-sm-3">
+            <div class="fs-4 fw-bold text-primary"><%= formatBytesEjs(governanceSummary.totalStorageSize) %></div>
+            <div class="text-muted small">Total Tenant Storage</div>
+          </div>
+          <div class="col-sm-3">
+            <div class="fs-4 fw-bold text-success"><%= (governanceSummary.totalStorageFiles || 0).toLocaleString() %></div>
+            <div class="text-muted small">Total Files</div>
+          </div>
+          <div class="col-sm-3">
+            <div class="fs-4 fw-bold text-info"><%= governanceSummary.storageScannedCount || 0 %></div>
+            <div class="text-muted small">Workspaces With Data</div>
+          </div>
+          <div class="col-sm-3">
+            <div class="fs-4 fw-bold text-dark"><%= governanceSummary.totalWorkspaces || 0 %></div>
+            <div class="text-muted small">Workspaces Scanned</div>
+          </div>
+        </div>
+        <% var storageWs = workspaces.filter(function(w) { return w.storageSize > 0; }).sort(function(a, b) { return (b.storageSize || 0) - (a.storageSize || 0); }); %>
+        <% if (storageWs.length) { %>
+          <div class="table-responsive" style="max-height: 300px;">
+            <table class="table table-sm table-hover mb-0">
+              <thead><tr><th>Workspace</th><th>Files</th><th>Size</th><th>% of Total</th></tr></thead>
+              <tbody>
+                <% storageWs.forEach(function(ws) { var pct = governanceSummary.totalStorageSize > 0 ? ((ws.storageSize / governanceSummary.totalStorageSize) * 100).toFixed(1) : '0'; %>
+                  <tr>
+                    <td><a href="/workspaces/<%= ws.id %>"><%= ws.name %></a></td>
+                    <td><%= (ws.storageFiles || 0).toLocaleString() %></td>
+                    <td class="fw-bold"><%= formatBytesEjs(ws.storageSize) %></td>
+                    <td><div class="progress" style="height:18px;min-width:80px;"><div class="progress-bar bg-primary" style="width:<%= pct %>%"><%= pct %>%</div></div></td>
+                  </tr>
+                <% }) %>
+              </tbody>
+            </table>
+          </div>
+        <% } %>
+      <% } else { %>
+        <div class="text-muted text-center">
+          <i class="bi bi-hdd fs-3"></i>
+          <p class="mt-1 mb-0 small">Storage data will be calculated during the next analysis run.<br>
+          You can also use <strong>Calculate Storage</strong> on individual workspace pages.</p>
+        </div>
+      <% } %>
+    </div>
+  </div>
+
+  <div class="card mb-4" id="workspace-governance-card">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span><i class="bi bi-table me-2"></i>All Workspaces (<%= workspaces.length %>)</span>
+      <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter workspaces..." oninput="filterTable(this, 'governance-workspaces-table')">
+    </div>
+    <div class="table-responsive">
+      <table class="table table-hover table-sm mb-0" id="governance-workspaces-table">
+        <thead>
+          <tr>
+            <th>Workspace</th>
+            <th>License</th>
+            <th>State</th>
+           <th>Size</th>
+           <th>Items</th>
+           <th>Reports</th>
+           <th>Models</th>
+           <th>Dashboards</th>
+           <th>Dataflows</th>
+           <th>Lakehouses</th>
+           <th>Notebooks</th>
+           <th>Pipelines</th>
+           <th>Warehouses</th>
+           <th>Users</th>
+           <th></th>
+         </tr>
+        </thead>
+        <tbody>
+         <% workspaces.forEach(function(ws) { var license = ws.licenseType || 'Pro'; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
+           <tr data-filter="<%= [ws.name || '', license, ws.state || ''].join(' ').toLowerCase() %>">
+             <td class="small"><a href="/workspaces/<%= ws.id %>"><%= ws.name || 'Unnamed' %></a></td>
+             <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
+             <td><span class="badge bg-<%= ws.state === 'Active' ? 'success' : 'warning' %>"><%= ws.state || '-' %></span></td>
+             <td class="small"><%= ws.storageSize ? formatBytesEjs(ws.storageSize) : '-' %></td>
+             <td><%= ws.totalItems || 0 %></td>
+             <td><%= ws.reportCount || 0 %></td>
+             <td><%= ws.datasetCount || 0 %></td>
+             <td><%= ws.dashboardCount || 0 %></td>
+             <td><%= ws.dataflowCount || 0 %></td>
+             <td><%= ws.lakehouseCount || 0 %></td>
+             <td><%= ws.notebookCount || 0 %></td>
+             <td><%= ws.pipelineCount || 0 %></td>
+             <td><%= ws.warehouseCount || 0 %></td>
+             <td><%= ws.userCount || 0 %></td>
+             <td><a href="/workspaces/<%= ws.id %>" class="btn btn-sm btn-outline-primary">Details</a></td>
+           </tr>
+         <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="alert alert-info small">
+    <i class="bi bi-info-circle me-2"></i>
+    Data from analysis run #<%= run.id %> on <%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %>. <a href="/analysis">Run a new analysis</a> to refresh.
+  </div>
+<% } %>
+
+<%- include('../partials/footer') %>

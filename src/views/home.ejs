@@ -1,0 +1,117 @@
+<%- include('./partials/header') %>
+<div class="mb-4">
+  <h2><i class="bi bi-house me-2"></i>Welcome to Power BI Governance</h2>
+  <p style="color: var(--color-text-muted);">Your central hub for investigating Power BI &amp; Microsoft Fabric workspaces, reports, datasets, and all available metadata across your tenant.</p>
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-lg-8">
+    <div class="card">
+      <div class="card-header"><i class="bi bi-book me-2"></i>Getting Started</div>
+      <div class="card-body">
+        <div class="d-flex gap-3 mb-4">
+          <div class="d-flex align-items-center justify-content-center rounded-circle flex-shrink-0" style="width:40px;height:40px;background:var(--color-primary-soft);color:var(--color-primary);font-weight:700;">1</div>
+          <div>
+            <h6 class="mb-1">Configure Service Principals</h6>
+            <p class="mb-0 small" style="color:var(--color-text-muted);">Go to <a href="/settings"><i class="bi bi-gear me-1"></i>Settings</a> and add one or more Service Principals with access to your Power BI tenant. You need the <strong>Tenant ID</strong>, <strong>Client ID</strong>, and <strong>Client Secret</strong>. The Service Principal must have Power BI Admin API permissions.</p>
+          </div>
+        </div>
+        <div class="d-flex gap-3 mb-4">
+          <div class="d-flex align-items-center justify-content-center rounded-circle flex-shrink-0" style="width:40px;height:40px;background:var(--color-primary-soft);color:var(--color-primary);font-weight:700;">2</div>
+          <div>
+            <h6 class="mb-1">Run an Analysis</h6>
+            <p class="mb-0 small" style="color:var(--color-text-muted);">Navigate to <a href="/analysis"><i class="bi bi-play-circle me-1"></i>Run Analysis</a>, select the tenant you want to scan, and click <strong>Run</strong>. The app will fetch all workspaces, items (reports, datasets, notebooks, pipelines, lakehouses, etc.), capacities, and users from the Fabric Admin API. Once complete, click <strong>Save</strong> to persist the results.</p>
+          </div>
+        </div>
+        <div class="d-flex gap-3 mb-4">
+          <div class="d-flex align-items-center justify-content-center rounded-circle flex-shrink-0" style="width:40px;height:40px;background:var(--color-primary-soft);color:var(--color-primary);font-weight:700;">3</div>
+          <div>
+            <h6 class="mb-1">Explore Governance Overview</h6>
+            <p class="mb-0 small" style="color:var(--color-text-muted);">Head to <a href="/governance"><i class="bi bi-shield-check me-1"></i>Governance</a> to see tenant-wide metrics: workspace counts by license type and SKU, artifact totals (reports, datasets, dashboards, lakehouses, notebooks, pipelines, warehouses), capacity details, and user statistics split into Creators vs Explorers.</p>
+          </div>
+        </div>
+        <div class="d-flex gap-3 mb-4">
+          <div class="d-flex align-items-center justify-content-center rounded-circle flex-shrink-0" style="width:40px;height:40px;background:var(--color-primary-soft);color:var(--color-primary);font-weight:700;">4</div>
+          <div>
+            <h6 class="mb-1">Browse Workspaces</h6>
+            <p class="mb-0 small" style="color:var(--color-text-muted);">Visit <a href="/workspaces"><i class="bi bi-collection me-1"></i>Workspaces</a> to see all workspaces grouped by license type (Fabric, Premium, PPU, Pro) and capacity SKU. Click any workspace to see its full details: all items with creator info, users and their roles, and a <strong>Security</strong> tab showing who has access (individual accounts, security groups, service principals).</p>
+          </div>
+        </div>
+        <div class="d-flex gap-3">
+          <div class="d-flex align-items-center justify-content-center rounded-circle flex-shrink-0" style="width:40px;height:40px;background:var(--color-primary-soft);color:var(--color-primary);font-weight:700;">5</div>
+          <div>
+            <h6 class="mb-1">Switch Tenants &amp; Scans</h6>
+            <p class="mb-0 small" style="color:var(--color-text-muted);">Use the <strong>Tenant / Scan</strong> selector in the top bar to switch between different tenants or scan versions. Your selection persists across all pages. You can run multiple scans per tenant and compare results over time.</p>
+          </div>
+        </div>
+        <div class="d-flex gap-3 mt-4">
+          <div class="d-flex align-items-center justify-content-center rounded-circle flex-shrink-0" style="width:40px;height:40px;background:var(--color-primary-soft);color:var(--color-primary);font-weight:700;">6</div>
+          <div>
+            <h6 class="mb-1">Migrate Workspaces</h6>
+            <p class="mb-0 small" style="color:var(--color-text-muted);">Go to <a href="/migrate"><i class="bi bi-arrow-left-right me-1"></i>Migrate</a> to move workspaces between capacity types. Filter by license type, SKU, or state, then select workspaces individually or in batch. Assign them to a Fabric, Premium, or PPU capacity, or unassign to move back to shared (Pro).</p>
+            <div class="alert alert-info mt-2 mb-0 py-2 px-3" style="font-size: 0.8rem;">
+              <strong><i class="bi bi-key me-1"></i>Requirements for migration:</strong>
+              <ul class="mb-0 mt-1 ps-3">
+                <li>You must sign in as a <strong>Power BI Admin</strong> (Fabric Administrator) — click "Authorize as Power BI Admin" on the Migrate page</li>
+                <li>The signed-in user must have the <strong>Fabric Administrator</strong> or <strong>Power BI Administrator</strong> role in Entra ID</li>
+                <li>The admin account is used to call the Power BI Admin API (<code>/admin/capacities/AssignWorkspaces</code>) which requires a delegated user token</li>
+                <li>Service principals cannot be used for this operation — only user-based tokens are supported</li>
+                <li>The authorization token is stored in your session and expires after ~1 hour; re-authorize if needed</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="card mb-4">
+      <div class="card-header"><i class="bi bi-lightning me-2"></i>Quick Actions</div>
+      <div class="card-body d-grid gap-2">
+        <a href="/settings" class="btn btn-outline-primary"><i class="bi bi-gear me-2"></i>Configure Service Principals</a>
+        <a href="/analysis" class="btn btn-primary"><i class="bi bi-play-circle me-2"></i>Run Analysis</a>
+        <a href="/governance" class="btn btn-outline-primary"><i class="bi bi-shield-check me-2"></i>Governance Overview</a>
+        <a href="/workspaces" class="btn btn-outline-primary"><i class="bi bi-collection me-2"></i>Browse Workspaces</a>
+        <a href="/migrate" class="btn btn-outline-primary"><i class="bi bi-arrow-left-right me-2"></i>Migrate Workspaces</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><i class="bi bi-info-circle me-2"></i>Key Features</div>
+      <div class="card-body p-0">
+        <ul class="list-group list-group-flush">
+          <li class="list-group-item d-flex align-items-start gap-2 py-2">
+            <i class="bi bi-check-circle text-success mt-1"></i>
+            <span class="small">Multi-tenant support with multiple Service Principals</span>
+          </li>
+          <li class="list-group-item d-flex align-items-start gap-2 py-2">
+            <i class="bi bi-check-circle text-success mt-1"></i>
+            <span class="small">Fabric Admin API integration for complete artifact discovery</span>
+          </li>
+          <li class="list-group-item d-flex align-items-start gap-2 py-2">
+            <i class="bi bi-check-circle text-success mt-1"></i>
+            <span class="small">License type classification by capacity SKU (Fabric, Premium, PPU, Pro)</span>
+          </li>
+          <li class="list-group-item d-flex align-items-start gap-2 py-2">
+            <i class="bi bi-check-circle text-success mt-1"></i>
+            <span class="small">User 360 view with Creator vs Explorer classification</span>
+          </li>
+          <li class="list-group-item d-flex align-items-start gap-2 py-2">
+            <i class="bi bi-check-circle text-success mt-1"></i>
+            <span class="small">Workspace security audit (users, groups, service principals)</span>
+          </li>
+          <li class="list-group-item d-flex align-items-start gap-2 py-2">
+            <i class="bi bi-check-circle text-success mt-1"></i>
+            <span class="small">Scan history with Save &amp; Load for comparison over time</span>
+          </li>
+          <li class="list-group-item d-flex align-items-start gap-2 py-2">
+            <i class="bi bi-check-circle text-success mt-1"></i>
+            <span class="small">Workspace migration between capacities (Fabric, Premium, PPU, Pro)</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+<%- include('./partials/footer') %>

@@ -1,0 +1,115 @@
+<%- include('../partials/header') %>
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/workspaces">Workspaces</a></li>
+    <li class="breadcrumb-item"><a href="/workspaces/<%= workspaceId %>">Workspace</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Dataset Details</li>
+  </ol>
+</nav>
+
+<h3><i class="bi bi-database me-2"></i>Dataset Details</h3>
+<p class="text-muted small">Dataset ID: <code><%= datasetId %></code></p>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-plug me-2"></i>Data Sources (<%= datasources.length %>)</span>
+    <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter data sources..." oninput="filterTable(this, 'datasources-table')">
+  </div>
+  <% if (!datasources.length) { %>
+    <div class="card-body"><p class="text-muted mb-0">No data sources found.</p></div>
+  <% } else { %>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0" id="datasources-table">
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Server</th>
+            <th>Database</th>
+            <th>Connection</th>
+            <th>Gateway</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% datasources.forEach(function(ds) { var details = ds.connectionDetails || {}; %>
+            <tr data-filter="<%= [ds.datasourceType || '', details.server || '', details.database || details.path || details.url || '', ds.gatewayId || ''].join(' ').toLowerCase() %>">
+              <td><span class="badge bg-info"><%= ds.datasourceType || '-' %></span></td>
+              <td><code><%= details.server || '-' %></code></td>
+              <td><%= details.database || details.path || details.url || '-' %></td>
+              <td class="small"><%= ds.connectionString ? 'Yes' : '-' %></td>
+              <td class="small"><%= ds.gatewayId && ds.gatewayId !== '00000000-0000-0000-0000-000000000000' ? 'Yes' : '-' %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  <% } %>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-sliders me-2"></i>Parameters (<%= parameters.length %>)</span>
+    <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter parameters..." oninput="filterTable(this, 'parameters-table')">
+  </div>
+  <% if (!parameters.length) { %>
+    <div class="card-body"><p class="text-muted mb-0">No parameters found.</p></div>
+  <% } else { %>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0" id="parameters-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Current Value</th>
+            <th>Required</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% parameters.forEach(function(parameter) { %>
+            <tr data-filter="<%= [parameter.name || '', parameter.type || '', parameter.currentValue || '', parameter.isRequired ? 'required' : 'optional'].join(' ').toLowerCase() %>">
+              <td><strong><%= parameter.name || '-' %></strong></td>
+              <td><%= parameter.type || '-' %></td>
+              <td><code><%= parameter.currentValue || '-' %></code></td>
+              <td><%= parameter.isRequired ? 'Yes' : 'No' %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  <% } %>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-arrow-repeat me-2"></i>Refresh History (last <%= refreshHistory.length %>)</span>
+    <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter refresh history..." oninput="filterTable(this, 'refresh-history-table')">
+  </div>
+  <% if (!refreshHistory.length) { %>
+    <div class="card-body"><p class="text-muted mb-0">No refresh history available.</p></div>
+  <% } else { %>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0" id="refresh-history-table">
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Start Time</th>
+            <th>End Time</th>
+            <th>Type</th>
+            <th>Error</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% refreshHistory.forEach(function(refresh) { %>
+            <tr class="<%= refresh.status === 'Failed' ? 'table-danger' : refresh.status === 'Completed' ? 'table-success' : '' %>" data-filter="<%= [refresh.status || '', refresh.refreshType || '', refresh.serviceExceptionJson || ''].join(' ').toLowerCase() %>">
+              <td><span class="badge bg-<%= refresh.status === 'Failed' ? 'danger' : refresh.status === 'Completed' ? 'success' : refresh.status === 'Unknown' ? 'secondary' : 'warning' %>"><%= refresh.status || '-' %></span></td>
+              <td class="small"><%= refresh.startTime ? new Date(refresh.startTime).toLocaleString() : '-' %></td>
+              <td class="small"><%= refresh.endTime ? new Date(refresh.endTime).toLocaleString() : '-' %></td>
+              <td><%= refresh.refreshType || '-' %></td>
+              <td class="small text-danger"><%= refresh.serviceExceptionJson ? 'View details' : '-' %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  <% } %>
+</div>
+<%- include('../partials/footer') %>

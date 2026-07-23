@@ -1,0 +1,174 @@
+<%- include('../partials/header') %>
+<%
+  var creators = [];
+  var explorers = [];
+  users.forEach(function(user) {
+    var userItems = user.createdItems || user.items || [];
+    if (userItems.length > 0) {
+      creators.push(user);
+    } else {
+      explorers.push(user);
+    }
+  });
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-people me-2"></i>User 360</h2>
+    <p class="text-muted mb-0">Unique users across analysis run #<%= run.id %>.</p>
+  </div>
+  <a href="/governance" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-sm-4">
+    <div class="card text-center h-100">
+      <div class="card-body py-3">
+        <div class="fs-3 fw-bold text-primary"><%= totalUsers %></div>
+        <div class="text-muted small">Total Users</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-4">
+    <div class="card text-center h-100 stat-card">
+      <div class="card-body py-3">
+        <i class="bi bi-pencil-square text-success"></i>
+        <div class="fs-3 fw-bold text-success"><%= creators.length %></div>
+        <div class="text-muted small">Creators</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-4">
+    <div class="card text-center h-100 stat-card">
+      <div class="card-body py-3">
+        <i class="bi bi-eye text-info"></i>
+        <div class="fs-3 fw-bold text-info"><%= explorers.length %></div>
+        <div class="text-muted small">Explorers</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<ul class="nav nav-tabs mb-3" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-creators" type="button">
+      <i class="bi bi-pencil-square me-1"></i>Creators (<%= creators.length %>)
+    </button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-explorers" type="button">
+      <i class="bi bi-eye me-1"></i>Explorers (<%= explorers.length %>)
+    </button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-all-users" type="button">
+      All Users (<%= totalUsers %>)
+    </button>
+  </li>
+</ul>
+
+<div class="tab-content">
+  <% [
+    { id: 'creators', label: 'Creators', list: creators, showItems: true },
+    { id: 'explorers', label: 'Explorers', list: explorers, showItems: false },
+    { id: 'all-users', label: 'All Users', list: users, showItems: true }
+  ].forEach(function(tab, tabIdx) { %>
+    <div class="tab-pane fade <%= tabIdx === 0 ? 'show active' : '' %>" id="tab-<%= tab.id %>" role="tabpanel">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span><%= tab.label %> (<%= tab.list.length %>)</span>
+          <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter..." oninput="filterUserTab(this, '<%= tab.id %>')">
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover table-sm mb-0" id="<%= tab.id %>-table">
+            <thead>
+              <tr>
+                <th></th>
+                <th>Name</th>
+                <th>UPN / Email</th>
+                <th>Role</th>
+                <th>Created Items</th>
+                <th>Workspaces</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% if (!tab.list.length) { %>
+                <tr data-filter="no users"><td colspan="6" class="text-center text-muted py-3">No users found.</td></tr>
+              <% } %>
+              <% tab.list.forEach(function(user, index) { var userItems = user.createdItems || user.items || []; var userWs = user.workspaceAccess || user.workspaces || []; var uid = tab.id + '-' + index; var isCreator = userItems.length > 0; %>
+                <tr class="user-summary-row" data-user-index="<%= uid %>" data-filter="<%= [user.name || '', user.upn || '', isCreator ? 'creator' : 'explorer'].join(' ').toLowerCase() %>">
+                  <td>
+                    <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#ud-<%= uid %>" aria-expanded="false">
+                      <i class="bi bi-chevron-down"></i>
+                    </button>
+                  </td>
+                  <td>
+                    <i class="bi bi-<%= isCreator ? 'pencil-square text-success' : 'eye text-info' %> me-1"></i>
+                    <strong><%= user.name || 'Unknown' %></strong>
+                  </td>
+                  <td><%= user.upn || '-' %></td>
+                  <td><span class="badge bg-<%= isCreator ? 'success' : 'info' %>"><%= isCreator ? 'Creator' : 'Explorer' %></span></td>
+                  <td data-sort-value="<%= userItems.length %>"><span class="badge bg-primary"><%= userItems.length %></span></td>
+                  <td data-sort-value="<%= userWs.length %>"><span class="badge bg-secondary"><%= userWs.length %></span></td>
+                </tr>
+                <tr class="user-detail-row collapse bg-body-tertiary" id="ud-<%= uid %>" data-parent-index="<%= uid %>">
+                  <td colspan="6">
+                    <div class="row g-4 p-2">
+                      <div class="col-lg-7">
+                        <h6 class="mb-2"><i class="bi bi-boxes me-1"></i>Created Items (<%= userItems.length %>)</h6>
+                        <% if (userItems.length) { %>
+                          <div class="list-group list-group-flush border rounded" style="max-height: 300px; overflow-y: auto;">
+                            <% userItems.forEach(function(item) { %>
+                              <div class="list-group-item py-1">
+                                <div class="d-flex justify-content-between flex-wrap gap-1">
+                                  <div>
+                                    <strong class="small"><%= item.name || 'Unnamed' %></strong>
+                                    <span class="text-muted small ms-1"><%= item.workspace || '' %></span>
+                                  </div>
+                                  <span class="badge bg-secondary"><%= item.type || '-' %></span>
+                                </div>
+                              </div>
+                            <% }) %>
+                          </div>
+                        <% } else { %>
+                          <p class="text-muted small mb-0">No created items.</p>
+                        <% } %>
+                      </div>
+                      <div class="col-lg-5">
+                        <h6 class="mb-2"><i class="bi bi-shield-lock me-1"></i>Workspace Access (<%= userWs.length %>)</h6>
+                        <% if (userWs.length) { %>
+                          <div class="list-group list-group-flush border rounded" style="max-height: 300px; overflow-y: auto;">
+                            <% userWs.forEach(function(wa) { %>
+                              <div class="list-group-item d-flex justify-content-between align-items-center py-1 gap-2">
+                                <span class="small"><%= wa.workspace || wa.name || '-' %></span>
+                                <span class="badge bg-<%= wa.role === 'Admin' ? 'danger' : wa.role === 'Member' ? 'primary' : wa.role === 'Contributor' ? 'success' : 'secondary' %>"><%= wa.role || '?' %></span>
+                              </div>
+                            <% }) %>
+                          </div>
+                        <% } else { %>
+                          <p class="text-muted small mb-0">No workspace access info.</p>
+                        <% } %>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  <% }) %>
+</div>
+
+<script>
+function filterUserTab(input, tabId) {
+  var filter = (input.value || '').toLowerCase();
+  document.querySelectorAll('#' + tabId + '-table tbody .user-summary-row').forEach(function(row) {
+    var visible = (row.getAttribute('data-filter') || row.textContent || '').toLowerCase().includes(filter);
+    row.style.display = visible ? '' : 'none';
+    var detail = document.getElementById('ud-' + row.getAttribute('data-user-index'));
+    if (detail) detail.style.display = visible ? '' : 'none';
+  });
+}
+</script>
+<%- include('../partials/footer') %>

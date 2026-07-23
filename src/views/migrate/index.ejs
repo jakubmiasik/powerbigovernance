@@ -1,0 +1,533 @@
+<%- include('../partials/header') %>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-arrow-left-right me-2"></i>Migrate Workspaces</h2>
+    <p class="text-muted mb-0">Assign or unassign workspaces to/from capacities. Select workspaces individually or in batch.</p>
+  </div>
+</div>
+
+<% if (noData) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    No analysis data available. Select a scan from the top bar or <a href="/analysis">run an analysis</a> first.
+  </div>
+<% } else { %>
+
+<!-- Authorization -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-shield-lock me-2"></i>Power BI Admin Authorization</div>
+  <div class="card-body">
+    <% if (hasMigrationToken) { %>
+      <div class="d-flex align-items-center gap-3">
+        <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Authorized</span>
+        <span class="small text-muted">You are authorized as Power BI Admin for migration operations.</span>
+        <a href="/migrate/auth" class="btn btn-sm btn-outline-primary"><i class="bi bi-arrow-clockwise me-1"></i>Re-authorize</a>
+      </div>
+    <% } else { %>
+      <div class="d-flex align-items-center gap-3 flex-wrap">
+        <a href="/migrate/auth" class="btn btn-primary">
+          <i class="bi bi-box-arrow-in-right me-1"></i>Authorize as Power BI Admin
+        </a>
+        <span class="small text-muted">You must sign in as a Power BI Admin to perform workspace migrations. This uses a delegated user token with the <code>Tenant.ReadWrite.All</code> scope.</span>
+      </div>
+    <% } %>
+  </div>
+</div>
+
+<!-- Migration Controls -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-sliders me-2"></i>Migration Settings</div>
+  <div class="card-body">
+    <div class="row g-3 align-items-end">
+      <div class="col-md-3">
+        <label class="form-label fw-bold small">Action</label>
+        <select class="form-select" id="migrationAction" onchange="toggleCapacitySelect()">
+          <option value="assign">Assign to Capacity</option>
+          <option value="unassign">Unassign from Capacity (move to Shared/Pro)</option>
+        </select>
+      </div>
+      <div class="col-md-4" id="capacitySelectGroup">
+        <label class="form-label fw-bold small">Target Capacity</label>
+        <select class="form-select" id="targetCapacity" onchange="checkCapacityState()">
+          <option value="">-- Select capacity --</option>
+          <% capacities.filter(function(c){ return c.state === 'Active'; }).forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared'; %>
+            <option value="<%= cap.id %>" data-state="Active" data-sku="<%= cap.sku %>"><%= cap.displayName || 'Unnamed' %> (<%= cap.sku %>) - <%= licType %> - <%= cap.region || '' %></option>
+          <% }) %>
+          <% capacities.filter(function(c){ return c.state !== 'Active'; }).forEach(function(cap) { var sku = (cap.sku || '').toUpperCase(); var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared'; %>
+            <option value="<%= cap.id %>" data-state="<%= cap.state %>" data-sku="<%= cap.sku %>" style="color:#999;" disabled>[<%= cap.state %>] <%= cap.displayName || 'Unnamed' %> (<%= cap.sku %>) - <%= licType %></option>
+          <% }) %>
+        </select>
+        <div id="capacityWarning" class="small text-danger mt-1" style="display:none;"></div>
+      </div>
+      <div class="col-md-3">
+        <button class="btn btn-primary w-100" onclick="executeMigration()" id="migrateBtn" disabled>
+          <i class="bi bi-arrow-left-right me-1"></i>Migrate Selected (<span id="selectedCount">0</span>)
+        </button>
+      </div>
+      <div class="col-md-2">
+        <button class="btn btn-outline-secondary w-100" onclick="clearSelection()">
+          <i class="bi bi-x-circle me-1"></i>Clear
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Filters -->
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-funnel me-2"></i>Filters</span>
+    <button class="btn btn-sm btn-outline-secondary" onclick="resetFilters()"><i class="bi bi-arrow-counterclockwise me-1"></i>Reset</button>
+  </div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-3">
+        <label class="form-label small">Search</label>
+        <input type="text" class="form-control form-control-sm" id="filterSearch" placeholder="Workspace name..." oninput="applyFilters()">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small">License Type</label>
+        <select class="form-select form-select-sm" id="filterLicense" onchange="applyFilters()">
+          <option value="">All</option>
+          <option value="Fabric">Fabric</option>
+          <option value="Premium">Premium</option>
+          <option value="Premium Per User">Premium Per User</option>
+          <option value="Pro">Pro</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small">SKU</label>
+        <select class="form-select form-select-sm" id="filterSku" onchange="applyFilters()">
+          <option value="">All</option>
+          <% var skus = []; workspaces.forEach(function(ws) { if (ws.capacitySku && skus.indexOf(ws.capacitySku) === -1) skus.push(ws.capacitySku); }); skus.sort(); %>
+          <% skus.forEach(function(sku) { %>
+            <option value="<%= sku %>"><%= sku %></option>
+          <% }) %>
+          <option value="none">No Capacity (Shared)</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small">State</label>
+        <select class="form-select form-select-sm" id="filterState" onchange="applyFilters()">
+          <option value="">All</option>
+          <option value="Active">Active</option>
+          <option value="Inactive">Inactive</option>
+          <option value="Deleted">Deleted</option>
+        </select>
+      </div>
+      <div class="col-md-3 d-flex align-items-end gap-2">
+        <button class="btn btn-sm btn-outline-primary flex-grow-1" onclick="selectAllFiltered()">
+          <i class="bi bi-check2-all me-1"></i>Select All Filtered
+        </button>
+        <button class="btn btn-sm btn-outline-secondary flex-grow-1" onclick="deselectAllFiltered()">
+          <i class="bi bi-x-lg me-1"></i>Deselect Filtered
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Workspace Table -->
+<div class="card mb-4" id="workspaceCard">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div class="d-flex align-items-center gap-2">
+      <button class="btn btn-sm btn-primary" id="refreshBtn" onclick="refreshWorkspaces()">
+        <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+      </button>
+      <span><i class="bi bi-table me-2"></i>Workspaces (<span id="visibleCount"><%= workspaces.length %></span> of <%= workspaces.length %>)</span>
+    </div>
+    <span class="badge bg-primary" id="selectionBadge">0 selected</span>
+  </div>
+  <div style="position: relative;">
+    <div id="workspaceOverlay" style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(255,255,255,0.7);z-index:10;display:flex;align-items:center;justify-content:center;">
+      <div class="text-center">
+        <i class="bi bi-arrow-clockwise fs-3" style="color:var(--color-primary);"></i>
+        <p class="mt-2 fw-bold small" style="color:var(--color-primary);">Click <strong>Refresh</strong> to load the latest workspace data</p>
+      </div>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-hover table-sm mb-0" id="migrate-table">
+        <thead>
+          <tr>
+            <th style="width: 40px;"><input type="checkbox" class="form-check-input" id="selectAllCheckbox" onchange="toggleSelectAll(this)" disabled></th>
+            <th>Workspace</th>
+            <th>License</th>
+            <th>SKU</th>
+            <th>State</th>
+            <th>Items</th>
+            <th>Capacity ID</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% workspaces.sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); }).forEach(function(ws) { var license = ws.licenseType || 'Pro'; var sku = ws.capacitySku || ''; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
+            <tr class="ws-row" data-ws-id="<%= ws.id %>" data-ws-name="<%= ws.name || 'Unnamed' %>" data-license="<%= license %>" data-sku="<%= sku || 'none' %>" data-state="<%= ws.state || 'Active' %>">
+              <td><input type="checkbox" class="form-check-input ws-checkbox" value="<%= ws.id %>" onchange="updateSelectionCount()" disabled></td>
+              <td class="small"><%= ws.name || 'Unnamed' %></td>
+              <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
+              <td><code><%= sku || '-' %></code></td>
+              <td><span class="badge bg-<%= (ws.state || 'Active') === 'Active' ? 'success' : 'warning' %>"><%= ws.state || 'Active' %></span></td>
+              <td><%= ws.totalItems || 0 %></td>
+              <td class="small text-muted"><%= ws.capacityId ? ws.capacityId.substring(0,8) + '...' : '-' %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Results Modal -->
+<div class="modal fade" id="migrationResultsModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="resultsModalTitle"><i class="bi bi-arrow-left-right me-2"></i>Migration Results</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="resultsModalBody">
+        <div id="migrationProgress" style="display:none;">
+          <div class="text-center py-4">
+            <div class="spinner-border" style="color: var(--color-primary);" role="status"></div>
+            <p class="mt-3 fw-bold">Migrating workspaces...</p>
+            <p class="text-muted small" id="migrationProgressText">Sending requests...</p>
+          </div>
+        </div>
+        <div id="migrationResultsContent" style="display:none;">
+          <div class="row g-3 mb-3" id="resultsSummaryCards"></div>
+          <table class="table table-sm" id="resultsTable">
+            <thead><tr><th>Workspace</th><th>Status</th><th>Message</th></tr></thead>
+            <tbody id="resultsTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Alert Modal -->
+<div class="modal fade" id="alertModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title"><i class="bi bi-exclamation-triangle me-2"></i>Warning</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="alertModalBody"></div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-primary btn-sm" data-bs-dismiss="modal">OK</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Modal -->
+<div class="modal fade" id="confirmModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title"><i class="bi bi-question-circle me-2"></i>Confirm Migration</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="confirmModalBody"></div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary btn-sm" id="confirmModalOk">Confirm</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+var workspacesReady = false;
+
+function refreshWorkspaces() {
+  var btn = document.getElementById('refreshBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Loading from API...';
+
+  fetch('/migrate/refresh')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data.success) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Refresh';
+        return showAlert(data.message || 'Failed to refresh.');
+      }
+      // Rebuild workspace table with fresh API data
+      var tbody = document.querySelector('#migrate-table tbody');
+      tbody.innerHTML = '';
+      (data.workspaces || []).sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); }).forEach(function(ws) {
+        var license = ws.licenseType || 'Pro';
+        var sku = ws.capacitySku || '';
+        var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary';
+        var stateColor = (ws.state || 'Active') === 'Active' ? 'success' : 'warning';
+        var capShort = ws.capacityId ? ws.capacityId.substring(0,8) + '...' : '-';
+        tbody.innerHTML +=
+          '<tr class="ws-row" data-ws-id="' + ws.id + '" data-ws-name="' + (ws.name||'Unnamed') + '" data-license="' + license + '" data-sku="' + (sku||'none') + '" data-state="' + (ws.state||'Active') + '">' +
+          '<td><input type="checkbox" class="form-check-input ws-checkbox" value="' + ws.id + '" onchange="updateSelectionCount()"></td>' +
+          '<td class="small">' + (ws.name||'Unnamed') + '</td>' +
+          '<td><span class="badge bg-' + licColor + '">' + license + '</span></td>' +
+          '<td><code>' + (sku||'-') + '</code></td>' +
+          '<td><span class="badge bg-' + stateColor + '">' + (ws.state||'Active') + '</span></td>' +
+          '<td>' + (ws.totalItems||0) + '</td>' +
+          '<td class="small text-muted">' + capShort + '</td></tr>';
+      });
+      document.getElementById('visibleCount').textContent = (data.workspaces || []).length;
+
+      // Update capacity dropdown with fresh data
+      if (data.capacities && data.capacities.length > 0) {
+        var capSelect = document.getElementById('targetCapacity');
+        var prevVal = capSelect.value;
+        capSelect.innerHTML = '<option value="">-- Select capacity --</option>';
+        var activeCaps = data.capacities.filter(function(c) { return c.state === 'Active'; });
+        var inactiveCaps = data.capacities.filter(function(c) { return c.state !== 'Active'; });
+        activeCaps.forEach(function(cap) {
+          var sku = (cap.sku || '').toUpperCase();
+          var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : (sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A')) ? 'Premium' : 'Shared';
+          var opt = document.createElement('option');
+          opt.value = cap.id;
+          opt.setAttribute('data-state', 'Active');
+          opt.setAttribute('data-sku', cap.sku);
+          opt.textContent = (cap.displayName || 'Unnamed') + ' (' + cap.sku + ') - ' + licType + ' - ' + (cap.region || '');
+          capSelect.appendChild(opt);
+        });
+        inactiveCaps.forEach(function(cap) {
+          var sku = (cap.sku || '').toUpperCase();
+          var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : (sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A')) ? 'Premium' : 'Shared';
+          var opt = document.createElement('option');
+          opt.value = cap.id;
+          opt.setAttribute('data-state', cap.state);
+          opt.setAttribute('data-sku', cap.sku);
+          opt.style.color = '#999';
+          opt.disabled = true;
+          opt.textContent = '[' + cap.state + '] ' + (cap.displayName || 'Unnamed') + ' (' + cap.sku + ') - ' + licType;
+          capSelect.appendChild(opt);
+        });
+        if (prevVal) capSelect.value = prevVal;
+      }
+
+      // Remove overlay, enable checkboxes
+      document.getElementById('workspaceOverlay').style.display = 'none';
+      document.getElementById('selectAllCheckbox').disabled = false;
+      workspacesReady = true;
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Refresh';
+      updateSelectionCount();
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Refresh';
+      showAlert('Refresh failed: ' + err.message);
+    });
+}
+
+function checkCapacityState() {
+  var sel = document.getElementById('targetCapacity');
+  var opt = sel.selectedOptions[0];
+  var warn = document.getElementById('capacityWarning');
+  if (opt && opt.getAttribute('data-state') && opt.getAttribute('data-state') !== 'Active') {
+    warn.textContent = 'Warning: This capacity is ' + opt.getAttribute('data-state') + '. Migration may fail.';
+    warn.style.display = '';
+  } else {
+    warn.style.display = 'none';
+  }
+}
+
+function toggleCapacitySelect() {
+  var action = document.getElementById('migrationAction').value;
+  document.getElementById('capacitySelectGroup').style.display = action === 'assign' ? '' : 'none';
+}
+
+function getSelectedIds() {
+  return Array.from(document.querySelectorAll('.ws-checkbox:checked')).map(function(cb) { return cb.value; });
+}
+
+function updateSelectionCount() {
+  var count = getSelectedIds().length;
+  document.getElementById('selectedCount').textContent = count;
+  document.getElementById('selectionBadge').textContent = count + ' selected';
+  document.getElementById('migrateBtn').disabled = count === 0;
+}
+
+function toggleSelectAll(master) {
+  document.querySelectorAll('.ws-row').forEach(function(row) {
+    if (row.style.display !== 'none') {
+      row.querySelector('.ws-checkbox').checked = master.checked;
+    }
+  });
+  updateSelectionCount();
+}
+
+function selectAllFiltered() {
+  document.querySelectorAll('.ws-row').forEach(function(row) {
+    if (row.style.display !== 'none') row.querySelector('.ws-checkbox').checked = true;
+  });
+  updateSelectionCount();
+}
+
+function deselectAllFiltered() {
+  document.querySelectorAll('.ws-row').forEach(function(row) {
+    if (row.style.display !== 'none') row.querySelector('.ws-checkbox').checked = false;
+  });
+  updateSelectionCount();
+}
+
+function clearSelection() {
+  document.querySelectorAll('.ws-checkbox').forEach(function(cb) { cb.checked = false; });
+  document.getElementById('selectAllCheckbox').checked = false;
+  updateSelectionCount();
+}
+
+function applyFilters() {
+  var search = (document.getElementById('filterSearch').value || '').toLowerCase();
+  var license = document.getElementById('filterLicense').value;
+  var sku = document.getElementById('filterSku').value;
+  var state = document.getElementById('filterState').value;
+  var visible = 0;
+
+  document.querySelectorAll('.ws-row').forEach(function(row) {
+    var wsName = (row.getAttribute('data-ws-name') || '').toLowerCase();
+    var wsLicense = row.getAttribute('data-license') || '';
+    var wsSku = row.getAttribute('data-sku') || '';
+    var wsState = row.getAttribute('data-state') || '';
+
+    var show = true;
+    if (search && !wsName.includes(search)) show = false;
+    if (license && wsLicense !== license) show = false;
+    if (sku && wsSku !== sku) show = false;
+    if (state && wsState !== state) show = false;
+
+    row.style.display = show ? '' : 'none';
+    if (show) visible++;
+  });
+
+  document.getElementById('visibleCount').textContent = visible;
+}
+
+function resetFilters() {
+  document.getElementById('filterSearch').value = '';
+  document.getElementById('filterLicense').value = '';
+  document.getElementById('filterSku').value = '';
+  document.getElementById('filterState').value = '';
+  applyFilters();
+}
+
+function showAlert(msg) {
+  document.getElementById('alertModalBody').textContent = msg;
+  new bootstrap.Modal(document.getElementById('alertModal')).show();
+}
+
+function showConfirm(msg, onOk) {
+  document.getElementById('confirmModalBody').textContent = msg;
+  var modal = new bootstrap.Modal(document.getElementById('confirmModal'));
+  var okBtn = document.getElementById('confirmModalOk');
+  var handler = function() {
+    okBtn.removeEventListener('click', handler);
+    modal.hide();
+    onOk();
+  };
+  okBtn.addEventListener('click', handler);
+  modal.show();
+}
+
+function executeMigration() {
+  if (!workspacesReady) return showAlert('Please click Refresh first to load the latest workspace data.');
+  // Check if user is authorized for migration
+  fetch('/migrate/auth/status').then(function(r) { return r.json(); }).then(function(st) {
+    if (!st.authenticated) {
+      return showAlert('Not authorized. Click "Authorize as Power BI Admin" to sign in with your Power BI Admin account first.');
+    }
+    doExecuteMigration();
+  });
+}
+
+function doExecuteMigration() {
+  var ids = getSelectedIds();
+  if (ids.length === 0) return showAlert('No workspaces selected.');
+
+  var action = document.getElementById('migrationAction').value;
+  var targetCapacityId = document.getElementById('targetCapacity').value;
+
+  if (action === 'assign' && !targetCapacityId) {
+    return showAlert('Please select a target capacity.');
+  }
+
+  var targetLabel = '';
+  if (action === 'assign') {
+    var opt = document.getElementById('targetCapacity').selectedOptions[0];
+    targetLabel = opt ? opt.textContent.trim() : targetCapacityId;
+  } else {
+    targetLabel = 'Shared (Pro)';
+  }
+
+  showConfirm('Migrate ' + ids.length + ' workspace(s) to ' + targetLabel + '? This action will change capacity assignments.', function() {
+
+  // Show progress modal
+  var modal = new bootstrap.Modal(document.getElementById('migrationResultsModal'));
+  document.getElementById('migrationProgress').style.display = '';
+  document.getElementById('migrationResultsContent').style.display = 'none';
+  document.getElementById('resultsModalTitle').innerHTML = '<i class="bi bi-hourglass-split me-2"></i>Migration In Progress';
+  modal.show();
+
+  fetch('/migrate/execute', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspaceIds: ids, targetCapacityId: targetCapacityId, action: action })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    document.getElementById('migrationProgress').style.display = 'none';
+    document.getElementById('migrationResultsContent').style.display = '';
+    document.getElementById('resultsModalTitle').innerHTML = '<i class="bi bi-arrow-left-right me-2"></i>Migration Results';
+
+    if (!data.success && !data.results) {
+      document.getElementById('resultsModalBody').innerHTML = '<div class="alert alert-danger">' + (data.message || 'Migration failed.') + '</div>';
+      return;
+    }
+
+    // Summary cards
+    var summary = data.summary || {};
+    document.getElementById('resultsSummaryCards').innerHTML =
+      '<div class="col-4"><div class="card text-center"><div class="card-body py-2">' +
+      '<div class="fs-4 fw-bold">' + summary.total + '</div><div class="small text-muted">Total</div></div></div></div>' +
+      '<div class="col-4"><div class="card text-center"><div class="card-body py-2">' +
+      '<div class="fs-4 fw-bold text-success">' + summary.success + '</div><div class="small text-muted">Succeeded</div></div></div></div>' +
+      '<div class="col-4"><div class="card text-center"><div class="card-body py-2">' +
+      '<div class="fs-4 fw-bold text-danger">' + summary.errors + '</div><div class="small text-muted">Failed</div></div></div></div>';
+
+    // Results table
+    var tbody = document.getElementById('resultsTableBody');
+    tbody.innerHTML = '';
+    var tSku = data.targetSku || '';
+    (data.results || []).forEach(function(r) {
+      var statusBadge = r.status === 'success'
+        ? '<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Success</span>'
+        : '<span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>';
+      tbody.innerHTML += '<tr><td><strong>' + r.name + '</strong></td><td>' + statusBadge + '</td><td class="small">' + (r.message || '') + '</td></tr>';
+
+      // Update the workspace row in the table to show migrated SKU
+      if (r.status === 'success') {
+        var wsRow = document.querySelector('.ws-row[data-ws-id="' + r.id + '"]');
+        if (wsRow) {
+          var skuCell = wsRow.querySelectorAll('td')[3]; // SKU column (0-indexed: checkbox, name, license, sku)
+          if (skuCell) {
+            skuCell.innerHTML = '<span style="color: #198754; font-weight: 600;"><i class="bi bi-check-circle me-1"></i>migrated to <code style="color: #198754;">' + (tSku || 'Shared') + '</code></span>';
+          }
+        }
+      }
+    });
+  })
+  .catch(function(err) {
+    document.getElementById('migrationProgress').style.display = 'none';
+    document.getElementById('migrationResultsContent').style.display = '';
+    document.getElementById('resultsModalBody').innerHTML = '<div class="alert alert-danger">Request failed: ' + err.message + '</div>';
+  });
+  }); // end showConfirm callback
+}
+</script>
+
+<% } %>
+<%- include('../partials/footer') %>

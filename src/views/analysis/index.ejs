@@ -1,0 +1,330 @@
+<%- include('../partials/header') %>
+<div class="row">
+  <div class="col-lg-10 mx-auto">
+    <h2><i class="bi bi-play-circle me-2"></i>Run Analysis</h2>
+    <p class="text-muted">Scan your Power BI tenant and save results to the database.</p>
+
+    <div class="card mb-4">
+      <div class="card-header"><i class="bi bi-rocket me-2"></i>New Analysis</div>
+      <div class="card-body">
+        <% if (!servicePrincipals.length) { %>
+          <div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle me-2"></i>No service principals configured. <a href="/settings">Add one in Settings</a> first.</div>
+        <% } else { %>
+          <div class="row align-items-end g-3">
+            <div class="col-md-5">
+              <label for="spSelect" class="form-label">Select Tenant / Service Principal</label>
+              <select class="form-select" id="spSelect">
+                <% servicePrincipals.forEach(function(sp) { %>
+                  <option value="<%= sp.id %>" data-eaoid="<%= sp.enterprise_app_object_id || '' %>"><%= sp.name %> (<%= sp.tenant_id %>)</option>
+                <% }) %>
+              </select>
+            </div>
+            <div class="col-md-3">
+              <button class="btn btn-primary w-100" onclick="startAnalysis()"><i class="bi bi-play-fill me-1"></i>Run Analysis</button>
+            </div>
+            <div class="col-md-4">
+              <button class="btn btn-outline-warning w-100" onclick="openGrantAccess()"><i class="bi bi-key me-1"></i>Grant SP Access to Workspaces</button>
+            </div>
+          </div>
+          <div class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>Use <strong>Grant SP Access</strong> to assign the service principal as Admin to workspaces it cannot yet read.</div>
+        <% } %>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span><i class="bi bi-clock-history me-2"></i>Previous Runs (<%= runs.length %>)</span>
+        <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter runs..." oninput="filterTable(this, 'analysis-runs-table')">
+      </div>
+      <div class="table-responsive">
+        <table class="table table-hover table-sm mb-0" id="analysis-runs-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Tenant</th>
+              <th>Status</th>
+              <th>Workspaces</th>
+              <th>Reports</th>
+              <th>Datasets</th>
+              <th>Dashboards</th>
+              <th>Users</th>
+              <th>Date</th>
+              <th>By</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <% if (!runs.length) { %>
+              <tr data-filter="no runs"><td colspan="11" class="text-center text-muted py-3">No analysis runs yet</td></tr>
+            <% } %>
+            <% runs.forEach(function(runItem) { var statusColor = runItem.status === 'completed' ? 'success' : runItem.status === 'running' ? 'primary' : runItem.status === 'cancelled' ? 'secondary' : 'danger'; %>
+              <tr data-filter="<%= [runItem.id, runItem.sp_name || '', runItem.status || '', runItem.run_by || '', runItem.tenant_id || ''].join(' ').toLowerCase() %>">
+                <td><%= runItem.id %></td>
+                <td><strong><%= runItem.sp_name || '-' %></strong></td>
+                <td><span class="badge bg-<%= statusColor %>"><%= runItem.status %></span></td>
+                <td><%= runItem.total_workspaces || 0 %></td>
+                <td><%= runItem.total_reports || 0 %></td>
+                <td><%= runItem.total_datasets || 0 %></td>
+                <td><%= runItem.total_dashboards || 0 %></td>
+                <td><%= runItem.total_users || 0 %></td>
+                <td><small><%= runItem.started_at ? new Date(runItem.started_at).toLocaleString() : '-' %></small></td>
+                <td><small><%= runItem.run_by || '-' %></small></td>
+                <td class="text-nowrap">
+                  <% if (runItem.status === 'completed') { %>
+                    <a href="/analysis/results/<%= runItem.id %>" class="btn btn-sm btn-outline-primary"><i class="bi bi-eye me-1"></i>View</a>
+                  <% } %>
+                  <button class="btn btn-sm btn-outline-danger" onclick="deleteRun(<%= runItem.id %>)"><i class="bi bi-trash"></i></button>
+                </td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="progressModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-hourglass-split me-2"></i>Analysis in Progress</h5>
+      </div>
+      <div class="modal-body text-center">
+        <div class="spinner-border text-primary mb-3" role="status" id="analysisSpinner">
+          <span class="visually-hidden">Loading...</span>
+        </div>
+        <div class="progress mb-3" style="height: 25px;">
+          <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" id="progressBar" style="width: 0%">0%</div>
+        </div>
+        <p class="text-muted" id="progressMessage">Starting analysis...</p>
+        <p class="small text-muted" id="progressDetail"></p>
+      </div>
+      <div class="modal-footer justify-content-between flex-wrap gap-2">
+        <button class="btn btn-outline-danger" id="cancelAnalysisBtn" style="display:none;" onclick="cancelAnalysis()"><i class="bi bi-x-circle me-1"></i>Cancel</button>
+        <div class="ms-auto d-flex gap-2" id="progressFooterActions" style="display:none;">
+          <a href="#" class="btn btn-primary" id="viewResultsBtn"><i class="bi bi-eye me-1"></i>View Results</a>
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+var progressInterval = null;
+var activeRunId = null;
+
+async function startAnalysis() {
+  var spId = document.getElementById('spSelect').value;
+  var modal = new bootstrap.Modal(document.getElementById('progressModal'));
+  modal.show();
+
+  activeRunId = null;
+  document.getElementById('progressBar').style.width = '0%';
+  document.getElementById('progressBar').textContent = '0%';
+  document.getElementById('progressBar').classList.add('progress-bar-animated');
+  document.getElementById('progressMessage').textContent = 'Starting analysis...';
+  document.getElementById('progressDetail').textContent = '';
+  document.getElementById('progressFooterActions').style.display = 'none';
+  document.getElementById('cancelAnalysisBtn').style.display = 'none';
+  document.getElementById('cancelAnalysisBtn').disabled = false;
+  document.getElementById('analysisSpinner').style.display = '';
+
+  try {
+    var response = await fetch('/analysis/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ spId: spId })
+    });
+    var data = await response.json();
+
+    if (!data.success) {
+      document.getElementById('progressMessage').textContent = 'Error: ' + data.message;
+      document.getElementById('analysisSpinner').style.display = 'none';
+      document.getElementById('progressFooterActions').style.display = '';
+      return;
+    }
+
+    activeRunId = data.runId;
+    document.getElementById('cancelAnalysisBtn').style.display = '';
+    progressInterval = setInterval(function() { pollProgress(data.runId); }, 2000);
+  } catch (err) {
+    document.getElementById('progressMessage').textContent = 'Error: ' + err.message;
+    document.getElementById('analysisSpinner').style.display = 'none';
+    document.getElementById('progressFooterActions').style.display = '';
+  }
+}
+
+async function pollProgress(runId) {
+  try {
+    var response = await fetch('/analysis/progress/' + runId);
+    var data = await response.json();
+
+    document.getElementById('progressBar').style.width = data.progress + '%';
+    document.getElementById('progressBar').textContent = data.progress + '%';
+    document.getElementById('progressMessage').textContent = data.message;
+    if (data.current && data.total) {
+      document.getElementById('progressDetail').textContent = data.current + ' / ' + data.total + ' workspaces';
+    }
+
+    if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
+      clearInterval(progressInterval);
+      progressInterval = null;
+      document.getElementById('analysisSpinner').style.display = 'none';
+      document.getElementById('cancelAnalysisBtn').style.display = 'none';
+      document.getElementById('progressFooterActions').style.display = '';
+      document.getElementById('progressBar').classList.remove('progress-bar-animated');
+
+      if (data.status === 'completed') {
+        document.getElementById('viewResultsBtn').style.display = '';
+        document.getElementById('viewResultsBtn').href = '/analysis/results/' + runId;
+      } else {
+        document.getElementById('viewResultsBtn').style.display = 'none';
+      }
+    }
+  } catch (err) {
+    document.getElementById('progressDetail').textContent = err.message;
+  }
+}
+
+async function cancelAnalysis() {
+  if (!activeRunId) return;
+  document.getElementById('cancelAnalysisBtn').disabled = true;
+  document.getElementById('progressMessage').textContent = 'Cancellation requested...';
+  try {
+    await fetch('/analysis/cancel/' + activeRunId, { method: 'POST' });
+  } catch (err) {
+    document.getElementById('progressDetail').textContent = err.message;
+  }
+}
+
+async function deleteRun(runId) {
+  if (!confirm('Delete this analysis run?')) return;
+  try {
+    await fetch('/analysis/delete/' + runId, { method: 'POST' });
+    location.reload();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+// ── Grant SP Access ──
+async function openGrantAccess() {
+  var spOpt = document.getElementById('spSelect').selectedOptions[0];
+  var eaoid = spOpt ? spOpt.getAttribute('data-eaoid') : '';
+  if (!eaoid) {
+    alert('Enterprise Application Object ID not configured for this service principal. Go to Settings to add it.');
+    return;
+  }
+
+  // Check if user is authorized as Power BI Admin
+  try {
+    var authResp = await fetch('/governance/grant-auth/status');
+    var authData = await authResp.json();
+    if (!authData.authenticated) {
+      // Redirect to OAuth flow
+      if (confirm('You need to authorize as a Power BI Admin to grant workspace access. Redirect to sign in?')) {
+        window.location.href = '/governance/grant-auth';
+      }
+      return;
+    }
+  } catch (e) {
+    alert('Failed to check auth status: ' + e.message);
+    return;
+  }
+
+  // Fetch workspace list
+  document.getElementById('grantWsList').innerHTML = '<div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary"></div> Loading workspaces...</div>';
+  document.getElementById('grantStatusArea').classList.add('d-none');
+  document.getElementById('grantAccessBtn').disabled = false;
+  var modal = new bootstrap.Modal(document.getElementById('grantAccessModal'));
+  modal.show();
+
+  try {
+    var resp = await fetch('/analysis/workspaces-for-grant');
+    var data = await resp.json();
+    if (!data.success) { document.getElementById('grantWsList').innerHTML = '<div class="alert alert-warning">' + data.message + '</div>'; return; }
+    var html = '';
+    data.workspaces.forEach(function(ws) {
+      html += '<div class="form-check grant-ws-item" data-name="' + (ws.name || '').toLowerCase() + '">' +
+        '<input class="form-check-input grant-ws-cb" type="checkbox" value="' + ws.id + '" id="grant-' + ws.id + '">' +
+        '<label class="form-check-label small" for="grant-' + ws.id + '">' + escapeHtml(ws.name || 'Unnamed') + ' <span class="text-muted">(' + (ws.state || 'Active') + ')</span></label></div>';
+    });
+    document.getElementById('grantWsList').innerHTML = html || '<div class="text-muted text-center py-3">All workspaces already have SP access, or no analysis data available.</div>';
+  } catch (e) {
+    document.getElementById('grantWsList').innerHTML = '<div class="alert alert-danger">' + e.message + '</div>';
+  }
+}
+function escapeHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function toggleAllGrantWs(checked) { document.querySelectorAll('.grant-ws-cb').forEach(function(cb) { cb.checked = checked; }); }
+function filterGrantWs(query) { var q = query.toLowerCase(); document.querySelectorAll('.grant-ws-item').forEach(function(el) { el.style.display = el.getAttribute('data-name').includes(q) ? '' : 'none'; }); }
+
+async function grantSpAccess() {
+  var selected = Array.from(document.querySelectorAll('.grant-ws-cb:checked')).map(function(cb) { return cb.value; });
+  if (!selected.length) { alert('Please select at least one workspace.'); return; }
+
+  document.getElementById('grantStatusArea').classList.remove('d-none');
+  document.getElementById('grantInProgress').classList.remove('d-none');
+  document.getElementById('grantResult').classList.add('d-none');
+  document.getElementById('grantAccessBtn').disabled = true;
+  document.getElementById('grantStatusText').textContent = 'Granting access to ' + selected.length + ' workspace(s)...';
+
+  try {
+    var resp = await fetch('/governance/grant-sp-access', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceIds: selected }),
+    });
+    var data = await resp.json();
+    document.getElementById('grantInProgress').classList.add('d-none');
+    var resultDiv = document.getElementById('grantResult');
+    resultDiv.classList.remove('d-none');
+    if (data.success) {
+      var details = (data.results || []).filter(function(r) { return !r.success; }).map(function(r) { return r.error; }).join('<br>');
+      resultDiv.innerHTML = '<div class="alert alert-success mb-0"><i class="bi bi-check-circle me-1"></i>' + data.message + (details ? '<br><small class="text-danger">' + details + '</small>' : '') + '</div>';
+    } else {
+      resultDiv.innerHTML = '<div class="alert alert-danger mb-0"><i class="bi bi-x-circle me-1"></i>' + data.message + '</div>';
+    }
+  } catch (e) {
+    document.getElementById('grantInProgress').classList.add('d-none');
+    document.getElementById('grantResult').classList.remove('d-none');
+    document.getElementById('grantResult').innerHTML = '<div class="alert alert-danger mb-0">' + e.message + '</div>';
+  }
+  document.getElementById('grantAccessBtn').disabled = false;
+}
+</script>
+
+<!-- Grant SP Access Modal -->
+<div class="modal fade" id="grantAccessModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-key me-2"></i>Grant Service Principal Access</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small">Select workspaces where the service principal should be added as <strong>Admin</strong>. This uses the Power BI Admin API.</p>
+        <div class="mb-3 d-flex gap-2">
+          <button class="btn btn-sm btn-outline-secondary" onclick="toggleAllGrantWs(true)">Select All</button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="toggleAllGrantWs(false)">Deselect All</button>
+          <input type="text" class="form-control form-control-sm" placeholder="Filter..." oninput="filterGrantWs(this.value)" style="max-width:250px;">
+        </div>
+        <div style="max-height: 350px; overflow-y: auto;" id="grantWsList"></div>
+        <div class="d-none mt-3" id="grantStatusArea">
+          <div class="d-flex align-items-center gap-2" id="grantInProgress">
+            <div class="spinner-border spinner-border-sm text-primary"></div>
+            <span id="grantStatusText">Granting access...</span>
+          </div>
+          <div class="d-none mt-2" id="grantResult"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-primary" id="grantAccessBtn" onclick="grantSpAccess()"><i class="bi bi-check-lg me-1"></i>Grant Access</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<%- include('../partials/footer') %>

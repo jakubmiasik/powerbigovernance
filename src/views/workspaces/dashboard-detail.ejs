@@ -1,0 +1,40 @@
+<%- include('../partials/header') %>
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/workspaces">Workspaces</a></li>
+    <li class="breadcrumb-item"><a href="/workspaces/<%= workspaceId %>">Workspace</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Dashboard Tiles</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h3><i class="bi bi-grid-1x2 me-2"></i>Dashboard Tiles</h3>
+    <p class="text-muted small mb-0">Dashboard ID: <code><%= dashboardId %></code></p>
+  </div>
+  <a href="/workspaces/<%= workspaceId %>" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<% if (!tiles.length) { %>
+  <p class="text-muted">No tiles found in this dashboard.</p>
+<% } else { %>
+  <div class="row g-3">
+    <% tiles.forEach(function(tile) { %>
+      <div class="col-md-4">
+        <div class="card h-100">
+          <div class="card-body">
+            <h6 class="card-title"><%= tile.title || 'Untitled Tile' %></h6>
+            <p class="small text-muted mb-1">Type: <%= tile.embedUrl ? 'Embedded' : 'Static' %></p>
+            <% if (tile.reportId) { %>
+              <p class="small mb-1">Report: <code><%= tile.reportId %></code></p>
+            <% } %>
+            <% if (tile.datasetId) { %>
+              <p class="small mb-1">Dataset: <code><%= tile.datasetId %></code></p>
+            <% } %>
+          </div>
+        </div>
+      </div>
+    <% }) %>
+  </div>
+<% } %>
+<%- include('../partials/footer') %>

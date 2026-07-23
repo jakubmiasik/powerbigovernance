@@ -1,0 +1,227 @@
+<%- include('../partials/header') %>
+<%
+  var summary = results && results.summary ? results.summary : null;
+  var workspaceRows = results && results.workspaces ? results.workspaces : [];
+  var summaryCards = summary ? [
+    { key: 'all', label: 'Workspaces', count: summary.totalWorkspaces || 0, color: 'primary', icon: 'collection', action: 'clear' },
+    { key: 'all-items', label: 'Total Items', count: summary.totalItems || 0, color: 'dark', icon: 'boxes', action: 'clear' },
+    { key: 'reports', label: 'Reports', count: summary.totalReports || 0, color: 'primary', icon: 'file-earmark-bar-graph', action: 'filter' },
+    { key: 'datasets', label: 'Semantic Models', count: summary.totalDatasets || 0, color: 'success', icon: 'database', action: 'filter' },
+    { key: 'dashboards', label: 'Dashboards', count: summary.totalDashboards || 0, color: 'info', icon: 'grid-1x2', action: 'filter' },
+    { key: 'dataflows', label: 'Dataflows', count: summary.totalDataflows || 0, color: 'warning', icon: 'diagram-3', action: 'filter' },
+    { key: 'lakehouses', label: 'Lakehouses', count: summary.totalLakehouses || 0, color: 'secondary', icon: 'boxes', action: 'filter' },
+    { key: 'notebooks', label: 'Notebooks', count: summary.totalNotebooks || 0, color: 'secondary', icon: 'journal-code', action: 'filter' },
+    { key: 'pipelines', label: 'Pipelines', count: summary.totalPipelines || 0, color: 'secondary', icon: 'arrow-left-right', action: 'filter' },
+    { key: 'warehouses', label: 'Warehouses', count: summary.totalWarehouses || 0, color: 'secondary', icon: 'building', action: 'filter' },
+    { key: 'users', label: 'Unique Users', count: summary.totalUsers || 0, color: 'secondary', icon: 'people', action: 'users' }
+  ] : [];
+%>
+<div class="row">
+  <div class="col-lg-12">
+    <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
+      <div>
+        <h2><i class="bi bi-bar-chart me-2"></i>Analysis Results</h2>
+        <p class="text-muted mb-0">
+          <strong><%= run.sp_name %></strong>
+          — <%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %>
+          <% if (run.completed_at) { %>
+            — completed <%= new Date(run.completed_at).toLocaleString() %>
+          <% } %>
+        </p>
+      </div>
+      <a href="/analysis" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+    </div>
+
+    <% if (summary) { %>
+      <div class="row g-3 mb-4">
+        <% summaryCards.forEach(function(card) { %>
+          <div class="col-sm-6 col-md-4 col-xl-2">
+            <% if (card.action === 'users') { %>
+              <a href="/governance/users?runId=<%= run.id %>" class="text-decoration-none text-reset">
+            <% } else { %>
+              <a href="#workspace-results-card" class="text-decoration-none text-reset" onclick="<%= card.action === 'filter' ? 'applyWorkspaceFilter(\'' + card.key + '\')' : 'clearWorkspaceFilter()' %>">
+            <% } %>
+              <div class="card text-center h-100 border-<%= card.color %>">
+                <div class="card-body py-3">
+                  <div class="text-<%= card.color %> mb-2"><i class="bi bi-<%= card.icon %>"></i></div>
+                  <div class="fs-3 fw-bold text-<%= card.color %>"><%= card.count %></div>
+                  <div class="small"><%= card.label %></div>
+                </div>
+              </div>
+            </a>
+          </div>
+        <% }) %>
+      </div>
+
+      <div class="row g-4 mb-4">
+        <div class="col-lg-4">
+          <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <span><i class="bi bi-list-check me-2"></i>Item Type Breakdown</span>
+              <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter types..." oninput="filterTable(this, 'item-type-breakdown-table')">
+            </div>
+            <div class="table-responsive">
+              <table class="table table-sm mb-0" id="item-type-breakdown-table">
+                <thead><tr><th>Type</th><th>Count</th></tr></thead>
+                <tbody>
+                  <% Object.entries(summary.itemTypeCounts || {}).sort(function(a, b) { return b[1] - a[1]; }).forEach(function(entry) { %>
+                    <tr data-filter="<%= [entry[0], entry[1]].join(' ').toLowerCase() %>">
+                      <td><span class="badge bg-secondary"><%= entry[0] %></span></td>
+                      <td><strong><%= entry[1] %></strong></td>
+                    </tr>
+                  <% }) %>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <span><i class="bi bi-pie-chart me-2"></i>Workspace States</span>
+              <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter states..." oninput="filterTable(this, 'analysis-states-table')">
+            </div>
+            <div class="table-responsive">
+              <table class="table table-sm mb-0" id="analysis-states-table">
+                <thead><tr><th>State</th><th>Count</th><th>%</th></tr></thead>
+                <tbody>
+                  <% Object.entries(summary.workspacesByState || {}).forEach(function(entry) { var state = entry[0]; var count = entry[1]; %>
+                    <tr data-filter="<%= [state, count].join(' ').toLowerCase() %>">
+                      <td><span class="badge bg-<%= state === 'Active' ? 'success' : state === 'Deleted' ? 'danger' : 'warning' %>"><%= state %></span></td>
+                      <td><%= count %></td>
+                      <td><%= summary.totalWorkspaces ? Math.round((count / summary.totalWorkspaces) * 100) : 0 %>%</td>
+                    </tr>
+                  <% }) %>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <span><i class="bi bi-lightning me-2"></i>Capacity</span>
+              <input type="text" class="form-control form-control-sm" style="max-width: 220px;" placeholder="Filter capacity..." oninput="filterTable(this, 'analysis-capacity-table')">
+            </div>
+            <div class="table-responsive">
+              <table class="table table-sm mb-0" id="analysis-capacity-table">
+                <tbody>
+                  <tr data-filter="dedicated capacity <%= summary.workspacesOnCapacity || 0 %>"><td>Dedicated capacity</td><td><strong><%= summary.workspacesOnCapacity || 0 %></strong></td></tr>
+                  <tr data-filter="shared capacity <%= summary.workspacesOnSharedCapacity || 0 %>"><td>Shared capacity</td><td><strong><%= summary.workspacesOnSharedCapacity || 0 %></strong></td></tr>
+                  <tr data-filter="fabric <%= summary.hasFabric ? 'yes' : 'no' %>"><td>Fabric detected</td><td><span class="badge bg-<%= summary.hasFabric ? 'success' : 'secondary' %>"><%= summary.hasFabric ? 'Yes' : 'No' %></span></td></tr>
+                  <% (summary.capacities || []).forEach(function(capacity) { %>
+                    <tr data-filter="<%= [capacity.displayName || '', capacity.sku || '', capacity.region || '', capacity.state || ''].join(' ').toLowerCase() %>">
+                      <td><%= capacity.displayName || '-' %></td>
+                      <td><code><%= capacity.sku || '-' %></code></td>
+                    </tr>
+                  <% }) %>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-4" id="workspace-results-card">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <div>
+            <span><i class="bi bi-table me-2"></i>All Workspaces (<%= workspaceRows.length %>)</span>
+            <span class="badge bg-light text-dark border ms-2" id="workspaceFilterLabel">Showing all workspaces</span>
+          </div>
+          <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter workspaces..." oninput="filterWorkspaceResults()" id="workspaceResultsFilter">
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover table-sm mb-0" id="workspace-results-table">
+            <thead>
+              <tr>
+                <th>Workspace</th>
+                <th>State</th>
+                <th>Items</th>
+                <th>Reports</th>
+                <th>Models</th>
+                <th>Dashboards</th>
+                <th>Dataflows</th>
+                <th>Lakehouses</th>
+                <th>Notebooks</th>
+                <th>Pipelines</th>
+                <th>Warehouses</th>
+                <th>Users</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <% workspaceRows.forEach(function(ws) { %>
+                <tr
+                  data-filter="<%= [ws.name || '', ws.state || '', ws.type || ''].join(' ').toLowerCase() %>"
+                  data-reports="<%= ws.reportCount || 0 %>"
+                  data-datasets="<%= ws.datasetCount || 0 %>"
+                  data-dashboards="<%= ws.dashboardCount || 0 %>"
+                  data-dataflows="<%= ws.dataflowCount || 0 %>"
+                  data-lakehouses="<%= ws.lakehouseCount || 0 %>"
+                  data-notebooks="<%= ws.notebookCount || 0 %>"
+                  data-pipelines="<%= ws.pipelineCount || 0 %>"
+                  data-warehouses="<%= ws.warehouseCount || 0 %>"
+                >
+                  <td><strong><%= ws.name || 'Unnamed' %></strong></td>
+                  <td><span class="badge bg-<%= ws.state === 'Active' ? 'success' : 'warning' %>"><%= ws.state || '-' %></span></td>
+                  <td><%= ws.totalItems || 0 %></td>
+                  <td><%= ws.reportCount || 0 %></td>
+                  <td><%= ws.datasetCount || 0 %></td>
+                  <td><%= ws.dashboardCount || 0 %></td>
+                  <td><%= ws.dataflowCount || 0 %></td>
+                  <td><%= ws.lakehouseCount || 0 %></td>
+                  <td><%= ws.notebookCount || 0 %></td>
+                  <td><%= ws.pipelineCount || 0 %></td>
+                  <td><%= ws.warehouseCount || 0 %></td>
+                  <td><%= ws.userCount || 0 %></td>
+                  <td><a href="/workspaces/<%= ws.id %>" class="btn btn-sm btn-outline-primary">Details</a></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    <% } else { %>
+      <div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i>No results data available for this run.</div>
+    <% } %>
+  </div>
+</div>
+
+<script>
+var activeWorkspaceMetric = '';
+
+function clearWorkspaceFilter() {
+  activeWorkspaceMetric = '';
+  document.getElementById('workspaceFilterLabel').textContent = 'Showing all workspaces';
+  filterWorkspaceResults();
+}
+
+function applyWorkspaceFilter(metric) {
+  activeWorkspaceMetric = metric;
+  var labels = {
+    reports: 'workspaces with reports',
+    datasets: 'workspaces with semantic models',
+    dashboards: 'workspaces with dashboards',
+    dataflows: 'workspaces with dataflows',
+    lakehouses: 'workspaces with lakehouses',
+    notebooks: 'workspaces with notebooks',
+    pipelines: 'workspaces with pipelines',
+    warehouses: 'workspaces with warehouses'
+  };
+  document.getElementById('workspaceFilterLabel').textContent = 'Showing ' + (labels[metric] || 'filtered workspaces');
+  filterWorkspaceResults();
+}
+
+function filterWorkspaceResults() {
+  var textFilter = (document.getElementById('workspaceResultsFilter').value || '').toLowerCase();
+  document.querySelectorAll('#workspace-results-table tbody tr').forEach(function(row) {
+    var matchesText = (row.getAttribute('data-filter') || row.textContent || '').toLowerCase().includes(textFilter);
+    var matchesMetric = true;
+    if (activeWorkspaceMetric) {
+      matchesMetric = Number(row.getAttribute('data-' + activeWorkspaceMetric) || 0) > 0;
+    }
+    row.style.display = matchesText && matchesMetric ? '' : 'none';
+  });
+}
+</script>
+<%- include('../partials/footer') %>

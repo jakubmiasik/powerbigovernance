@@ -1,0 +1,9 @@
+name: powerbi-governance
+metadata:
+  template: azd-init
+
+services:
+  web:
+    project: .
+    language: js
+    host: appservice
