@@ -69,12 +69,20 @@ app.use((req, res, next) => {
   next();
 });
 
+// Health check BEFORE DB middleware so it always responds instantly
+app.get('/health', (_req, res) => {
+  res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
+});
+
 // Global context: selected run + available runs, loaded once per request
 app.use(async (req, res, next) => {
   res.locals.currentUser = req.user;
 
   try {
-    const runs = await db.getAnalysisRuns();
+    const runs = await Promise.race([
+      db.getAnalysisRuns(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('DB timeout')), 5000)),
+    ]);
     const completedRuns = runs.filter(r => r.status === 'completed');
     res.locals.availableRuns = completedRuns;
 
@@ -105,11 +113,6 @@ app.use(async (req, res, next) => {
 app.post('/api/select-run', (req, res) => {
   req.session.selectedRunId = parseInt(req.body.runId);
   res.json({ success: true });
-});
-
-// Health check endpoint (Azure App Service)
-app.get('/health', (_req, res) => {
-  res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
 // API endpoint for client-side auth detection (same pattern as sizing app)
