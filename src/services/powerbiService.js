@@ -1,11 +1,7 @@
 const axios = require('axios');
-<<<<<<< HEAD
 const {
   getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP, getOneLakeTokenForSP,
 } = require('./authService');
-=======
-const { getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP, getOneLakeTokenForSP } = require('./authService');
->>>>>>> origin/main
 
 const PBI_BASE = 'https://api.powerbi.com/v1.0/myorg';
 const PBI_ADMIN = PBI_BASE + '/admin';

@@ -3,15 +3,9 @@ const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
 
-<<<<<<< HEAD
 // Helper to get a PBI service instance using the first configured SP
 async function getPbiService(res) {
   const globalRun = res ? res.locals.globalRun : null;
-=======
-// Helper to get a PBI service instance
-async function getPbiService(res) {
-  const globalRun = res.locals.globalRun;
->>>>>>> origin/main
   let sp;
   if (globalRun && globalRun.sp_id) {
     sp = await db.getServicePrincipalById(globalRun.sp_id);
@@ -256,9 +250,6 @@ router.get('/history/:capacityName', async (req, res) => {
 });
 
 module.exports = router;
-<<<<<<< HEAD
 
 
 
-=======
->>>>>>> origin/main
