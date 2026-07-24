@@ -1,19 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
-const { getAccessTokenForSP, getAccessTokenForMI } = require('../services/authService');
+const { getAccessTokenForSP } = require('../services/authService');
 
 router.get('/', async (req, res) => {
   try {
-    const [servicePrincipals, managedIdentities] = await Promise.all([
-      db.getServicePrincipals(),
-      db.getManagedIdentities(),
-    ]);
+    const servicePrincipals = await db.getServicePrincipals();
     res.render('config', {
       title: 'Settings',
       user: req.user,
       servicePrincipals,
-      managedIdentities,
       success: req.flash('success'),
       error: req.flash('error'),
     });
@@ -22,12 +18,60 @@ router.get('/', async (req, res) => {
       title: 'Settings',
       user: req.user,
       servicePrincipals: [],
-      managedIdentities: [],
       success: [],
       error: [err.message],
     });
   }
 });
+
+// ── Service Principal CRUD ──
+
+router.post('/sp/save', async (req, res) => {
+  const { id, name, tenantId, clientId, clientSecret, enterpriseAppObjectId, keyVaultName, keyVaultSecretName } = req.body;
+  const hasKv = keyVaultName && keyVaultSecretName;
+  if (!name || !tenantId || !clientId || (!clientSecret && !hasKv)) {
+    req.flash('error', 'Name, Tenant ID, Client ID, and either a Client Secret or Key Vault details are required.');
+    return res.redirect('/settings');
+  }
+  try {
+    await db.saveServicePrincipal({
+      id: id ? parseInt(id) : null,
+      name, tenantId, clientId,
+      clientSecret: clientSecret || null,
+      enterpriseAppObjectId: enterpriseAppObjectId || null,
+      keyVaultName: keyVaultName || null,
+      keyVaultSecretName: keyVaultSecretName || null,
+    });
+    req.flash('success', 'Service principal saved.');
+  } catch (err) {
+    req.flash('error', 'Failed to save: ' + err.message);
+  }
+  res.redirect('/settings');
+});
+
+router.post('/sp/delete/:id', async (req, res) => {
+  try {
+    await db.deleteServicePrincipal(parseInt(req.params.id));
+    req.flash('success', 'Service principal deleted.');
+  } catch (err) {
+    req.flash('error', 'Failed to delete: ' + err.message);
+  }
+  res.redirect('/settings');
+});
+
+router.post('/sp/test/:id', async (req, res) => {
+  try {
+    const sp = await db.getServicePrincipalById(parseInt(req.params.id));
+    if (!sp) return res.json({ success: false, message: 'Service principal not found.' });
+    await getAccessTokenForSP(sp);
+    res.json({ success: true, message: 'Successfully connected to Power BI API.' });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+module.exports = router;
+
 
 // ── Service Principal CRUD (kept for migrate/delegated auth usage) ──
 

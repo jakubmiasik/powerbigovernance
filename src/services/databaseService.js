@@ -70,7 +70,7 @@ function execSql(conn, sql, params = []) {
 async function getServicePrincipals() {
   const conn = await getConnection();
   try {
-    return await execSql(conn, 'SELECT id, name, tenant_id, client_id, client_secret, enterprise_app_object_id, created_at, updated_at FROM service_principals ORDER BY name');
+    return await execSql(conn, 'SELECT id, name, tenant_id, client_id, client_secret, enterprise_app_object_id, key_vault_name, key_vault_secret_name, created_at, updated_at FROM service_principals ORDER BY name');
   } finally {
     conn.close();
   }
@@ -79,7 +79,7 @@ async function getServicePrincipals() {
 async function getServicePrincipalById(id) {
   const conn = await getConnection();
   try {
-    const rows = await execSql(conn, 'SELECT id, name, tenant_id, client_id, client_secret, enterprise_app_object_id FROM service_principals WHERE id = @id', [
+    const rows = await execSql(conn, 'SELECT id, name, tenant_id, client_id, client_secret, enterprise_app_object_id, key_vault_name, key_vault_secret_name FROM service_principals WHERE id = @id', [
       { name: 'id', type: TYPES.Int, value: id },
     ]);
     return rows[0] || null;
@@ -88,32 +88,36 @@ async function getServicePrincipalById(id) {
   }
 }
 
-async function saveServicePrincipal({ id, name, tenantId, clientId, clientSecret, enterpriseAppObjectId }) {
+async function saveServicePrincipal({ id, name, tenantId, clientId, clientSecret, enterpriseAppObjectId, keyVaultName, keyVaultSecretName }) {
   const conn = await getConnection();
   try {
     if (id) {
       await execSql(
         conn,
-        `UPDATE service_principals SET name=@name, tenant_id=@tenantId, client_id=@clientId, client_secret=@clientSecret, enterprise_app_object_id=@eaoid, updated_at=GETUTCDATE() WHERE id=@id`,
+        `UPDATE service_principals SET name=@name, tenant_id=@tenantId, client_id=@clientId, client_secret=@clientSecret, enterprise_app_object_id=@eaoid, key_vault_name=@kvName, key_vault_secret_name=@kvSecret, updated_at=GETUTCDATE() WHERE id=@id`,
         [
           { name: 'id', type: TYPES.Int, value: id },
           { name: 'name', type: TYPES.NVarChar, value: name },
           { name: 'tenantId', type: TYPES.NVarChar, value: tenantId },
           { name: 'clientId', type: TYPES.NVarChar, value: clientId },
-          { name: 'clientSecret', type: TYPES.NVarChar, value: clientSecret },
+          { name: 'clientSecret', type: TYPES.NVarChar, value: clientSecret || null },
           { name: 'eaoid', type: TYPES.NVarChar, value: enterpriseAppObjectId || null },
+          { name: 'kvName', type: TYPES.NVarChar, value: keyVaultName || null },
+          { name: 'kvSecret', type: TYPES.NVarChar, value: keyVaultSecretName || null },
         ]
       );
     } else {
       await execSql(
         conn,
-        `INSERT INTO service_principals (name, tenant_id, client_id, client_secret, enterprise_app_object_id) VALUES (@name, @tenantId, @clientId, @clientSecret, @eaoid)`,
+        `INSERT INTO service_principals (name, tenant_id, client_id, client_secret, enterprise_app_object_id, key_vault_name, key_vault_secret_name) VALUES (@name, @tenantId, @clientId, @clientSecret, @eaoid, @kvName, @kvSecret)`,
         [
           { name: 'name', type: TYPES.NVarChar, value: name },
           { name: 'tenantId', type: TYPES.NVarChar, value: tenantId },
           { name: 'clientId', type: TYPES.NVarChar, value: clientId },
-          { name: 'clientSecret', type: TYPES.NVarChar, value: clientSecret },
+          { name: 'clientSecret', type: TYPES.NVarChar, value: clientSecret || null },
           { name: 'eaoid', type: TYPES.NVarChar, value: enterpriseAppObjectId || null },
+          { name: 'kvName', type: TYPES.NVarChar, value: keyVaultName || null },
+          { name: 'kvSecret', type: TYPES.NVarChar, value: keyVaultSecretName || null },
         ]
       );
     }
@@ -335,79 +339,14 @@ async function runMigrations() {
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'enterprise_app_object_id') ALTER TABLE service_principals ADD enterprise_app_object_id NVARCHAR(255) NULL`);
     // Add timezone column to capacity_schedules if missing
     await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'timezone') ALTER TABLE capacity_schedules ADD timezone NVARCHAR(100) NULL`);
-    // Create managed_identities table if missing
-    await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'managed_identities') AND type = 'U')
-      CREATE TABLE managed_identities (
-        id INT IDENTITY(1,1) PRIMARY KEY,
-        name NVARCHAR(255) NOT NULL,
-        client_id NVARCHAR(255) NOT NULL,
-        created_at DATETIME DEFAULT GETUTCDATE(),
-        updated_at DATETIME DEFAULT GETUTCDATE()
-      )`);
+    // Add Key Vault columns to service_principals if missing
+    await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'key_vault_name') ALTER TABLE service_principals ADD key_vault_name NVARCHAR(255) NULL`);
+    await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'key_vault_secret_name') ALTER TABLE service_principals ADD key_vault_secret_name NVARCHAR(255) NULL`);
+    // Make client_secret nullable (it may already be)
+    await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'client_secret' AND is_nullable = 0) ALTER TABLE service_principals ALTER COLUMN client_secret NVARCHAR(MAX) NULL`).catch(() => {});
     console.log('[DB] Migrations complete.');
   } catch (err) {
     console.warn('[DB] Migration warning:', err.message);
-  } finally {
-    conn.close();
-  }
-}
-
-// ── User Assigned Managed Identity CRUD ──
-
-async function getManagedIdentities() {
-  const conn = await getConnection();
-  try {
-    return await execSql(conn, 'SELECT id, name, client_id, created_at, updated_at FROM managed_identities ORDER BY name');
-  } catch (err) {
-    if (err.message && err.message.includes('Invalid object name')) return [];
-    throw err;
-  } finally {
-    conn.close();
-  }
-}
-
-async function getManagedIdentityById(id) {
-  const conn = await getConnection();
-  try {
-    const rows = await execSql(conn, 'SELECT id, name, client_id FROM managed_identities WHERE id = @id', [
-      { name: 'id', type: TYPES.Int, value: id },
-    ]);
-    return rows[0] || null;
-  } finally {
-    conn.close();
-  }
-}
-
-async function saveManagedIdentity({ id, name, clientId }) {
-  const conn = await getConnection();
-  try {
-    if (id) {
-      await execSql(conn,
-        `UPDATE managed_identities SET name=@name, client_id=@clientId, updated_at=GETUTCDATE() WHERE id=@id`,
-        [
-          { name: 'id', type: TYPES.Int, value: id },
-          { name: 'name', type: TYPES.NVarChar, value: name },
-          { name: 'clientId', type: TYPES.NVarChar, value: clientId },
-        ]);
-    } else {
-      await execSql(conn,
-        `INSERT INTO managed_identities (name, client_id) VALUES (@name, @clientId)`,
-        [
-          { name: 'name', type: TYPES.NVarChar, value: name },
-          { name: 'clientId', type: TYPES.NVarChar, value: clientId },
-        ]);
-    }
-  } finally {
-    conn.close();
-  }
-}
-
-async function deleteManagedIdentity(id) {
-  const conn = await getConnection();
-  try {
-    await execSql(conn, 'DELETE FROM managed_identities WHERE id=@id', [
-      { name: 'id', type: TYPES.Int, value: id },
-    ]);
   } finally {
     conn.close();
   }
@@ -419,10 +358,6 @@ module.exports = {
   getServicePrincipalById,
   saveServicePrincipal,
   deleteServicePrincipal,
-  getManagedIdentities,
-  getManagedIdentityById,
-  saveManagedIdentity,
-  deleteManagedIdentity,
   createAnalysisRun,
   updateAnalysisRun,
   getAnalysisRuns,

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
-const { getManagedIdentityService } = require('../services/powerbiService');
+const { createPowerBIService } = require('../services/powerbiService');
 
 const activeAnalyses = new Map();
 
@@ -28,14 +28,18 @@ router.get('/', async (req, res) => {
 
 router.post('/run', async (req, res) => {
   try {
+    const sps = await db.getServicePrincipals();
+    if (sps.length === 0) return res.json({ success: false, message: 'No service principal configured. Go to Settings to add one.' });
+    const sp = sps[0];
+
     const runId = await db.createAnalysisRun({
-      spId: null,
-      spName: 'Managed Identity',
-      tenantId: process.env.ENTRA_TENANT_ID || 'managed-identity',
+      spId: sp.id,
+      spName: sp.name,
+      tenantId: sp.tenant_id,
       runBy: req.user ? req.user.name : 'anonymous',
     });
 
-    runAnalysis(runId);
+    runAnalysis(runId, sp);
     res.json({ success: true, runId });
   } catch (err) {
     res.json({ success: false, message: err.message });
@@ -91,12 +95,12 @@ router.post('/delete/:runId', async (req, res) => {
   }
 });
 
-async function runAnalysis(runId) {
+async function runAnalysis(runId, sp) {
   const progress = { status: 'running', progress: 0, message: 'Starting analysis...', current: 0, total: 0, cancelRequested: false };
   activeAnalyses.set(runId, progress);
 
   try {
-    const pbi = await getManagedIdentityService();
+    const pbi = createPowerBIService(sp);
 
     progress.message = 'Fetching workspaces...';
     const workspaces = await pbi.getWorkspaces();
@@ -425,4 +429,5 @@ router.get('/workspaces-for-grant', async (req, res) => {
 });
 
 module.exports = router;
+
 
