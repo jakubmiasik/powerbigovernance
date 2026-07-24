@@ -12,7 +12,6 @@ function getConfigHash(cfg) {
 const miCredential = new DefaultAzureCredential();
 const miTokenCache = {};
 
-// Token for System-assigned MI (fallback when no clientId configured)
 async function getManagedIdentityToken(scope) {
   const cached = miTokenCache[scope];
   if (cached && cached.expiresOn > Date.now() + 5 * 60 * 1000) {
@@ -26,57 +25,24 @@ async function getManagedIdentityToken(scope) {
   return result.token;
 }
 
-// Token for User-assigned MI — keyed by clientId + scope
-const { ManagedIdentityCredential } = require('@azure/identity');
-const uamiCredentials = new Map();
-const uamiTokenCache = {};
-
-function getUamiCredential(clientId) {
-  if (!uamiCredentials.has(clientId)) {
-    uamiCredentials.set(clientId, new ManagedIdentityCredential({ clientId }));
-  }
-  return uamiCredentials.get(clientId);
+async function getAccessTokenForMI() {
+  return getManagedIdentityToken('https://analysis.windows.net/powerbi/api/.default');
 }
 
-async function getUamiToken(clientId, scope) {
-  const cacheKey = clientId + '|' + scope;
-  const cached = uamiTokenCache[cacheKey];
-  if (cached && cached.expiresOn > Date.now() + 5 * 60 * 1000) {
-    return cached.token;
-  }
-  const credential = getUamiCredential(clientId);
-  const result = await credential.getToken(scope);
-  if (!result || !result.token) {
-    throw new Error('Failed to acquire User Assigned MI token (clientId: ' + clientId + ') for scope: ' + scope);
-  }
-  uamiTokenCache[cacheKey] = { token: result.token, expiresOn: result.expiresOnTimestamp };
-  return result.token;
+async function getFabricTokenForMI() {
+  return getManagedIdentityToken('https://api.fabric.microsoft.com/.default');
 }
 
-// Convenience wrappers — accept optional clientId
-// When clientId is provided: User Assigned MI; otherwise: System Assigned / DefaultAzureCredential
-async function getMIToken(clientId, scope) {
-  return clientId ? getUamiToken(clientId, scope) : getManagedIdentityToken(scope);
+async function getAzureManagementTokenForMI() {
+  return getManagedIdentityToken('https://management.azure.com/.default');
 }
 
-async function getAccessTokenForMI(clientId) {
-  return getMIToken(clientId, 'https://analysis.windows.net/powerbi/api/.default');
+async function getGraphTokenForMI() {
+  return getManagedIdentityToken('https://graph.microsoft.com/.default');
 }
 
-async function getFabricTokenForMI(clientId) {
-  return getMIToken(clientId, 'https://api.fabric.microsoft.com/.default');
-}
-
-async function getAzureManagementTokenForMI(clientId) {
-  return getMIToken(clientId, 'https://management.azure.com/.default');
-}
-
-async function getGraphTokenForMI(clientId) {
-  return getMIToken(clientId, 'https://graph.microsoft.com/.default');
-}
-
-async function getOneLakeTokenForMI(clientId) {
-  return getMIToken(clientId, 'https://storage.azure.com/.default');
+async function getOneLakeTokenForMI() {
+  return getManagedIdentityToken('https://storage.azure.com/.default');
 }
 
 function getConfidentialClient(spConfig) {

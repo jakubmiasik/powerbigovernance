@@ -335,79 +335,9 @@ async function runMigrations() {
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'enterprise_app_object_id') ALTER TABLE service_principals ADD enterprise_app_object_id NVARCHAR(255) NULL`);
     // Add timezone column to capacity_schedules if missing
     await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'timezone') ALTER TABLE capacity_schedules ADD timezone NVARCHAR(100) NULL`);
-    // Create managed_identities table if missing
-    await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'managed_identities') AND type = 'U')
-      CREATE TABLE managed_identities (
-        id INT IDENTITY(1,1) PRIMARY KEY,
-        name NVARCHAR(255) NOT NULL,
-        client_id NVARCHAR(255) NOT NULL,
-        created_at DATETIME DEFAULT GETUTCDATE(),
-        updated_at DATETIME DEFAULT GETUTCDATE()
-      )`);
     console.log('[DB] Migrations complete.');
   } catch (err) {
     console.warn('[DB] Migration warning:', err.message);
-  } finally {
-    conn.close();
-  }
-}
-
-// ── User Assigned Managed Identity CRUD ──
-
-async function getManagedIdentities() {
-  const conn = await getConnection();
-  try {
-    return await execSql(conn, 'SELECT id, name, client_id, created_at, updated_at FROM managed_identities ORDER BY name');
-  } catch (err) {
-    if (err.message && err.message.includes('Invalid object name')) return [];
-    throw err;
-  } finally {
-    conn.close();
-  }
-}
-
-async function getManagedIdentityById(id) {
-  const conn = await getConnection();
-  try {
-    const rows = await execSql(conn, 'SELECT id, name, client_id FROM managed_identities WHERE id = @id', [
-      { name: 'id', type: TYPES.Int, value: id },
-    ]);
-    return rows[0] || null;
-  } finally {
-    conn.close();
-  }
-}
-
-async function saveManagedIdentity({ id, name, clientId }) {
-  const conn = await getConnection();
-  try {
-    if (id) {
-      await execSql(conn,
-        `UPDATE managed_identities SET name=@name, client_id=@clientId, updated_at=GETUTCDATE() WHERE id=@id`,
-        [
-          { name: 'id', type: TYPES.Int, value: id },
-          { name: 'name', type: TYPES.NVarChar, value: name },
-          { name: 'clientId', type: TYPES.NVarChar, value: clientId },
-        ]);
-    } else {
-      await execSql(conn,
-        `INSERT INTO managed_identities (name, client_id) VALUES (@name, @clientId)`,
-        [
-          { name: 'name', type: TYPES.NVarChar, value: name },
-          { name: 'clientId', type: TYPES.NVarChar, value: clientId },
-        ]);
-    }
-  } finally {
-    conn.close();
-  }
-}
-
-async function deleteManagedIdentity(id) {
-  const conn = await getConnection();
-  try {
-    await execSql(conn, 'DELETE FROM managed_identities WHERE id=@id', [
-      { name: 'id', type: TYPES.Int, value: id },
-    ]);
   } finally {
     conn.close();
   }
@@ -419,10 +349,6 @@ module.exports = {
   getServicePrincipalById,
   saveServicePrincipal,
   deleteServicePrincipal,
-  getManagedIdentities,
-  getManagedIdentityById,
-  saveManagedIdentity,
-  deleteManagedIdentity,
   createAnalysisRun,
   updateAnalysisRun,
   getAnalysisRuns,

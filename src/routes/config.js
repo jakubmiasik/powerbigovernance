@@ -1,19 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
-const { getAccessTokenForSP, getAccessTokenForMI } = require('../services/authService');
+const { getAccessTokenForSP } = require('../services/authService');
 
 router.get('/', async (req, res) => {
   try {
-    const [servicePrincipals, managedIdentities] = await Promise.all([
-      db.getServicePrincipals(),
-      db.getManagedIdentities(),
-    ]);
+    const servicePrincipals = await db.getServicePrincipals();
     res.render('config', {
       title: 'Settings',
       user: req.user,
       servicePrincipals,
-      managedIdentities,
       success: req.flash('success'),
       error: req.flash('error'),
     });
@@ -22,14 +18,11 @@ router.get('/', async (req, res) => {
       title: 'Settings',
       user: req.user,
       servicePrincipals: [],
-      managedIdentities: [],
       success: [],
       error: [err.message],
     });
   }
 });
-
-// ── Service Principal CRUD (kept for migrate/delegated auth usage) ──
 
 router.post('/sp/save', async (req, res) => {
   const { id, name, tenantId, clientId, clientSecret, enterpriseAppObjectId } = req.body;
@@ -62,44 +55,6 @@ router.post('/sp/test/:id', async (req, res) => {
     if (!sp) return res.json({ success: false, message: 'Service principal not found.' });
     await getAccessTokenForSP(sp);
     res.json({ success: true, message: 'Successfully connected to Power BI API.' });
-  } catch (err) {
-    res.json({ success: false, message: err.message });
-  }
-});
-
-// ── User Assigned Managed Identity CRUD ──
-
-router.post('/mi/save', async (req, res) => {
-  const { id, name, clientId } = req.body;
-  if (!name || !clientId) {
-    req.flash('error', 'Name and Client ID are required.');
-    return res.redirect('/settings');
-  }
-  try {
-    await db.saveManagedIdentity({ id: id ? parseInt(id) : null, name, clientId });
-    req.flash('success', 'Managed Identity saved.');
-  } catch (err) {
-    req.flash('error', 'Failed to save: ' + err.message);
-  }
-  res.redirect('/settings');
-});
-
-router.post('/mi/delete/:id', async (req, res) => {
-  try {
-    await db.deleteManagedIdentity(parseInt(req.params.id));
-    req.flash('success', 'Managed Identity deleted.');
-  } catch (err) {
-    req.flash('error', 'Failed to delete: ' + err.message);
-  }
-  res.redirect('/settings');
-});
-
-router.post('/mi/test/:id', async (req, res) => {
-  try {
-    const mi = await db.getManagedIdentityById(parseInt(req.params.id));
-    if (!mi) return res.json({ success: false, message: 'Managed Identity not found.' });
-    await getAccessTokenForMI(mi.client_id);
-    res.json({ success: true, message: 'Successfully acquired Power BI token using User Assigned Managed Identity.' });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
