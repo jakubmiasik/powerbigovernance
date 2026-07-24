@@ -2,32 +2,20 @@
 <div class="row">
   <div class="col-lg-10 mx-auto">
     <h2><i class="bi bi-play-circle me-2"></i>Run Analysis</h2>
-    <p class="text-muted">Scan your Power BI tenant and save results to the database.</p>
+    <p class="text-muted">Scan your Power BI tenant using the app's Managed Identity and save results to the database.</p>
 
     <div class="card mb-4">
       <div class="card-header"><i class="bi bi-rocket me-2"></i>New Analysis</div>
       <div class="card-body">
-        <% if (!servicePrincipals.length) { %>
-          <div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle me-2"></i>No service principals configured. <a href="/settings">Add one in Settings</a> first.</div>
-        <% } else { %>
-          <div class="row align-items-end g-3">
-            <div class="col-md-5">
-              <label for="spSelect" class="form-label">Select Tenant / Service Principal</label>
-              <select class="form-select" id="spSelect">
-                <% servicePrincipals.forEach(function(sp) { %>
-                  <option value="<%= sp.id %>" data-eaoid="<%= sp.enterprise_app_object_id || '' %>"><%= sp.name %> (<%= sp.tenant_id %>)</option>
-                <% }) %>
-              </select>
-            </div>
-            <div class="col-md-3">
-              <button class="btn btn-primary w-100" onclick="startAnalysis()"><i class="bi bi-play-fill me-1"></i>Run Analysis</button>
-            </div>
-            <div class="col-md-4">
-              <button class="btn btn-outline-warning w-100" onclick="openGrantAccess()"><i class="bi bi-key me-1"></i>Grant SP Access to Workspaces</button>
-            </div>
+        <div class="d-flex align-items-center gap-3 flex-wrap">
+          <div>
+            <span class="badge bg-success me-2"><i class="bi bi-shield-check me-1"></i>Managed Identity</span>
+            <span class="text-muted small">Using the app's Managed Identity to access Power BI APIs. No credentials required.</span>
           </div>
-          <div class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>Use <strong>Grant SP Access</strong> to assign the service principal as Admin to workspaces it cannot yet read.</div>
-        <% } %>
+          <button class="btn btn-primary" onclick="startAnalysis()"><i class="bi bi-play-fill me-1"></i>Run Analysis</button>
+          <button class="btn btn-outline-warning" onclick="openGrantAccess()"><i class="bi bi-key me-1"></i>Grant MI Access to Workspaces</button>
+        </div>
+        <div class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>Use <strong>Grant MI Access</strong> to assign the Managed Identity as Admin to workspaces it cannot yet read. Requires Power BI Admin privileges.</div>
       </div>
     </div>
 
@@ -41,7 +29,7 @@
           <thead>
             <tr>
               <th>ID</th>
-              <th>Tenant</th>
+              <th>Identity</th>
               <th>Status</th>
               <th>Workspaces</th>
               <th>Reports</th>
@@ -116,7 +104,6 @@ var progressInterval = null;
 var activeRunId = null;
 
 async function startAnalysis() {
-  var spId = document.getElementById('spSelect').value;
   var modal = new bootstrap.Modal(document.getElementById('progressModal'));
   modal.show();
 
@@ -135,7 +122,7 @@ async function startAnalysis() {
     var response = await fetch('/analysis/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ spId: spId })
+      body: JSON.stringify({})
     });
     var data = await response.json();
 
@@ -211,13 +198,6 @@ async function deleteRun(runId) {
 
 // ── Grant SP Access ──
 async function openGrantAccess() {
-  var spOpt = document.getElementById('spSelect').selectedOptions[0];
-  var eaoid = spOpt ? spOpt.getAttribute('data-eaoid') : '';
-  if (!eaoid) {
-    alert('Enterprise Application Object ID not configured for this service principal. Go to Settings to add it.');
-    return;
-  }
-
   // Check if user is authorized as Power BI Admin
   try {
     var authResp = await fetch('/governance/grant-auth/status');

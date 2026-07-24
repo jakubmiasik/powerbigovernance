@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
-const { createPowerBIService } = require('../services/powerbiService');
+const { getManagedIdentityService } = require('../services/powerbiService');
 
 function categorizeItems(items) {
   const reports = [], datasets = [], dashboards = [], dataflows = [];
@@ -83,10 +83,8 @@ router.get('/:id', async (req, res) => {
       }
     }
 
-    // Fallback to live API
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) throw new Error('No service principal configured.');
-    const pbi = createPowerBIService(sps[0]);
+    // Fallback to live API via Managed Identity
+    const pbi = getManagedIdentityService();
     const [workspace, items, users] = await Promise.all([
       pbi.getWorkspaceById(workspaceId),
       pbi.getItemsByWorkspace(workspaceId),
@@ -106,9 +104,7 @@ router.get('/:id', async (req, res) => {
 
 router.get('/:workspaceId/datasets/:datasetId', async (req, res) => {
   try {
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) throw new Error('No service principal configured.');
-    const pbi = createPowerBIService(sps[0]);
+    const pbi = getManagedIdentityService();
     const { workspaceId, datasetId } = req.params;
     const [refreshHistory, datasources, parameters] = await Promise.all([
       pbi.getDatasetRefreshHistory(workspaceId, datasetId),
@@ -123,9 +119,7 @@ router.get('/:workspaceId/datasets/:datasetId', async (req, res) => {
 
 router.get('/:workspaceId/dashboards/:dashboardId', async (req, res) => {
   try {
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) throw new Error('No service principal configured.');
-    const pbi = createPowerBIService(sps[0]);
+    const pbi = getManagedIdentityService();
     const { workspaceId, dashboardId } = req.params;
     const tiles = await pbi.getDashboardTiles(workspaceId, dashboardId);
     res.render('workspaces/dashboard-detail', { title: 'Dashboard Tiles', user: req.user, workspaceId, dashboardId, tiles });
@@ -138,17 +132,7 @@ router.get('/:workspaceId/dashboards/:dashboardId', async (req, res) => {
 // Uses PBI Scanner API with lineage=true to get full workspace lineage, then filters for the item
 router.get('/:workspaceId/lineage/:itemId', async (req, res) => {
   try {
-    const globalRun = res.locals.globalRun;
-    let sp;
-    if (globalRun && globalRun.sp_id) {
-      sp = await db.getServicePrincipalById(globalRun.sp_id);
-    }
-    if (!sp) {
-      const sps = await db.getServicePrincipals();
-      if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
-      sp = sps[0];
-    }
-    const pbi = createPowerBIService(sp);
+    const pbi = getManagedIdentityService();
     const { workspaceId, itemId } = req.params;
     const allLinks = await pbi.getWorkspaceLineage(workspaceId);
     // Filter connections related to this item (as source or target)
@@ -164,11 +148,8 @@ router.get('/:workspaceId/lineage/:itemId', async (req, res) => {
 // Get storage breakdown for a workspace
 router.get('/:workspaceId/storage', async (req, res) => {
   try {
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
+    const pbi = getManagedIdentityService();
     const globalRun = res.locals.globalRun;
-    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
-    const pbi = createPowerBIService(sp);
 
     // Get items for this workspace (from saved data or live API)
     let items = [];
@@ -244,11 +225,7 @@ router.get('/:workspaceId/storage', async (req, res) => {
 // Get storage for a specific item
 router.get('/:workspaceId/storage/:itemId', async (req, res) => {
   try {
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
-    const globalRun = res.locals.globalRun;
-    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
-    const pbi = createPowerBIService(sp);
+    const pbi = getManagedIdentityService();
     const result = await pbi.getItemStorageSize(req.params.workspaceId, req.params.itemId);
     res.json({ success: true, ...result });
   } catch (err) {
@@ -261,11 +238,7 @@ router.get('/:workspaceId/storage/:itemId', async (req, res) => {
 // GET role assignments for a workspace
 router.get('/:workspaceId/roles', async (req, res) => {
   try {
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
-    const globalRun = res.locals.globalRun;
-    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
-    const pbi = createPowerBIService(sp);
+    const pbi = getManagedIdentityService();
     const roles = await pbi.getRoleAssignments(req.params.workspaceId);
     res.json({ success: true, roles });
   } catch (err) {
@@ -280,11 +253,7 @@ router.post('/:workspaceId/roles', async (req, res) => {
     if (!principalId || !principalType || !role) {
       return res.json({ success: false, message: 'Missing principalId, principalType, or role.' });
     }
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
-    const globalRun = res.locals.globalRun;
-    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
-    const pbi = createPowerBIService(sp);
+    const pbi = getManagedIdentityService();
     const result = await pbi.addRoleAssignment(req.params.workspaceId, principalId, principalType, role);
     res.json({ success: true, result });
   } catch (err) {
@@ -297,11 +266,7 @@ router.patch('/:workspaceId/roles/:roleAssignmentId', async (req, res) => {
   try {
     const { role } = req.body;
     if (!role) return res.json({ success: false, message: 'Missing role.' });
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
-    const globalRun = res.locals.globalRun;
-    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
-    const pbi = createPowerBIService(sp);
+    const pbi = getManagedIdentityService();
     const result = await pbi.updateRoleAssignment(req.params.workspaceId, req.params.roleAssignmentId, role);
     res.json({ success: true, result });
   } catch (err) {
@@ -312,11 +277,7 @@ router.patch('/:workspaceId/roles/:roleAssignmentId', async (req, res) => {
 // DELETE role assignment
 router.delete('/:workspaceId/roles/:roleAssignmentId', async (req, res) => {
   try {
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
-    const globalRun = res.locals.globalRun;
-    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
-    const pbi = createPowerBIService(sp);
+    const pbi = getManagedIdentityService();
     await pbi.deleteRoleAssignment(req.params.workspaceId, req.params.roleAssignmentId);
     res.json({ success: true });
   } catch (err) {
@@ -330,11 +291,7 @@ router.get('/:workspaceId/entra/search', async (req, res) => {
   try {
     const { q, type } = req.query;
     if (!q || q.length < 2) return res.json({ success: true, results: [] });
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) return res.json({ success: false, message: 'No SP configured.' });
-    const globalRun = res.locals.globalRun;
-    const sp = (globalRun && globalRun.sp_id) ? (await db.getServicePrincipalById(globalRun.sp_id)) || sps[0] : sps[0];
-    const pbi = createPowerBIService(sp);
+    const pbi = getManagedIdentityService();
 
     let results = [];
     if (type === 'ServicePrincipal') {
