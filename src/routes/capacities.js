@@ -3,8 +3,8 @@ const router = express.Router();
 const db = require('../services/databaseService');
 const { getManagedIdentityService } = require('../services/powerbiService');
 
-// Helper to get a PBI service instance using Managed Identity
-function getPbiService() {
+// Helper to get a PBI service instance using configured Managed Identity
+async function getPbiService() {
   return getManagedIdentityService();
 }
 

@@ -2,7 +2,7 @@
 <div class="row">
   <div class="col-lg-8 mx-auto">
     <h2><i class="bi bi-gear me-2"></i>Settings</h2>
-    <p class="text-muted">Manage service principals for Power BI API access.</p>
+    <p class="text-muted">Configure identity for Power BI API access.</p>
 
     <div id="flash-messages">
       <% if (success && success.length) { %>
@@ -23,23 +23,74 @@
       <% } %>
     </div>
 
+    <!-- ── User Assigned Managed Identities ── -->
     <div class="d-flex justify-content-between align-items-center mb-3">
-      <h5 class="mb-0"><i class="bi bi-key me-2"></i>Service Principals (<%= servicePrincipals.length %>)</h5>
-      <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#spModal" onclick="openSpForm()">
+      <h5 class="mb-0"><i class="bi bi-shield-check me-2 text-success"></i>User Assigned Managed Identities (<%= managedIdentities.length %>)</h5>
+      <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#miModal" onclick="openMiForm()">
+        <i class="bi bi-plus-lg me-1"></i>Add Managed Identity
+      </button>
+    </div>
+
+    <% if (!managedIdentities.length) { %>
+      <div class="alert alert-info mb-4">
+        <i class="bi bi-info-circle me-2"></i>No User Assigned Managed Identity configured.
+        Add one to enable API access via Managed Identity (recommended). The first entry will be used for all API calls.
+      </div>
+    <% } %>
+
+    <% managedIdentities.forEach(function(mi, idx) { %>
+      <div class="card mb-3 <%= idx === 0 ? 'border-success' : '' %>">
+        <div class="card-body py-2 d-flex justify-content-between align-items-center gap-3 flex-wrap">
+          <div>
+            <span class="<%= idx === 0 ? 'badge bg-success me-2' : 'badge bg-secondary me-2' %>"><%= idx === 0 ? 'Active' : 'Inactive' %></span>
+            <strong><i class="bi bi-shield-check me-1 text-success"></i><%= mi.name %></strong>
+            <span class="text-muted small ms-2 font-monospace"><%= mi.client_id %></span>
+          </div>
+          <div class="btn-group btn-group-sm ms-auto">
+            <button class="btn btn-outline-secondary" onclick="testMI(<%= mi.id %>)">
+              <i class="bi bi-plug me-1"></i>Test
+            </button>
+            <button
+              class="btn btn-outline-primary"
+              data-bs-toggle="modal"
+              data-bs-target="#miModal"
+              data-mi-id="<%= mi.id %>"
+              data-mi-name="<%= mi.name %>"
+              data-mi-client-id="<%= mi.client_id %>"
+              onclick="openMiForm(this)"
+            >
+              <i class="bi bi-pencil me-1"></i>Edit
+            </button>
+            <button class="btn btn-outline-danger rounded-0" onclick="if(confirm('Delete this Managed Identity?')) document.getElementById('delete-mi-<%= mi.id %>').submit()">
+              <i class="bi bi-trash me-1"></i>Delete
+            </button>
+          </div>
+          <form id="delete-mi-<%= mi.id %>" method="POST" action="/settings/mi/delete/<%= mi.id %>" style="display:none;"></form>
+        </div>
+        <div id="test-result-mi-<%= mi.id %>" class="px-3 pb-2" style="display:none;"></div>
+      </div>
+    <% }) %>
+
+    <div class="text-muted small mb-4">
+      <i class="bi bi-info-circle me-1"></i>
+      The first Managed Identity in the list is used for all API calls (workspaces, capacities, analysis, storage).
+      Additional entries are inactive. Only one identity can be active at a time.
+    </div>
+
+    <hr class="my-4">
+
+    <!-- ── Service Principals (kept for workspace migration delegated auth) ── -->
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h5 class="mb-0 text-muted"><i class="bi bi-key me-2"></i>Service Principals (<%= servicePrincipals.length %>) <small class="text-muted fw-normal">— used for workspace migration only</small></h5>
+      <button class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#spModal" onclick="openSpForm()">
         <i class="bi bi-plus-lg me-1"></i>Add Service Principal
       </button>
     </div>
 
-    <% if (!servicePrincipals.length) { %>
-      <div class="alert alert-warning">
-        <i class="bi bi-exclamation-triangle me-2"></i>No service principals configured. Add one to start using the Power BI API.
-      </div>
-    <% } %>
-
     <% servicePrincipals.forEach(function(sp) { %>
       <div class="card mb-3">
         <div class="card-body py-2 d-flex justify-content-between align-items-center gap-3 flex-wrap">
-          <h6 class="mb-0"><i class="bi bi-key me-2"></i><%= sp.name %></h6>
+          <h6 class="mb-0 text-muted"><i class="bi bi-key me-2"></i><%= sp.name %></h6>
           <div class="btn-group btn-group-sm ms-auto">
            <button class="btn btn-outline-secondary" onclick="testSP(<%= sp.id %>)">
              <i class="bi bi-plug me-1"></i>Test
@@ -57,7 +108,7 @@
            >
              <i class="bi bi-pencil me-1"></i>Edit
            </button>
-           <button class="btn btn-outline-danger" onclick="if(confirm('Delete this service principal?')) document.getElementById('delete-sp-<%= sp.id %>').submit()">
+           <button class="btn btn-outline-danger rounded-0" onclick="if(confirm('Delete this service principal?')) document.getElementById('delete-sp-<%= sp.id %>').submit()">
              <i class="bi bi-trash me-1"></i>Delete
            </button>
           </div>
@@ -69,6 +120,40 @@
   </div>
 </div>
 
+<!-- Managed Identity Modal -->
+<div class="modal fade" id="miModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="POST" action="/settings/mi/save">
+        <div class="modal-header">
+          <h5 class="modal-title" id="miModalTitle"><i class="bi bi-shield-check me-2 text-success"></i>Add Managed Identity</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" name="id" id="miId">
+          <div class="mb-3">
+            <label for="miName" class="form-label">Name</label>
+            <input type="text" class="form-control" id="miName" name="name" placeholder="e.g. Production MI" required>
+          </div>
+          <div class="mb-3">
+            <label for="miClientId" class="form-label">Client ID</label>
+            <input type="text" class="form-control font-monospace" id="miClientId" name="clientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
+            <div class="form-text">
+              The <strong>Client ID</strong> of the User Assigned Managed Identity.
+              Find it in Azure Portal → Managed Identities → your identity → Overview → Client ID.
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i>Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Service Principal Modal -->
 <div class="modal fade" id="spModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content">
@@ -98,7 +183,7 @@
           <div class="mb-3">
             <label for="spEnterpriseAppObjectId" class="form-label">Enterprise Application Object ID <span class="text-muted">(optional)</span></label>
             <input type="text" class="form-control" id="spEnterpriseAppObjectId" name="enterpriseAppObjectId" placeholder="Object ID from Enterprise Applications in Entra ID">
-            <div class="form-text">Used for granting workspace access to this service principal. Find it in Entra ID → Enterprise Applications → your app → Object ID.</div>
+            <div class="form-text">Used for granting workspace access. Find it in Entra ID → Enterprise Applications → your app → Object ID.</div>
           </div>
         </div>
         <div class="modal-footer">
@@ -111,6 +196,31 @@
 </div>
 
 <script>
+function openMiForm(button) {
+  var isEdit = !!button;
+  document.getElementById('miModalTitle').innerHTML = (isEdit ? '<i class="bi bi-shield-check me-2 text-success"></i>Edit Managed Identity' : '<i class="bi bi-shield-check me-2 text-success"></i>Add Managed Identity');
+  document.getElementById('miId').value = isEdit ? button.getAttribute('data-mi-id') || '' : '';
+  document.getElementById('miName').value = isEdit ? button.getAttribute('data-mi-name') || '' : '';
+  document.getElementById('miClientId').value = isEdit ? button.getAttribute('data-mi-client-id') || '' : '';
+}
+
+async function testMI(id) {
+  var resultDiv = document.getElementById('test-result-mi-' + id);
+  resultDiv.style.display = 'block';
+  resultDiv.innerHTML = '<div class="alert alert-info py-1 small"><i class="bi bi-hourglass-split me-2"></i>Testing Managed Identity token acquisition...</div>';
+  try {
+    var response = await fetch('/settings/mi/test/' + id, { method: 'POST' });
+    var data = await response.json();
+    if (data.success) {
+      resultDiv.innerHTML = '<div class="alert alert-success py-1 small"><i class="bi bi-check-circle me-2"></i>' + data.message + '</div>';
+    } else {
+      resultDiv.innerHTML = '<div class="alert alert-danger py-1 small"><i class="bi bi-x-circle me-2"></i>' + data.message + '</div>';
+    }
+  } catch (err) {
+    resultDiv.innerHTML = '<div class="alert alert-danger py-1 small"><i class="bi bi-x-circle me-2"></i>Test failed: ' + err.message + '</div>';
+  }
+}
+
 function openSpForm(button) {
   var isEdit = !!button;
   document.getElementById('spModalTitle').textContent = isEdit ? 'Edit Service Principal' : 'Add Service Principal';
