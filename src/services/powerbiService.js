@@ -95,15 +95,17 @@ async function fetchAllPaged(token, url, params = {}) {
 
 // createPowerBIService accepts an optional SP config.
 // When spConfig is null/undefined the service uses the App's Managed Identity.
+// Pass spConfig = { miClientId: 'xxx' } to use a specific User Assigned MI.
 function createPowerBIService(spConfig) {
-  const useMI = !spConfig;
+  const miClientId = spConfig ? (spConfig.miClientId || null) : null;
+  const useMI = !spConfig || !!spConfig.miClientId;
   let tokenPromise = null;
   let fabricTokenPromise = null;
   let fabricApiAvailable = null; // null = unknown, true/false = tested
 
   async function getToken() {
     if (!tokenPromise) {
-      tokenPromise = (useMI ? getAccessTokenForMI() : getAccessTokenForSP(spConfig)).catch(err => {
+      tokenPromise = (useMI ? getAccessTokenForMI(miClientId) : getAccessTokenForSP(spConfig)).catch(err => {
         tokenPromise = null;
         throw err;
       });
@@ -115,7 +117,7 @@ function createPowerBIService(spConfig) {
   // Separate token for Fabric Core API write operations (migration)
   async function getFabricToken() {
     if (!fabricTokenPromise) {
-      fabricTokenPromise = (useMI ? getFabricTokenForMI() : getFabricTokenForSP(spConfig)).catch(err => {
+      fabricTokenPromise = (useMI ? getFabricTokenForMI(miClientId) : getFabricTokenForSP(spConfig)).catch(err => {
         fabricTokenPromise = null;
         throw err;
       });
@@ -390,7 +392,7 @@ function createPowerBIService(spConfig) {
 
   // ── Azure Management API: Capacity operations (pause/resume/details) ──
   async function getArmToken() {
-    return useMI ? getAzureManagementTokenForMI() : getAzureManagementTokenForSP(spConfig);
+    return useMI ? getAzureManagementTokenForMI(miClientId) : getAzureManagementTokenForSP(spConfig);
   }
 
   // List all Fabric capacities in the subscription via ARM
@@ -457,7 +459,7 @@ function createPowerBIService(spConfig) {
   let graphTokenPromise = null;
   async function getGraphToken() {
     if (!graphTokenPromise) {
-      graphTokenPromise = (useMI ? getGraphTokenForMI() : getGraphTokenForSP(spConfig)).catch(err => {
+      graphTokenPromise = (useMI ? getGraphTokenForMI(miClientId) : getGraphTokenForSP(spConfig)).catch(err => {
         graphTokenPromise = null;
         throw err;
       });
@@ -505,7 +507,7 @@ function createPowerBIService(spConfig) {
 
   async function getOneLakeToken() {
     if (!onelakeTokenPromise) {
-      onelakeTokenPromise = (useMI ? getOneLakeTokenForMI() : getOneLakeTokenForSP(spConfig)).catch(err => {
+      onelakeTokenPromise = (useMI ? getOneLakeTokenForMI(miClientId) : getOneLakeTokenForSP(spConfig)).catch(err => {
         onelakeTokenPromise = null;
         throw err;
       });
@@ -661,10 +663,21 @@ function createPowerBIService(spConfig) {
   };
 }
 
-// Singleton MI service instance — shared across all routes
+// MI service singleton — reloads when DB config changes
 let _miService = null;
-function getManagedIdentityService() {
-  if (!_miService) _miService = createPowerBIService(null);
+let _miServiceClientId = undefined; // tracks which clientId the singleton was created with
+
+async function getManagedIdentityService() {
+  const db = require('./databaseService');
+  const identities = await db.getManagedIdentities();
+  const configured = identities.length > 0 ? identities[0] : null;
+  const clientId = configured ? configured.client_id : null;
+
+  // Reset singleton if the configured clientId changed
+  if (_miServiceClientId !== clientId) {
+    _miService = createPowerBIService(clientId ? { miClientId: clientId } : null);
+    _miServiceClientId = clientId;
+  }
   return _miService;
 }
 

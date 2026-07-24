@@ -96,7 +96,7 @@ async function runAnalysis(runId) {
   activeAnalyses.set(runId, progress);
 
   try {
-    const pbi = getManagedIdentityService();
+    const pbi = await getManagedIdentityService();
 
     progress.message = 'Fetching workspaces...';
     const workspaces = await pbi.getWorkspaces();
@@ -425,3 +425,4 @@ router.get('/workspaces-for-grant', async (req, res) => {
 });
 
 module.exports = router;
+
