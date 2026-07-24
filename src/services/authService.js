@@ -1,48 +1,10 @@
 const msal = require('@azure/msal-node');
-const { DefaultAzureCredential } = require('@azure/identity');
 
 // Cache MSAL apps by config hash to support multiple SPs
 const appCache = new Map();
 
 function getConfigHash(cfg) {
   return `${cfg.clientId}|${cfg.clientSecret}|${cfg.tenantId}`;
-}
-
-// ── Managed Identity token acquisition ──
-const miCredential = new DefaultAzureCredential();
-const miTokenCache = {};
-
-async function getManagedIdentityToken(scope) {
-  const cached = miTokenCache[scope];
-  if (cached && cached.expiresOn > Date.now() + 5 * 60 * 1000) {
-    return cached.token;
-  }
-  const result = await miCredential.getToken(scope);
-  if (!result || !result.token) {
-    throw new Error('Failed to acquire Managed Identity token for scope: ' + scope);
-  }
-  miTokenCache[scope] = { token: result.token, expiresOn: result.expiresOnTimestamp };
-  return result.token;
-}
-
-async function getAccessTokenForMI() {
-  return getManagedIdentityToken('https://analysis.windows.net/powerbi/api/.default');
-}
-
-async function getFabricTokenForMI() {
-  return getManagedIdentityToken('https://api.fabric.microsoft.com/.default');
-}
-
-async function getAzureManagementTokenForMI() {
-  return getManagedIdentityToken('https://management.azure.com/.default');
-}
-
-async function getGraphTokenForMI() {
-  return getManagedIdentityToken('https://graph.microsoft.com/.default');
-}
-
-async function getOneLakeTokenForMI() {
-  return getManagedIdentityToken('https://storage.azure.com/.default');
 }
 
 function getConfidentialClient(spConfig) {
@@ -190,5 +152,4 @@ async function getAzureManagementTokenForSP(spConfig) {
 module.exports = {
   getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP, getOneLakeTokenForSP, resetAuthCache,
   getDelegatedAuthUrl, acquireDelegatedToken,
-  getAccessTokenForMI, getFabricTokenForMI, getAzureManagementTokenForMI, getGraphTokenForMI, getOneLakeTokenForMI,
 };

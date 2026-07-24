@@ -139,15 +139,15 @@ async function createAnalysisRun({ spId, spName, tenantId, runBy }) {
   try {
     const rows = await execSql(
       conn,
-      // sp_id is nullable — pass NULL when using Managed Identity
-      `INSERT INTO analysis_runs (sp_name, tenant_id, run_by) OUTPUT INSERTED.id VALUES (@spName, @tenantId, @runBy)`,
+      `INSERT INTO analysis_runs (sp_id, sp_name, tenant_id, run_by) OUTPUT INSERTED.id VALUES (@spId, @spName, @tenantId, @runBy)`,
       [
+        { name: 'spId', type: TYPES.Int, value: spId },
         { name: 'spName', type: TYPES.NVarChar, value: spName },
         { name: 'tenantId', type: TYPES.NVarChar, value: tenantId },
         { name: 'runBy', type: TYPES.NVarChar, value: runBy },
       ]
     );
-    return rows[0] ? rows[0].id : null;
+    return rows[0]?.id;
   } finally {
     conn.close();
   }
