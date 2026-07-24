@@ -1,27 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
-const { createPowerBIService } = require('../services/powerbiService');
+const { getManagedIdentityService } = require('../services/powerbiService');
 
-// Helper to get a PBI service instance
-async function getPbiService(res) {
-  const globalRun = res.locals.globalRun;
-  let sp;
-  if (globalRun && globalRun.sp_id) {
-    sp = await db.getServicePrincipalById(globalRun.sp_id);
-  }
-  if (!sp) {
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) throw new Error('No service principal configured. Go to Settings to add one.');
-    sp = sps[0];
-  }
-  return createPowerBIService(sp);
+// Helper to get a PBI service instance using Managed Identity
+function getPbiService() {
+  return getManagedIdentityService();
 }
 
 // ── Capacities list page ──
 router.get('/', async (req, res) => {
   try {
-    const pbi = await getPbiService(res);
+    const pbi = getPbiService();
     const capacities = await pbi.getCapacities();
     res.render('capacities/list', {
       title: 'Capacities',
@@ -43,7 +33,7 @@ router.get('/', async (req, res) => {
 // ── Refresh capacities (AJAX) ──
 router.get('/refresh', async (req, res) => {
   try {
-    const pbi = await getPbiService(res);
+    const pbi = getPbiService();
     const capacities = await pbi.getCapacities();
     res.json({ success: true, capacities });
   } catch (err) {
@@ -54,7 +44,7 @@ router.get('/refresh', async (req, res) => {
 // ── Capacity detail page ──
 router.get('/:id', async (req, res) => {
   try {
-    const pbi = await getPbiService(res);
+    const pbi = getPbiService();
     const capacities = await pbi.getCapacities();
     const capacity = capacities.find(c => (c.id || '').toLowerCase() === req.params.id.toLowerCase());
     if (!capacity) {
@@ -119,7 +109,7 @@ router.post('/:name/suspend', async (req, res) => {
     if (!subscriptionId || !resourceGroup) {
       return res.json({ success: false, message: 'Subscription ID and Resource Group are required.' });
     }
-    const pbi = await getPbiService(res);
+    const pbi = getPbiService();
 
     // Check current state before executing
     try {
@@ -151,7 +141,7 @@ router.post('/:name/resume', async (req, res) => {
     if (!subscriptionId || !resourceGroup) {
       return res.json({ success: false, message: 'Subscription ID and Resource Group are required.' });
     }
-    const pbi = await getPbiService(res);
+    const pbi = getPbiService();
 
     // Check current state before executing
     try {
@@ -250,3 +240,4 @@ router.get('/history/:capacityName', async (req, res) => {
 });
 
 module.exports = router;
+
