@@ -1,6 +1,9 @@
 const msal = require('@azure/msal-node');
+<<<<<<< HEAD
 const { DefaultAzureCredential } = require('@azure/identity');
 const { SecretClient } = require('@azure/keyvault-secrets');
+=======
+>>>>>>> origin/main
 
 // ── Key Vault: resolve SP client secret at runtime ──
 const kvClientCache = new Map(); // kvName → SecretClient
@@ -50,8 +53,13 @@ function getConfigHash(cfg) {
   return `${cfg.clientId}|${cfg.clientSecret}|${cfg.tenantId}`;
 }
 
+<<<<<<< HEAD
 async function getConfidentialClient(spConfig) {
   if (!spConfig || !spConfig.client_id || !spConfig.tenant_id) {
+=======
+function getConfidentialClient(spConfig) {
+  if (!spConfig || !spConfig.client_id || !spConfig.client_secret || !spConfig.tenant_id) {
+>>>>>>> origin/main
     throw new Error('Service principal is not configured. Go to Settings to add one.');
   }
 
@@ -162,5 +170,8 @@ module.exports = {
   getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP,
   getGraphTokenForSP, getOneLakeTokenForSP, resetAuthCache,
   getDelegatedAuthUrl, acquireDelegatedToken,
+<<<<<<< HEAD
   getSecretFromKeyVault,
+=======
+>>>>>>> origin/main
 };

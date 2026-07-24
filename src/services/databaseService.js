@@ -143,15 +143,15 @@ async function createAnalysisRun({ spId, spName, tenantId, runBy }) {
   try {
     const rows = await execSql(
       conn,
-      // sp_id is nullable — pass NULL when using Managed Identity
-      `INSERT INTO analysis_runs (sp_name, tenant_id, run_by) OUTPUT INSERTED.id VALUES (@spName, @tenantId, @runBy)`,
+      `INSERT INTO analysis_runs (sp_id, sp_name, tenant_id, run_by) OUTPUT INSERTED.id VALUES (@spId, @spName, @tenantId, @runBy)`,
       [
+        { name: 'spId', type: TYPES.Int, value: spId },
         { name: 'spName', type: TYPES.NVarChar, value: spName },
         { name: 'tenantId', type: TYPES.NVarChar, value: tenantId },
         { name: 'runBy', type: TYPES.NVarChar, value: runBy },
       ]
     );
-    return rows[0] ? rows[0].id : null;
+    return rows[0]?.id;
   } finally {
     conn.close();
   }
@@ -339,11 +339,14 @@ async function runMigrations() {
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'enterprise_app_object_id') ALTER TABLE service_principals ADD enterprise_app_object_id NVARCHAR(255) NULL`);
     // Add timezone column to capacity_schedules if missing
     await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'timezone') ALTER TABLE capacity_schedules ADD timezone NVARCHAR(100) NULL`);
+<<<<<<< HEAD
     // Add Key Vault columns to service_principals if missing
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'key_vault_name') ALTER TABLE service_principals ADD key_vault_name NVARCHAR(255) NULL`);
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'key_vault_secret_name') ALTER TABLE service_principals ADD key_vault_secret_name NVARCHAR(255) NULL`);
     // Make client_secret nullable (it may already be)
     await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'client_secret' AND is_nullable = 0) ALTER TABLE service_principals ALTER COLUMN client_secret NVARCHAR(MAX) NULL`).catch(() => {});
+=======
+>>>>>>> origin/main
     console.log('[DB] Migrations complete.');
   } catch (err) {
     console.warn('[DB] Migration warning:', err.message);

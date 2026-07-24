@@ -15,10 +15,14 @@ function ensureNotCancelled(progress) {
 
 router.get('/', async (req, res) => {
   try {
-    const runs = await db.getAnalysisRuns();
+    const [servicePrincipals, runs] = await Promise.all([
+      db.getServicePrincipals(),
+      db.getAnalysisRuns(),
+    ]);
     res.render('analysis/index', {
       title: 'Run Analysis',
       user: req.user,
+      servicePrincipals,
       runs,
     });
   } catch (err) {
@@ -27,16 +31,26 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/run', async (req, res) => {
+  const spId = parseInt(req.body.spId);
   try {
+<<<<<<< HEAD
     const sps = await db.getServicePrincipals();
     if (sps.length === 0) return res.json({ success: false, message: 'No service principal configured. Go to Settings to add one.' });
     const sp = sps[0];
+=======
+    const sp = await db.getServicePrincipalById(spId);
+    if (!sp) return res.json({ success: false, message: 'Service principal not found.' });
+>>>>>>> origin/main
 
     const runId = await db.createAnalysisRun({
       spId: sp.id,
       spName: sp.name,
       tenantId: sp.tenant_id,
+<<<<<<< HEAD
       runBy: req.user ? req.user.name : 'anonymous',
+=======
+      runBy: req.user?.name || 'anonymous',
+>>>>>>> origin/main
     });
 
     runAnalysis(runId, sp);
@@ -414,9 +428,8 @@ router.get('/workspaces-for-grant', async (req, res) => {
     if (!run || !run.results_json) return res.json({ success: false, message: 'No results available.' });
 
     const results = JSON.parse(run.results_json);
-    // Try to get enterprise app object ID from a configured SP if available (used for grant access)
     const sps = await db.getServicePrincipals();
-    const eaoid = (sps.length > 0) ? (sps[0].enterprise_app_object_id || '') : '';
+    const eaoid = (sps.length > 0) ? sps[0].enterprise_app_object_id : '';
 
     const workspaces = (results.workspaces || []).map(ws => ({
       id: ws.id, name: ws.name || ws.displayName || 'Unnamed', state: ws.state || 'Active',
@@ -429,5 +442,8 @@ router.get('/workspaces-for-grant', async (req, res) => {
 });
 
 module.exports = router;
+<<<<<<< HEAD
 
 
+=======
+>>>>>>> origin/main
