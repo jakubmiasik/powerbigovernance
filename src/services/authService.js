@@ -1,9 +1,6 @@
 const msal = require('@azure/msal-node');
-<<<<<<< HEAD
 const { DefaultAzureCredential } = require('@azure/identity');
 const { SecretClient } = require('@azure/keyvault-secrets');
-=======
->>>>>>> origin/main
 
 // ── Key Vault: resolve SP client secret at runtime ──
 const kvClientCache = new Map(); // kvName → SecretClient
@@ -33,17 +30,12 @@ async function getSecretFromKeyVault(keyVaultName, secretName) {
   return secret.value;
 }
 
-// Resolve the client secret for a SP config:
-// - If key_vault_name + key_vault_secret_name are set → fetch from KV
-// - Otherwise → use client_secret from DB
+// Resolve the client secret for a SP config — ALWAYS from Key Vault
 async function resolveClientSecret(spConfig) {
-  if (spConfig.key_vault_name && spConfig.key_vault_secret_name) {
-    return getSecretFromKeyVault(spConfig.key_vault_name, spConfig.key_vault_secret_name);
+  if (!spConfig.key_vault_name || !spConfig.key_vault_secret_name) {
+    throw new Error('Service principal must have Key Vault configured. Open Settings and set the Key Vault Name and Secret Name.');
   }
-  if (!spConfig.client_secret) {
-    throw new Error('Service principal has no client secret. Configure a Key Vault secret or enter the secret directly.');
-  }
-  return spConfig.client_secret;
+  return getSecretFromKeyVault(spConfig.key_vault_name, spConfig.key_vault_secret_name);
 }
 
 // ── Cache MSAL apps by config hash to support multiple SPs ──
@@ -53,13 +45,8 @@ function getConfigHash(cfg) {
   return `${cfg.clientId}|${cfg.clientSecret}|${cfg.tenantId}`;
 }
 
-<<<<<<< HEAD
 async function getConfidentialClient(spConfig) {
   if (!spConfig || !spConfig.client_id || !spConfig.tenant_id) {
-=======
-function getConfidentialClient(spConfig) {
-  if (!spConfig || !spConfig.client_id || !spConfig.client_secret || !spConfig.tenant_id) {
->>>>>>> origin/main
     throw new Error('Service principal is not configured. Go to Settings to add one.');
   }
 
@@ -170,8 +157,5 @@ module.exports = {
   getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP,
   getGraphTokenForSP, getOneLakeTokenForSP, resetAuthCache,
   getDelegatedAuthUrl, acquireDelegatedToken,
-<<<<<<< HEAD
   getSecretFromKeyVault,
-=======
->>>>>>> origin/main
 };
