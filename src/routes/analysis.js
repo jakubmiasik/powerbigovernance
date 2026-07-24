@@ -15,11 +15,15 @@ function ensureNotCancelled(progress) {
 
 router.get('/', async (req, res) => {
   try {
-    const runs = await db.getAnalysisRuns();
+    const [runs, servicePrincipals] = await Promise.all([
+      db.getAnalysisRuns(),
+      db.getServicePrincipals(),
+    ]);
     res.render('analysis/index', {
       title: 'Run Analysis',
       user: req.user,
       runs,
+      servicePrincipals,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
