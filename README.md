@@ -116,3 +116,19 @@ src/
 | `GET /dashboards/{id}/tiles` | Dashboard tiles |
 | `GET /capacities` | Available capacities |
 | `POST /admin/workspaces/getInfo` | Workspace scanner |
+
+## Operational Notes
+
+- The application now validates production-critical configuration during startup. In production, set `SESSION_SECRET`, `SQL_SERVER`, and `SQL_DATABASE` explicitly.
+- Analysis run metadata used by the global selector is cached briefly (`RUN_CACHE_TTL_MS`, default 30000) to avoid querying Azure SQL on every request.
+- Startup side effects are isolated in `src/bootstrap.js`; importing `src/app.js` no longer starts the scheduler or runs migrations, which makes HTTP tests safer.
+- API calls use bounded retry behavior for transient HTTP failures (`408`, `429`, and `5xx`) and respect `Retry-After` when present.
+- Basic security headers, JSON/form body limits, and a lightweight `/api` rate limiter are enabled without adding runtime dependencies.
+
+## Development Checks
+
+```bash
+npm run check:js
+npm test
+npm run check
+```
