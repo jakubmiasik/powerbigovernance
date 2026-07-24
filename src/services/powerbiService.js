@@ -1,8 +1,5 @@
 const axios = require('axios');
-const {
-  getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP, getOneLakeTokenForSP,
-  getAccessTokenForMI, getFabricTokenForMI, getAzureManagementTokenForMI, getGraphTokenForMI, getOneLakeTokenForMI,
-} = require('./authService');
+const { getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP, getOneLakeTokenForSP } = require('./authService');
 
 const PBI_BASE = 'https://api.powerbi.com/v1.0/myorg';
 const PBI_ADMIN = PBI_BASE + '/admin';
@@ -93,17 +90,14 @@ async function fetchAllPaged(token, url, params = {}) {
   return allItems;
 }
 
-// createPowerBIService accepts an optional SP config.
-// When spConfig is null/undefined the service uses the App's Managed Identity.
 function createPowerBIService(spConfig) {
-  const useMI = !spConfig;
   let tokenPromise = null;
   let fabricTokenPromise = null;
   let fabricApiAvailable = null; // null = unknown, true/false = tested
 
   async function getToken() {
     if (!tokenPromise) {
-      tokenPromise = (useMI ? getAccessTokenForMI() : getAccessTokenForSP(spConfig)).catch(err => {
+      tokenPromise = getAccessTokenForSP(spConfig).catch(err => {
         tokenPromise = null;
         throw err;
       });
@@ -115,7 +109,7 @@ function createPowerBIService(spConfig) {
   // Separate token for Fabric Core API write operations (migration)
   async function getFabricToken() {
     if (!fabricTokenPromise) {
-      fabricTokenPromise = (useMI ? getFabricTokenForMI() : getFabricTokenForSP(spConfig)).catch(err => {
+      fabricTokenPromise = getFabricTokenForSP(spConfig).catch(err => {
         fabricTokenPromise = null;
         throw err;
       });
@@ -390,7 +384,7 @@ function createPowerBIService(spConfig) {
 
   // ── Azure Management API: Capacity operations (pause/resume/details) ──
   async function getArmToken() {
-    return useMI ? getAzureManagementTokenForMI() : getAzureManagementTokenForSP(spConfig);
+    return getAzureManagementTokenForSP(spConfig);
   }
 
   // List all Fabric capacities in the subscription via ARM
@@ -457,7 +451,7 @@ function createPowerBIService(spConfig) {
   let graphTokenPromise = null;
   async function getGraphToken() {
     if (!graphTokenPromise) {
-      graphTokenPromise = (useMI ? getGraphTokenForMI() : getGraphTokenForSP(spConfig)).catch(err => {
+      graphTokenPromise = getGraphTokenForSP(spConfig).catch(err => {
         graphTokenPromise = null;
         throw err;
       });
@@ -505,7 +499,7 @@ function createPowerBIService(spConfig) {
 
   async function getOneLakeToken() {
     if (!onelakeTokenPromise) {
-      onelakeTokenPromise = (useMI ? getOneLakeTokenForMI() : getOneLakeTokenForSP(spConfig)).catch(err => {
+      onelakeTokenPromise = getOneLakeTokenForSP(spConfig).catch(err => {
         onelakeTokenPromise = null;
         throw err;
       });
@@ -661,11 +655,4 @@ function createPowerBIService(spConfig) {
   };
 }
 
-// Singleton MI service instance — shared across all routes
-let _miService = null;
-function getManagedIdentityService() {
-  if (!_miService) _miService = createPowerBIService(null);
-  return _miService;
-}
-
-module.exports = { createPowerBIService, getManagedIdentityService };
+module.exports = { createPowerBIService };

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
-const { getManagedIdentityService } = require('../services/powerbiService');
+const { createPowerBIService } = require('../services/powerbiService');
 
 const activeAnalyses = new Map();
 
@@ -15,10 +15,14 @@ function ensureNotCancelled(progress) {
 
 router.get('/', async (req, res) => {
   try {
-    const runs = await db.getAnalysisRuns();
+    const [servicePrincipals, runs] = await Promise.all([
+      db.getServicePrincipals(),
+      db.getAnalysisRuns(),
+    ]);
     res.render('analysis/index', {
       title: 'Run Analysis',
       user: req.user,
+      servicePrincipals,
       runs,
     });
   } catch (err) {
@@ -27,15 +31,19 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/run', async (req, res) => {
+  const spId = parseInt(req.body.spId);
   try {
+    const sp = await db.getServicePrincipalById(spId);
+    if (!sp) return res.json({ success: false, message: 'Service principal not found.' });
+
     const runId = await db.createAnalysisRun({
-      spId: null,
-      spName: 'Managed Identity',
-      tenantId: process.env.ENTRA_TENANT_ID || 'managed-identity',
-      runBy: req.user ? req.user.name : 'anonymous',
+      spId: sp.id,
+      spName: sp.name,
+      tenantId: sp.tenant_id,
+      runBy: req.user?.name || 'anonymous',
     });
 
-    runAnalysis(runId);
+    runAnalysis(runId, sp);
     res.json({ success: true, runId });
   } catch (err) {
     res.json({ success: false, message: err.message });
@@ -91,12 +99,12 @@ router.post('/delete/:runId', async (req, res) => {
   }
 });
 
-async function runAnalysis(runId) {
+async function runAnalysis(runId, sp) {
   const progress = { status: 'running', progress: 0, message: 'Starting analysis...', current: 0, total: 0, cancelRequested: false };
   activeAnalyses.set(runId, progress);
 
   try {
-    const pbi = getManagedIdentityService();
+    const pbi = createPowerBIService(sp);
 
     progress.message = 'Fetching workspaces...';
     const workspaces = await pbi.getWorkspaces();
@@ -410,9 +418,8 @@ router.get('/workspaces-for-grant', async (req, res) => {
     if (!run || !run.results_json) return res.json({ success: false, message: 'No results available.' });
 
     const results = JSON.parse(run.results_json);
-    // Try to get enterprise app object ID from a configured SP if available (used for grant access)
     const sps = await db.getServicePrincipals();
-    const eaoid = (sps.length > 0) ? (sps[0].enterprise_app_object_id || '') : '';
+    const eaoid = (sps.length > 0) ? sps[0].enterprise_app_object_id : '';
 
     const workspaces = (results.workspaces || []).map(ws => ({
       id: ws.id, name: ws.name || ws.displayName || 'Unnamed', state: ws.state || 'Active',
