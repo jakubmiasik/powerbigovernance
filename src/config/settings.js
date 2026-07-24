@@ -22,6 +22,7 @@ function getConfig() {
   const fileConfig = loadFileConfig();
 
   return {
+    env: process.env.NODE_ENV || 'development',
     // Entra ID web app (user sign-in)
     entra: {
       clientId: fileConfig.entraClientId || process.env.ENTRA_CLIENT_ID || '',
@@ -38,7 +39,35 @@ function getConfig() {
       secret: process.env.SESSION_SECRET || 'dev-secret-change-me',
     },
     port: parseInt(process.env.PORT || '3000', 10),
+    sql: {
+      server: process.env.SQL_SERVER || '',
+      database: process.env.SQL_DATABASE || '',
+    },
+    cache: {
+      runCacheTtlMs: parseInt(process.env.RUN_CACHE_TTL_MS || '30000', 10),
+    },
   };
+}
+
+function validateConfig({ requireProductionSecrets = false } = {}) {
+  const cfg = getConfig();
+  const errors = [];
+
+  if (!Number.isInteger(cfg.port) || cfg.port <= 0) {
+    errors.push('PORT must be a positive integer.');
+  }
+  if (requireProductionSecrets && (!cfg.session.secret || cfg.session.secret === 'dev-secret-change-me')) {
+    errors.push('SESSION_SECRET must be set to a strong value in production.');
+  }
+  if (requireProductionSecrets && (!cfg.sql.server || !cfg.sql.database)) {
+    errors.push('SQL_SERVER and SQL_DATABASE must be configured in production.');
+  }
+
+  if (errors.length) {
+    throw new Error('Invalid configuration: ' + errors.join(' '));
+  }
+
+  return cfg;
 }
 
 function updatePowerBIConfig(config) {
@@ -73,4 +102,5 @@ module.exports = {
   updateEntraConfig,
   isEntraConfigured,
   isPowerBIConfigured,
+  validateConfig,
 };

@@ -10,61 +10,88 @@ const FABRIC_ADMIN = FABRIC_CORE + '/admin';
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 const ARM_BASE = 'https://management.azure.com';
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getRetryDelay(err, attempt) {
+  const status = err.response?.status;
+  if (![408, 429, 500, 502, 503, 504].includes(status)) return null;
+  const retryAfter = Number.parseInt(err.response?.headers?.['retry-after'], 10);
+  if (Number.isInteger(retryAfter) && retryAfter > 0) {
+    return retryAfter * 1000;
+  }
+  return Math.min(1000 * Math.pow(2, attempt), 10000);
+}
+
+async function withRetry(operation) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await operation();
+    } catch (err) {
+      lastError = err;
+      const delay = getRetryDelay(err, attempt);
+      if (delay === null || attempt === 2) break;
+      await sleep(delay);
+    }
+  }
+  throw lastError;
+}
+
+function buildApiError(err) {
+  const status = err.response?.status;
+  const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+  return new Error('API error (' + (status || 'unknown') + '): ' + message);
+}
+
 async function safeGet(token, url, params = {}) {
   try {
-    const response = await axios.get(url, {
+    const response = await withRetry(() => axios.get(url, {
       headers: { Authorization: 'Bearer ' + token },
       params,
       timeout: 60000,
-    });
+    }));
     return response.data;
   } catch (err) {
-    const status = err.response?.status;
-    const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-    throw new Error('API error (' + (status || 'unknown') + '): ' + message);
+    throw buildApiError(err);
   }
 }
 
 async function safePost(token, url, body, params = {}) {
   try {
-    const response = await axios.post(url, body, {
+    const response = await withRetry(() => axios.post(url, body, {
       headers: { Authorization: 'Bearer ' + token },
       params,
       timeout: 60000,
-    });
+    }));
     return response.data;
   } catch (err) {
-    const status = err.response?.status;
-    const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-    throw new Error('API error (' + (status || 'unknown') + '): ' + message);
+    throw buildApiError(err);
   }
 }
 
 async function safeDelete(token, url) {
   try {
-    const response = await axios.delete(url, {
+    const response = await withRetry(() => axios.delete(url, {
       headers: { Authorization: 'Bearer ' + token },
       timeout: 60000,
-    });
+    }));
     return response.data;
   } catch (err) {
-    const status = err.response?.status;
-    const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-    throw new Error('API error (' + (status || 'unknown') + '): ' + message);
+    throw buildApiError(err);
   }
 }
 
 async function safePatch(token, url, body) {
   try {
-    const response = await axios.patch(url, body, {
+    const response = await withRetry(() => axios.patch(url, body, {
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
       timeout: 60000,
-    });
+    }));
     return response.data;
   } catch (err) {
-    const status = err.response?.status;
-    const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-    throw new Error('API error (' + (status || 'unknown') + '): ' + message);
+    throw buildApiError(err);
   }
 }
 

@@ -5,7 +5,10 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "check": "npm run check:js && npm test",
+    "check:js": "bash scripts/check-js.sh"
   },
   "dependencies": {
     "@azure/identity": "^4.13.1",
