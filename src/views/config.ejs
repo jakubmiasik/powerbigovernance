@@ -2,7 +2,11 @@
 <div class="row">
   <div class="col-lg-8 mx-auto">
     <h2><i class="bi bi-gear me-2"></i>Settings</h2>
+<<<<<<< HEAD
+    <p class="text-muted">Configure Service Principals for Power BI API access.</p>
+=======
     <p class="text-muted">Manage service principals for Power BI API access.</p>
+>>>>>>> origin/main
 
     <div id="flash-messages">
       <% if (success && success.length) { %>
@@ -23,14 +27,61 @@
       <% } %>
     </div>
 
+<<<<<<< HEAD
+    <!-- ── Service Principals ── -->
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h5 class="mb-0"><i class="bi bi-key me-2 text-primary"></i>Service Principals (<%= servicePrincipals.length %>)</h5>
+=======
     <div class="d-flex justify-content-between align-items-center mb-3">
       <h5 class="mb-0"><i class="bi bi-key me-2"></i>Service Principals (<%= servicePrincipals.length %>)</h5>
+>>>>>>> origin/main
       <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#spModal" onclick="openSpForm()">
         <i class="bi bi-plus-lg me-1"></i>Add Service Principal
       </button>
     </div>
 
     <% if (!servicePrincipals.length) { %>
+<<<<<<< HEAD
+      <div class="alert alert-info mb-4">
+        <i class="bi bi-info-circle me-2"></i>No Service Principal configured yet.
+        Add one to enable Power BI and Fabric API access. The first entry will be used for all API calls.
+      </div>
+    <% } %>
+
+    <% servicePrincipals.forEach(function(sp, idx) { %>
+      <div class="card mb-3 <%= idx === 0 ? 'border-primary' : '' %>">
+        <div class="card-body py-2 d-flex justify-content-between align-items-center gap-3 flex-wrap">
+          <div>
+            <span class="<%= idx === 0 ? 'badge bg-primary me-2' : 'badge bg-secondary me-2' %>"><%= idx === 0 ? 'Active' : 'Inactive' %></span>
+            <strong><i class="bi bi-key me-1 text-primary"></i><%= sp.name %></strong>
+            <span class="text-muted small ms-2 font-monospace"><%= sp.client_id %></span>
+            <% if (sp.key_vault_name) { %>
+              <span class="badge bg-info text-dark ms-2"><i class="bi bi-safe me-1"></i>Key Vault</span>
+            <% } %>
+          </div>
+          <div class="btn-group btn-group-sm ms-auto">
+            <button class="btn btn-outline-secondary" onclick="testSP(<%= sp.id %>)">
+              <i class="bi bi-plug me-1"></i>Test
+            </button>
+            <button
+              class="btn btn-outline-primary"
+              data-bs-toggle="modal"
+              data-bs-target="#spModal"
+              data-sp-id="<%= sp.id %>"
+              data-sp-name="<%= sp.name %>"
+              data-sp-tenant-id="<%= sp.tenant_id %>"
+              data-sp-client-id="<%= sp.client_id %>"
+              data-sp-eaoid="<%= sp.enterprise_app_object_id || '' %>"
+              data-sp-kv-name="<%= sp.key_vault_name || '' %>"
+              data-sp-kv-secret="<%= sp.key_vault_secret_name || '' %>"
+              onclick="openSpForm(this)"
+            >
+              <i class="bi bi-pencil me-1"></i>Edit
+            </button>
+            <button class="btn btn-outline-danger rounded-0" onclick="if(confirm('Delete this service principal?')) document.getElementById('delete-sp-<%= sp.id %>').submit()">
+              <i class="bi bi-trash me-1"></i>Delete
+            </button>
+=======
       <div class="alert alert-warning">
         <i class="bi bi-exclamation-triangle me-2"></i>No service principals configured. Add one to start using the Power BI API.
       </div>
@@ -60,21 +111,31 @@
            <button class="btn btn-outline-danger" onclick="if(confirm('Delete this service principal?')) document.getElementById('delete-sp-<%= sp.id %>').submit()">
              <i class="bi bi-trash me-1"></i>Delete
            </button>
+>>>>>>> origin/main
           </div>
           <form id="delete-sp-<%= sp.id %>" method="POST" action="/settings/sp/delete/<%= sp.id %>" style="display:none;"></form>
         </div>
         <div id="test-result-<%= sp.id %>" class="px-3 pb-2" style="display:none;"></div>
       </div>
     <% }) %>
+
+<<<<<<< HEAD
+    <div class="text-muted small mb-4">
+      <i class="bi bi-info-circle me-1"></i>
+      The first Service Principal in the list is used for all API calls (workspaces, capacities, analysis, storage).
+    </div>
   </div>
 </div>
 
+<!-- Service Principal Modal -->
+=======
+>>>>>>> origin/main
 <div class="modal fade" id="spModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog">
+  <div class="modal-dialog modal-lg">
     <div class="modal-content">
       <form method="POST" action="/settings/sp/save">
         <div class="modal-header">
-          <h5 class="modal-title" id="spModalTitle">Add Service Principal</h5>
+          <h5 class="modal-title" id="spModalTitle"><i class="bi bi-key me-2"></i>Add Service Principal</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
@@ -83,22 +144,60 @@
             <label for="spName" class="form-label">Name</label>
             <input type="text" class="form-control" id="spName" name="name" placeholder="e.g. Production Tenant" required>
           </div>
-          <div class="mb-3">
-            <label for="spTenantId" class="form-label">Tenant ID</label>
-            <input type="text" class="form-control" id="spTenantId" name="tenantId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
+          <div class="row">
+            <div class="col-md-6 mb-3">
+              <label for="spTenantId" class="form-label">Tenant ID</label>
+              <input type="text" class="form-control font-monospace" id="spTenantId" name="tenantId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
+            </div>
+            <div class="col-md-6 mb-3">
+              <label for="spClientId" class="form-label">Client ID (Application ID)</label>
+              <input type="text" class="form-control font-monospace" id="spClientId" name="clientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
+            </div>
           </div>
+
+          <hr class="my-3">
+          <p class="text-muted small mb-3">
+            <i class="bi bi-info-circle me-1"></i>
+            Provide either a <strong>Client Secret directly</strong>, or configure <strong>Key Vault</strong> to retrieve it securely at runtime.
+            If both are provided, Key Vault takes precedence.
+          </p>
+
           <div class="mb-3">
-            <label for="spClientId" class="form-label">Client ID (Application ID)</label>
-            <input type="text" class="form-control" id="spClientId" name="clientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
+            <label for="spClientSecret" class="form-label">Client Secret <span class="text-muted">(optional if using Key Vault)</span></label>
+            <input type="password" class="form-control" id="spClientSecret" name="clientSecret" placeholder="Leave blank to keep existing secret or use Key Vault">
           </div>
-          <div class="mb-3">
-            <label for="spClientSecret" class="form-label">Client Secret</label>
-            <input type="password" class="form-control" id="spClientSecret" name="clientSecret" placeholder="Enter client secret" required>
+
+          <div class="card bg-body-tertiary mb-3">
+            <div class="card-body">
+              <h6 class="card-title"><i class="bi bi-safe me-2 text-info"></i>Key Vault (optional)</h6>
+              <div class="row">
+                <div class="col-md-6 mb-3 mb-md-0">
+                  <label for="spKvName" class="form-label">Key Vault Name</label>
+                  <input type="text" class="form-control" id="spKvName" name="keyVaultName" placeholder="my-key-vault">
+                  <div class="form-text">Azure Key Vault name (without .vault.azure.net)</div>
+                </div>
+                <div class="col-md-6">
+                  <label for="spKvSecret" class="form-label">Secret Name</label>
+                  <input type="text" class="form-control" id="spKvSecret" name="keyVaultSecretName" placeholder="pbi-sp-client-secret">
+                  <div class="form-text">Name of the secret in Key Vault containing the SP client secret</div>
+                </div>
+              </div>
+              <div class="form-text mt-2">
+                <i class="bi bi-shield-check me-1 text-success"></i>
+                The App Service managed identity must have <strong>Key Vault Secrets User</strong> role on the vault.
+              </div>
+            </div>
           </div>
+
           <div class="mb-3">
             <label for="spEnterpriseAppObjectId" class="form-label">Enterprise Application Object ID <span class="text-muted">(optional)</span></label>
+<<<<<<< HEAD
+            <input type="text" class="form-control font-monospace" id="spEnterpriseAppObjectId" name="enterpriseAppObjectId" placeholder="Object ID from Enterprise Applications in Entra ID">
+            <div class="form-text">Used for granting workspace access. Find it in Entra ID → Enterprise Applications → your app → Object ID.</div>
+=======
             <input type="text" class="form-control" id="spEnterpriseAppObjectId" name="enterpriseAppObjectId" placeholder="Object ID from Enterprise Applications in Entra ID">
             <div class="form-text">Used for granting workspace access to this service principal. Find it in Entra ID → Enterprise Applications → your app → Object ID.</div>
+>>>>>>> origin/main
           </div>
         </div>
         <div class="modal-footer">
@@ -113,13 +212,15 @@
 <script>
 function openSpForm(button) {
   var isEdit = !!button;
-  document.getElementById('spModalTitle').textContent = isEdit ? 'Edit Service Principal' : 'Add Service Principal';
+  document.getElementById('spModalTitle').innerHTML = isEdit ? '<i class="bi bi-key me-2"></i>Edit Service Principal' : '<i class="bi bi-key me-2"></i>Add Service Principal';
   document.getElementById('spId').value = isEdit ? button.getAttribute('data-sp-id') || '' : '';
   document.getElementById('spName').value = isEdit ? button.getAttribute('data-sp-name') || '' : '';
   document.getElementById('spTenantId').value = isEdit ? button.getAttribute('data-sp-tenant-id') || '' : '';
   document.getElementById('spClientId').value = isEdit ? button.getAttribute('data-sp-client-id') || '' : '';
   document.getElementById('spClientSecret').value = '';
   document.getElementById('spEnterpriseAppObjectId').value = isEdit ? button.getAttribute('data-sp-eaoid') || '' : '';
+  document.getElementById('spKvName').value = isEdit ? button.getAttribute('data-sp-kv-name') || '' : '';
+  document.getElementById('spKvSecret').value = isEdit ? button.getAttribute('data-sp-kv-secret') || '' : '';
 }
 
 async function testSP(id) {

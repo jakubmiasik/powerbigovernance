@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@azure/identity": "^4.13.1",
+    "@azure/keyvault-secrets": "^4.11.2",
     "@azure/msal-node": "^2.16.0",
     "axios": "^1.7.0",
     "connect-flash": "^0.1.1",
