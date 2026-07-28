@@ -346,7 +346,7 @@ async function getLastScheduleExecutions() {
        GROUP BY schedule_id`
     );
   } catch (err) {
-    if (err.message && err.message.includes('Invalid object name')) return [];
+    if (err.message && (err.message.includes('Invalid object name') || err.message.includes('Invalid column name'))) return [];
     throw err;
   } finally {
     conn.close();
@@ -393,6 +393,16 @@ async function runMigrations() {
         );
         CREATE INDEX IX_capacity_schedule_history_capacity_time
           ON capacity_schedule_history (capacity_name, executed_at DESC);
+        CREATE INDEX IX_capacity_schedule_history_schedule_time
+          ON capacity_schedule_history (schedule_id, executed_at DESC);
+      END
+    `);
+    // Backward compatibility: add missing schedule_id to older history tables
+    await execSql(conn, `
+      IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedule_history') AND type = 'U')
+      AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedule_history') AND name = N'schedule_id')
+      BEGIN
+        ALTER TABLE capacity_schedule_history ADD schedule_id INT NULL;
         CREATE INDEX IX_capacity_schedule_history_schedule_time
           ON capacity_schedule_history (schedule_id, executed_at DESC);
       END
