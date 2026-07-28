@@ -5,13 +5,13 @@
 %>
 <% if (typeof items !== 'undefined' && items && items.length > 0) { %>
   <div class="d-inline-flex align-items-center gap-2">
-    <label class="form-label mb-0 text-nowrap small fw-bold"><i class="bi bi-building me-1"></i>Tenant:</label>
+    <label class="form-label mb-0 text-nowrap small fw-bold"><i class="bi bi-building me-1"></i>Service Principal / Scan:</label>
     <select class="form-select form-select-sm" style="max-width: 380px;" onchange="window.location.href=this.value" <% if (items.length === 1) { %>disabled<% } %>>
       <% items.forEach(function(item) { %>
         <% if (selectorType === 'sp') { %>
-          <option value="<%= targetUrl %>?spId=<%= item.id %>" <%= item.id === selectedId ? 'selected' : '' %>><%= item.name %> (<%= item.tenant_id %>)</option>
+          <option value="<%= targetUrl %>?spId=<%= item.id %>" <%= item.id === selectedId ? 'selected' : '' %>><%= item.name %></option>
         <% } else { %>
-          <option value="<%= targetUrl %>?runId=<%= item.id %>" <%= item.id === selectedId ? 'selected' : '' %>><%= item.sp_name %> (<%= item.tenant_id %>) - <%= item.started_at ? new Date(item.started_at).toLocaleDateString() : '' %></option>
+          <option value="<%= targetUrl %>?runId=<%= item.id %>" <%= item.id === selectedId ? 'selected' : '' %>><%= item.sp_name %> &mdash; Run #<%= item.id %> &mdash; <%= item.started_at ? new Date(item.started_at).toLocaleDateString() : '' %></option>
         <% } %>
       <% }) %>
     </select>

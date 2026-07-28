@@ -65,8 +65,17 @@
 [data-theme="dark"] .text-dark { color: var(--color-text) !important; }
 [data-theme="dark"] .text-muted { color: var(--color-text-muted) !important; }
 [data-theme="dark"] .text-secondary { color: #b0b0b0 !important; }
+[data-theme="dark"] .text-black { color: var(--color-text) !important; }
+[data-theme="dark"] .text-body-secondary { color: var(--color-text-muted) !important; }
+[data-theme="dark"] .text-primary { color: #67e8f9 !important; }
+[data-theme="dark"] .text-success { color: #4ade80 !important; }
+[data-theme="dark"] .text-info { color: #7dd3fc !important; }
+[data-theme="dark"] .text-warning { color: #fcd34d !important; }
+[data-theme="dark"] .text-danger { color: #f87171 !important; }
 [data-theme="dark"] .text-body { color: var(--color-text) !important; }
 [data-theme="dark"] .text-reset { color: var(--color-text) !important; }
+[data-theme="dark"] .form-label { color: var(--color-text) !important; }
+[data-theme="dark"] .breadcrumb-item.active { color: var(--color-text-muted) !important; }
 [data-theme="dark"] .bg-light { background-color: var(--color-surface-2) !important; }
 [data-theme="dark"] .bg-white { background-color: var(--color-surface) !important; }
 [data-theme="dark"] .border { border-color: var(--color-border) !important; }
@@ -89,6 +98,24 @@
 [data-theme="dark"] .dropdown-item:hover { background: var(--color-surface-offset); }
 [data-theme="dark"] .alert { color: var(--color-text); }
 [data-theme="dark"] .badge.bg-light { background-color: var(--color-surface-offset) !important; color: var(--color-text) !important; }
+[data-theme="dark"] .btn-outline-secondary {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+}
+[data-theme="dark"] .btn-outline-secondary:hover {
+  color: var(--color-text);
+  background: var(--color-surface-offset);
+  border-color: var(--color-text-subtle);
+}
+[data-theme="dark"] .btn-outline-warning {
+  color: #fcd34d;
+  border-color: #f59e0b;
+}
+[data-theme="dark"] .btn-outline-warning:hover {
+  color: #111827;
+  background: #f59e0b;
+  border-color: #f59e0b;
+}
 [data-theme="dark"] code { color: #7dd3fc; }
 [data-theme="dark"] .fs-3, [data-theme="dark"] .fw-bold { color: var(--color-text); }
 [data-theme="dark"] .stat-card .fs-3 { color: inherit; }

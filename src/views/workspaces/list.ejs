@@ -79,47 +79,95 @@
     </div>
   <% } %>
 
-  <div class="card">
+  <div class="card" id="workspace-inventory-card">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-      <span><i class="bi bi-bar-chart me-2"></i>Workspace Inventory (<%= stats.total %>)</span>
+      <span><i class="bi bi-table me-2"></i>Workspace Inventory (<%= stats.total %>)</span>
       <div class="d-flex gap-2 align-items-center flex-wrap">
-        <select class="form-select form-select-sm" id="sortMetric" style="max-width: 160px;" onchange="updateChart()">
-          <option value="name">Sort by Name</option>
-          <option value="storage">Sort by Storage</option>
-          <option value="reports">Sort by Reports</option>
-          <option value="datasets">Sort by Datasets</option>
-          <option value="items">Sort by Items</option>
+        <select class="form-select form-select-sm" id="sortMetric" style="max-width: 180px;" onchange="renderWorkspaceInventory()">
+          <option value="name">Sort: Name</option>
+          <option value="state">Sort: State</option>
+          <option value="license">Sort: License</option>
+          <option value="storage">Sort: Storage</option>
+          <option value="reports">Sort: Reports</option>
+          <option value="datasets">Sort: Datasets</option>
+          <option value="items">Sort: Total Items</option>
         </select>
-        <input type="text" class="form-control form-control-sm" style="max-width: 240px;" placeholder="Filter workspaces..." id="chartFilter" oninput="updateChart()">
+        <input type="text" class="form-control form-control-sm" style="max-width: 280px;" placeholder="Filter by workspace, state, license, or SKU..." id="inventoryFilter" oninput="renderWorkspaceInventory()">
       </div>
     </div>
-    <div class="card-body" style="position: relative; min-height: 600px;">
-      <canvas id="workspaceChart"></canvas>
+    <div class="card-body p-0">
+      <div class="table-responsive" style="max-height: 620px;">
+        <table class="table table-hover table-sm mb-0" id="workspaceInventoryTable">
+          <thead>
+            <tr>
+              <th>Workspace</th>
+              <th>State</th>
+              <th>License</th>
+              <th>SKU</th>
+              <th>Reports</th>
+              <th>Datasets</th>
+              <th>Total Items</th>
+              <th>Storage</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="workspaceInventoryBody"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
   <script>
     var workspacesData = <%- JSON.stringify(workspaces) %>;
-    var chartInstance = null;
 
-    function getFilteredData() {
-      var filterText = (document.getElementById('chartFilter').value || '').toLowerCase();
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function formatStorage(bytes) {
+      if (!bytes || bytes <= 0) return '0 B';
+      var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      var i = Math.floor(Math.log(bytes) / Math.log(1024));
+      return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+    }
+
+    function getLicenseBadgeClass(license) {
+      if (license === 'Fabric') return 'bg-success';
+      if (license === 'Premium') return 'bg-warning';
+      if (license === 'Premium Per User') return 'bg-info';
+      return 'bg-secondary';
+    }
+
+    function getStateBadgeClass(state) {
+      if (state === 'Active') return 'bg-success';
+      if (state === 'Deleted') return 'bg-danger';
+      return 'bg-secondary';
+    }
+
+    function getFilteredSortedWorkspaces() {
+      var filterText = (document.getElementById('inventoryFilter').value || '').toLowerCase();
       var sortMetric = document.getElementById('sortMetric').value;
-      
+
       var filtered = workspacesData.filter(function(ws) {
-        var wsName = (ws.displayName || ws.name || 'Unnamed').toLowerCase();
-        var license = (ws.licenseType || 'Pro').toLowerCase();
-        var sku = (ws.capacitySku || '-').toLowerCase();
-        var searchText = [wsName, license, sku].join(' ');
-        return searchText.includes(filterText);
+        var name = (ws.displayName || ws.name || 'Unnamed');
+        var state = ws.state || '-';
+        var license = ws.licenseType || 'Pro';
+        var sku = ws.capacitySku || '-';
+        var searchable = [name, state, license, sku].join(' ').toLowerCase();
+        return searchable.indexOf(filterText) !== -1;
       });
 
-      // Sort by selected metric
       filtered.sort(function(a, b) {
-        if (sortMetric === 'name') {
-          return (a.displayName || a.name || '').localeCompare(b.displayName || b.name || '');
-        }
+        var aName = a.displayName || a.name || '';
+        var bName = b.displayName || b.name || '';
+        if (sortMetric === 'name') return aName.localeCompare(bName);
+        if (sortMetric === 'state') return (a.state || '').localeCompare(b.state || '');
+        if (sortMetric === 'license') return (a.licenseType || '').localeCompare(b.licenseType || '');
         if (sortMetric === 'storage') return (b.storageSize || 0) - (a.storageSize || 0);
         if (sortMetric === 'reports') return (b.reportCount || 0) - (a.reportCount || 0);
         if (sortMetric === 'datasets') return (b.datasetCount || 0) - (a.datasetCount || 0);
@@ -130,125 +178,45 @@
       return filtered;
     }
 
-    function formatStorageGB(bytes) {
-      if (!bytes || bytes === 0) return 0;
-      return (bytes / (1024 * 1024 * 1024)).toFixed(1);
-    }
+    function renderWorkspaceInventory() {
+      var rows = getFilteredSortedWorkspaces();
+      var tbody = document.getElementById('workspaceInventoryBody');
 
-    function updateChart() {
-      var filteredData = getFilteredData();
-      
-      var labels = filteredData.map(function(ws) {
-        return (ws.displayName || ws.name || 'Unnamed').substring(0, 30);
-      });
-      
-      var storageData = filteredData.map(function(ws) {
-        return formatStorageGB(ws.storageSize || 0);
-      });
-      
-      var reportsData = filteredData.map(function(ws) {
-        return ws.reportCount || 0;
-      });
-      
-      var datasetsData = filteredData.map(function(ws) {
-        return ws.datasetCount || 0;
-      });
-      
-      var itemsData = filteredData.map(function(ws) {
-        return ws.totalItems || 0;
-      });
-
-      var ctx = document.getElementById('workspaceChart').getContext('2d');
-      
-      if (chartInstance) {
-        chartInstance.destroy();
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">No workspaces match the current filter.</td></tr>';
+        return;
       }
 
-      chartInstance = new Chart(ctx, {
-        type: 'bar',
-        data: {
-          labels: labels,
-          datasets: [
-            {
-              label: 'Storage (GB)',
-              data: storageData,
-              backgroundColor: '#06B6D4',
-              borderColor: '#0891B2',
-              borderWidth: 1,
-              borderRadius: 3,
-              yAxisID: 'y'
-            },
-            {
-              label: 'Reports',
-              data: reportsData,
-              backgroundColor: '#F59E0B',
-              borderColor: '#D97706',
-              borderWidth: 1,
-              borderRadius: 3,
-              yAxisID: 'y1'
-            },
-            {
-              label: 'Datasets',
-              data: datasetsData,
-              backgroundColor: '#8B5CF6',
-              borderColor: '#7C3AED',
-              borderWidth: 1,
-              borderRadius: 3,
-              yAxisID: 'y1'
-            },
-            {
-              label: 'Total Items',
-              data: itemsData,
-              backgroundColor: '#10B981',
-              borderColor: '#059669',
-              borderWidth: 1,
-              borderRadius: 3,
-              yAxisID: 'y1'
-            }
-          ]
-        },
-        options: {
-          indexAxis: 'y',
-          responsive: true,
-          maintainAspectRatio: false,
-          interaction: { mode: 'index', intersect: false },
-          plugins: {
-            legend: { 
-              display: true,
-              position: 'top',
-              labels: { usePointStyle: true, padding: 15 }
-            },
-            tooltip: {
-              callbacks: {
-                label: function(context) {
-                  var label = context.dataset.label || '';
-                  var value = context.raw;
-                  if (label.includes('Storage')) {
-                    return label + ': ' + value + ' GB';
-                  }
-                  return label + ': ' + value;
-                }
-              }
-            }
-          },
-          scales: {
-            y: {
-              type: 'category',
-              title: { display: true, text: 'Workspaces' }
-            },
-            y1: {
-              type: 'linear',
-              position: 'left',
-              title: { display: true, text: 'Counts' },
-              beginAtZero: true
-            }
-          }
-        }
-      });
+      var html = rows.map(function(ws) {
+        var name = ws.displayName || ws.name || 'Unnamed';
+        var state = ws.state || 'Unknown';
+        var license = ws.licenseType || 'Pro';
+        var sku = ws.capacitySku || '-';
+        var reports = ws.reportCount || 0;
+        var datasets = ws.datasetCount || 0;
+        var items = ws.totalItems || 0;
+        var storage = ws.storageSize || 0;
+        var stateBadge = getStateBadgeClass(state);
+        var licenseBadge = getLicenseBadgeClass(license);
+        return ''
+          + '<tr>'
+          + '<td><strong>' + escapeHtml(name) + '</strong></td>'
+          + '<td><span class="badge ' + stateBadge + '">' + escapeHtml(state) + '</span></td>'
+          + '<td><span class="badge ' + licenseBadge + '">' + escapeHtml(license) + '</span></td>'
+          + '<td><code>' + escapeHtml(sku) + '</code></td>'
+          + '<td>' + reports + '</td>'
+          + '<td>' + datasets + '</td>'
+          + '<td>' + items + '</td>'
+          + '<td class="fw-semibold">' + formatStorage(storage) + '</td>'
+          + '<td><a href="/workspaces/' + encodeURIComponent(ws.id) + '" class="btn btn-sm btn-outline-primary">Details</a></td>'
+          + '</tr>';
+      }).join('');
+
+      tbody.innerHTML = html;
     }
 
     document.addEventListener('DOMContentLoaded', function() {
-      updateChart();
+      renderWorkspaceInventory();
     });
   </script>
 <% } %>

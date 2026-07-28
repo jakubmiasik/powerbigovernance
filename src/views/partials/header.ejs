@@ -119,12 +119,25 @@
     <!-- Run selector -->
     <% if (typeof availableRuns !== 'undefined' && availableRuns && availableRuns.length > 0) { %>
       <div class="run-selector-bar">
-        <span class="fw-bold small text-nowrap" style="color: var(--color-primary);"><i class="bi bi-building me-1"></i>Tenant / Scan:</span>
+        <span class="fw-bold small text-nowrap" style="color: var(--color-primary);"><i class="bi bi-building me-1"></i>Service Principal / Scan:</span>
         <select class="form-select form-select-sm" style="max-width: 440px;" id="globalRunSelector" onchange="switchGlobalRun(this.value)">
-          <% availableRuns.forEach(function(r) { %>
-            <option value="<%= r.id %>" <%= (typeof selectedRunId !== 'undefined' && selectedRunId === r.id) ? 'selected' : '' %>>
-              <%= r.sp_name %> (<%= r.tenant_id %>) &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
-            </option>
+          <%
+            var runsBySp = {};
+            availableRuns.forEach(function(r) {
+              var spName = r.sp_name || 'Unknown Service Principal';
+              if (!runsBySp[spName]) runsBySp[spName] = [];
+              runsBySp[spName].push(r);
+            });
+            Object.keys(runsBySp).sort(function(a, b) { return a.localeCompare(b); }).forEach(function(spName) {
+              var spRuns = runsBySp[spName];
+          %>
+            <optgroup label="<%= spName %>">
+              <% spRuns.forEach(function(r, idx) { var versionNumber = spRuns.length - idx; %>
+                <option value="<%= r.id %>" <%= (typeof selectedRunId !== 'undefined' && selectedRunId === r.id) ? 'selected' : '' %>>
+                  Scan #<%= versionNumber %> &mdash; Run #<%= r.id %> &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
+                </option>
+              <% }) %>
+            </optgroup>
           <% }) %>
         </select>
         <% if (typeof globalRun !== 'undefined' && globalRun) { %>
@@ -144,6 +157,14 @@ function switchGlobalRun(runId) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ runId: parseInt(runId) })
   }).then(function() { window.location.reload(); });
+}
+
+function goBackOr(fallbackUrl) {
+  if (document.referrer && document.referrer !== window.location.href) {
+    window.history.back();
+    return;
+  }
+  window.location.href = fallbackUrl || '/';
 }
 
 function toggleSidebar() {
