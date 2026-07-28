@@ -3,6 +3,7 @@ const db = require('./databaseService');
 const { createPowerBIService } = require('./powerbiService');
 
 let schedulerStarted = false;
+const lastTriggeredSlots = new Map();
 
 async function executeSchedule(schedule) {
   try {
@@ -92,36 +93,35 @@ function startScheduler() {
   cron.schedule('* * * * *', async () => {
     try {
       const schedules = await db.getCapacitySchedules();
+      const lastExecutions = await db.getLastScheduleExecutions();
+      const lastExecutionBySchedule = new Map(
+        lastExecutions
+          .filter(row => row && row.schedule_id != null)
+          .map(row => [parseInt(row.schedule_id, 10), row.last_executed_at ? new Date(row.last_executed_at) : null])
+      );
 
       for (const schedule of schedules) {
         if (!schedule.enabled) continue;
 
         const tz = schedule.timezone || 'UTC';
         const now = getTimeInTimezone(tz);
-        const currentMin = now.minute;
-        const currentHour = now.hour;
-        const currentDay = now.dayOfWeek; // 0=Sun
-        const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        const slotKey = getCurrentSlotKey(schedule, now);
+        if (!slotKey) continue;
 
-        const type = schedule.schedule_type;
-        const schedMin = schedule.schedule_minute || 0;
-        const schedHour = schedule.schedule_hour;
+        const scheduleId = parseInt(schedule.id, 10);
+        if (!Number.isFinite(scheduleId)) continue;
 
-        let shouldRun = false;
+        if (lastTriggeredSlots.get(scheduleId) === slotKey) continue;
 
-        if (type === 'hourly' && currentMin === schedMin) {
-          shouldRun = true;
-        } else if (type === 'daily' && currentMin === schedMin && currentHour === schedHour) {
-          shouldRun = true;
-        } else if (type === 'weekdays' && currentMin === schedMin && currentHour === schedHour && currentDay >= 1 && currentDay <= 5) {
-          shouldRun = true;
-        } else if (type === 'weekly' && currentMin === schedMin && currentHour === schedHour && dayNames[currentDay] === schedule.schedule_day) {
-          shouldRun = true;
+        const lastExecutedAt = lastExecutionBySchedule.get(scheduleId);
+        const alreadyExecutedInSlot = wasExecutedInSlot(schedule, tz, slotKey, lastExecutedAt);
+        if (alreadyExecutedInSlot) {
+          lastTriggeredSlots.set(scheduleId, slotKey);
+          continue;
         }
 
-        if (shouldRun) {
-          executeSchedule(schedule);
-        }
+        lastTriggeredSlots.set(scheduleId, slotKey);
+        executeSchedule(schedule);
       }
     } catch (err) {
       console.error('[Scheduler] Error checking schedules:', err.message);
@@ -129,14 +129,53 @@ function startScheduler() {
   });
 }
 
+function hasPassedScheduleTime(local, scheduleHour, scheduleMinute) {
+  if (scheduleHour == null) return false;
+  return local.hour > scheduleHour || (local.hour === scheduleHour && local.minute >= scheduleMinute);
+}
+
+function getDateKey(local) {
+  return `${local.year}-${String(local.month).padStart(2, '0')}-${String(local.day).padStart(2, '0')}`;
+}
+
+function getCurrentSlotKey(schedule, local) {
+  const type = schedule.schedule_type;
+  const schedMin = schedule.schedule_minute || 0;
+  const schedHour = schedule.schedule_hour;
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const dateKey = getDateKey(local);
+
+  if (type === 'hourly') {
+    return local.minute >= schedMin ? `${dateKey}T${String(local.hour).padStart(2, '0')}` : null;
+  }
+  if (type === 'daily') {
+    return hasPassedScheduleTime(local, schedHour, schedMin) ? dateKey : null;
+  }
+  if (type === 'weekdays') {
+    return local.dayOfWeek >= 1 && local.dayOfWeek <= 5 && hasPassedScheduleTime(local, schedHour, schedMin) ? dateKey : null;
+  }
+  if (type === 'weekly') {
+    return dayNames[local.dayOfWeek] === schedule.schedule_day && hasPassedScheduleTime(local, schedHour, schedMin) ? dateKey : null;
+  }
+  return null;
+}
+
+function wasExecutedInSlot(schedule, tz, currentSlotKey, lastExecutedAt) {
+  if (!lastExecutedAt || !currentSlotKey) return false;
+  const executedLocal = getTimeInTimezone(tz, lastExecutedAt);
+  const executedSlotKey = getCurrentSlotKey(schedule, executedLocal);
+  return executedSlotKey === currentSlotKey;
+}
+
 // Get current time components in a given IANA timezone
-function getTimeInTimezone(tz) {
+function getTimeInTimezone(tz, date) {
   try {
-    const now = new Date();
+    const now = date || new Date();
     const parts = {};
     const fmt = new Intl.DateTimeFormat('en-US', {
       timeZone: tz,
       hour: 'numeric', minute: 'numeric', hour12: false, weekday: 'short',
+      year: 'numeric', month: '2-digit', day: '2-digit',
     });
     for (const p of fmt.formatToParts(now)) {
       parts[p.type] = p.value;
@@ -144,14 +183,24 @@ function getTimeInTimezone(tz) {
     const dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
     const dow = dayMap[parts.weekday] !== undefined ? dayMap[parts.weekday] : new Date().getUTCDay();
     return {
+      year: parseInt(parts.year, 10),
+      month: parseInt(parts.month, 10),
+      day: parseInt(parts.day, 10),
       hour: parseInt(parts.hour, 10) % 24,
       minute: parseInt(parts.minute, 10),
       dayOfWeek: dow,
     };
   } catch {
     // Fallback to UTC if timezone is invalid
-    const now = new Date();
-    return { hour: now.getUTCHours(), minute: now.getUTCMinutes(), dayOfWeek: now.getUTCDay() };
+    const now = date || new Date();
+    return {
+      year: now.getUTCFullYear(),
+      month: now.getUTCMonth() + 1,
+      day: now.getUTCDate(),
+      hour: now.getUTCHours(),
+      minute: now.getUTCMinutes(),
+      dayOfWeek: now.getUTCDay(),
+    };
   }
 }
 

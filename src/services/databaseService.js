@@ -331,6 +331,23 @@ async function getScheduleHistory(capacityName, days) {
   }
 }
 
+async function getLastScheduleExecutions() {
+  const conn = await getConnection();
+  try {
+    return await execSql(
+      conn,
+      `SELECT schedule_id, MAX(executed_at) AS last_executed_at
+       FROM capacity_schedule_history
+       GROUP BY schedule_id`
+    );
+  } catch (err) {
+    if (err.message && err.message.includes('Invalid object name')) return [];
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
 // Auto-migration: ensure schema is up to date
 async function runMigrations() {
   const conn = await getConnection();
@@ -370,4 +387,5 @@ module.exports = {
   toggleCapacitySchedule,
   logScheduleExecution,
   getScheduleHistory,
+  getLastScheduleExecutions,
 };
