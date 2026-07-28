@@ -93,7 +93,12 @@ function startScheduler() {
   cron.schedule('* * * * *', async () => {
     try {
       const schedules = await db.getCapacitySchedules();
-      const lastExecutions = await db.getLastScheduleExecutions();
+      let lastExecutions = [];
+      try {
+        lastExecutions = await db.getLastScheduleExecutions();
+      } catch (historyErr) {
+        console.warn('[Scheduler] Could not read schedule history, continuing without persisted dedupe:', historyErr.message);
+      }
       const lastExecutionBySchedule = new Map(
         lastExecutions
           .filter(row => row && row.schedule_id != null)
