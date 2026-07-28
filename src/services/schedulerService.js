@@ -5,6 +5,8 @@ const { createPowerBIService } = require('./powerbiService');
 let schedulerStarted = false;
 const lastTriggeredSlots = new Map();
 const timezoneSupportCache = new Map();
+let schedulerTickInProgress = false;
+let lastKickMs = 0;
 
 function normalizeTimezone(tz) {
   const raw = (tz || 'UTC').toString().trim();
@@ -139,6 +141,46 @@ function buildCronExpression(schedule) {
   return null;
 }
 
+async function runSchedulerTick(source) {
+  if (schedulerTickInProgress) return;
+  schedulerTickInProgress = true;
+  try {
+    const schedules = await db.getCapacitySchedules();
+
+    for (const schedule of schedules) {
+      if (!schedule.enabled) continue;
+
+      const tz = normalizeTimezone(schedule.timezone);
+      if (!isTimezoneSupported(tz)) {
+        console.warn(`[Scheduler] Unsupported timezone "${schedule.timezone}" for schedule ${schedule.id}. Skipping.`);
+        continue;
+      }
+      const now = getTimeInTimezone(tz);
+      const slotKey = getCurrentSlotKey(schedule, now);
+      if (!slotKey) continue;
+
+      const scheduleId = parseInt(schedule.id, 10);
+      if (!Number.isFinite(scheduleId)) continue;
+
+      if (lastTriggeredSlots.get(scheduleId) === slotKey) continue;
+
+      lastTriggeredSlots.set(scheduleId, slotKey);
+      await db.logScheduleExecution(
+        schedule.id,
+        schedule.capacity_name,
+        schedule.action,
+        'triggered',
+        `Scheduler due window reached (${tz}) at ${String(now.hour).padStart(2, '0')}:${String(now.minute).padStart(2, '0')} via ${source || 'tick'}`
+      );
+      await executeSchedule(schedule);
+    }
+  } catch (err) {
+    console.error('[Scheduler] Error checking schedules:', err.message);
+  } finally {
+    schedulerTickInProgress = false;
+  }
+}
+
 // Check schedules every minute and run matching ones
 function startScheduler() {
   if (schedulerStarted) return;
@@ -147,41 +189,20 @@ function startScheduler() {
   console.log('[Scheduler] Capacity scheduler started');
 
   // Run every minute, check DB for active schedules
-  cron.schedule('* * * * *', async () => {
-    try {
-      const schedules = await db.getCapacitySchedules();
-
-      for (const schedule of schedules) {
-        if (!schedule.enabled) continue;
-
-        const tz = normalizeTimezone(schedule.timezone);
-        if (!isTimezoneSupported(tz)) {
-          console.warn(`[Scheduler] Unsupported timezone "${schedule.timezone}" for schedule ${schedule.id}. Skipping.`);
-          continue;
-        }
-        const now = getTimeInTimezone(tz);
-        const slotKey = getCurrentSlotKey(schedule, now);
-        if (!slotKey) continue;
-
-        const scheduleId = parseInt(schedule.id, 10);
-        if (!Number.isFinite(scheduleId)) continue;
-
-        if (lastTriggeredSlots.get(scheduleId) === slotKey) continue;
-
-        lastTriggeredSlots.set(scheduleId, slotKey);
-        await db.logScheduleExecution(
-          schedule.id,
-          schedule.capacity_name,
-          schedule.action,
-          'triggered',
-          `Scheduler due window reached (${tz}) at ${String(now.hour).padStart(2, '0')}:${String(now.minute).padStart(2, '0')}`
-        );
-        await executeSchedule(schedule);
-      }
-    } catch (err) {
-      console.error('[Scheduler] Error checking schedules:', err.message);
-    }
+  cron.schedule('* * * * *', () => {
+    runSchedulerTick('cron');
   });
+
+  // Also run one immediate check on startup
+  runSchedulerTick('startup');
+}
+
+function kickScheduler() {
+  if (!schedulerStarted) return;
+  const nowMs = Date.now();
+  if (nowMs - lastKickMs < 15000) return;
+  lastKickMs = nowMs;
+  runSchedulerTick('request');
 }
 
 function hasPassedScheduleTime(local, scheduleHour, scheduleMinute) {
@@ -254,4 +275,4 @@ function getTimeInTimezone(tz, date) {
   }
 }
 
-module.exports = { startScheduler };
+module.exports = { startScheduler, kickScheduler };

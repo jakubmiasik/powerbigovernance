@@ -109,6 +109,13 @@ app.use(async (req, res, next) => {
   next();
 });
 
+// Opportunistic scheduler catch-up tick on incoming traffic (throttled internally)
+const { kickScheduler } = require('./services/schedulerService');
+app.use((req, res, next) => {
+  kickScheduler();
+  next();
+});
+
 // API to switch selected run
 app.post('/api/select-run', (req, res) => {
   req.session.selectedRunId = parseInt(req.body.runId);
