@@ -150,17 +150,6 @@ function startScheduler() {
   cron.schedule('* * * * *', async () => {
     try {
       const schedules = await db.getCapacitySchedules();
-      let lastExecutions = [];
-      try {
-        lastExecutions = await db.getLastScheduleExecutions();
-      } catch (historyErr) {
-        console.warn('[Scheduler] Could not read schedule history, continuing without persisted dedupe:', historyErr.message);
-      }
-      const lastExecutionBySchedule = new Map(
-        lastExecutions
-          .filter(row => row && row.schedule_id != null)
-          .map(row => [parseInt(row.schedule_id, 10), row.last_executed_at ? new Date(row.last_executed_at) : null])
-      );
 
       for (const schedule of schedules) {
         if (!schedule.enabled) continue;
@@ -179,13 +168,6 @@ function startScheduler() {
 
         if (lastTriggeredSlots.get(scheduleId) === slotKey) continue;
 
-        const lastExecutedAt = lastExecutionBySchedule.get(scheduleId);
-        const alreadyExecutedInSlot = wasExecutedInSlot(schedule, tz, slotKey, lastExecutedAt);
-        if (alreadyExecutedInSlot) {
-          lastTriggeredSlots.set(scheduleId, slotKey);
-          continue;
-        }
-
         lastTriggeredSlots.set(scheduleId, slotKey);
         await db.logScheduleExecution(
           schedule.id,
@@ -194,7 +176,7 @@ function startScheduler() {
           'triggered',
           `Scheduler due window reached (${tz}) at ${String(now.hour).padStart(2, '0')}:${String(now.minute).padStart(2, '0')}`
         );
-        executeSchedule(schedule);
+        await executeSchedule(schedule);
       }
     } catch (err) {
       console.error('[Scheduler] Error checking schedules:', err.message);
@@ -233,13 +215,6 @@ function getCurrentSlotKey(schedule, local) {
     return dayNames[local.dayOfWeek] === schedule.schedule_day && hasPassedScheduleTime(local, schedHour, schedMin) ? dateKey : null;
   }
   return null;
-}
-
-function wasExecutedInSlot(schedule, tz, currentSlotKey, lastExecutedAt) {
-  if (!lastExecutedAt || !currentSlotKey) return false;
-  const executedLocal = getTimeInTimezone(tz, lastExecutedAt);
-  const executedSlotKey = getCurrentSlotKey(schedule, executedLocal);
-  return executedSlotKey === currentSlotKey;
 }
 
 // Get current time components in a given IANA timezone
