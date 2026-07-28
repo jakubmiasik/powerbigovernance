@@ -10,6 +10,31 @@
 <!-- Toast container -->
 <div class="toast-container" id="toastContainer"></div>
 
+<!-- Global reload overlay -->
+<div id="reloadOverlay" class="reload-overlay d-none">
+  <div class="reload-overlay-card">
+    <div class="spinner-border text-primary me-2" role="status" aria-hidden="true"></div>
+    <span id="reloadOverlayText">Reloading...</span>
+  </div>
+</div>
+
+<!-- Global confirmation modal -->
+<div class="modal fade" id="confirmActionModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="confirmActionTitle">Please confirm</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="confirmActionBody">Are you sure?</div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger" id="confirmActionBtn">Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Keyboard shortcuts modal -->
 <div class="modal fade" id="kbdModal" tabindex="-1">
   <div class="modal-dialog modal-sm modal-dialog-centered">
@@ -69,6 +94,46 @@ function filterCapacities(input) {
   document.querySelectorAll('.cap-filter-table tbody tr').forEach(function(row) {
     var text = (row.getAttribute('data-filter') || row.textContent || '').toLowerCase();
     row.style.display = text.includes(filter) ? '' : 'none';
+  });
+}
+
+function showPageReloading(message) {
+  var overlay = document.getElementById('reloadOverlay');
+  var text = document.getElementById('reloadOverlayText');
+  if (!overlay) return;
+  if (text && message) text.textContent = message;
+  overlay.classList.remove('d-none');
+}
+
+function reloadPageWithMessage(message, delayMs) {
+  showPageReloading(message || 'Reloading...');
+  var wait = typeof delayMs === 'number' ? delayMs : 0;
+  setTimeout(function() { window.location.reload(); }, wait);
+}
+
+var confirmActionModal;
+var confirmActionCallback = null;
+function showConfirmAction(options) {
+  options = options || {};
+  var titleEl = document.getElementById('confirmActionTitle');
+  var bodyEl = document.getElementById('confirmActionBody');
+  var actionBtn = document.getElementById('confirmActionBtn');
+  if (!titleEl || !bodyEl || !actionBtn) return;
+  titleEl.textContent = options.title || 'Please confirm';
+  bodyEl.textContent = options.message || 'Are you sure?';
+  actionBtn.textContent = options.confirmText || 'Confirm';
+  actionBtn.className = 'btn ' + (options.confirmClass || 'btn-danger');
+  confirmActionCallback = typeof options.onConfirm === 'function' ? options.onConfirm : null;
+  confirmActionModal = bootstrap.Modal.getOrCreateInstance(document.getElementById('confirmActionModal'));
+  confirmActionModal.show();
+}
+
+var confirmActionBtn = document.getElementById('confirmActionBtn');
+if (confirmActionBtn) {
+  confirmActionBtn.addEventListener('click', function() {
+    if (confirmActionCallback) confirmActionCallback();
+    confirmActionCallback = null;
+    if (confirmActionModal) confirmActionModal.hide();
   });
 }
 

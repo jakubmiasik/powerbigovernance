@@ -129,12 +129,16 @@
               runsBySp[spName].push(r);
             });
             Object.keys(runsBySp).sort(function(a, b) { return a.localeCompare(b); }).forEach(function(spName) {
-              var spRuns = runsBySp[spName];
+              var spRuns = runsBySp[spName].slice().sort(function(a, b) {
+                var aTs = a.started_at ? new Date(a.started_at).getTime() : 0;
+                var bTs = b.started_at ? new Date(b.started_at).getTime() : 0;
+                return bTs - aTs;
+              });
           %>
             <optgroup label="<%= spName %>">
-              <% spRuns.forEach(function(r, idx) { var versionNumber = spRuns.length - idx; %>
+              <% spRuns.forEach(function(r) { %>
                 <option value="<%= r.id %>" <%= (typeof selectedRunId !== 'undefined' && selectedRunId === r.id) ? 'selected' : '' %>>
-                  Scan #<%= versionNumber %> &mdash; Run #<%= r.id %> &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
+                  <%= spName %>: Run#<%= r.id %> &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
                 </option>
               <% }) %>
             </optgroup>
@@ -152,11 +156,18 @@
 
 <script>
 function switchGlobalRun(runId) {
+  if (typeof showPageReloading === 'function') {
+    showPageReloading('Loading selected scan...');
+  }
   fetch('/api/select-run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ runId: parseInt(runId) })
-  }).then(function() { window.location.reload(); });
+  }).then(function() { window.location.reload(); }).catch(function(err) {
+    var overlay = document.getElementById('reloadOverlay');
+    if (overlay) overlay.classList.add('d-none');
+    if (typeof showToast === 'function') showToast('Failed to switch scan: ' + err.message, 'error');
+  });
 }
 
 function goBackOr(fallbackUrl) {
