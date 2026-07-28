@@ -71,6 +71,10 @@ function execSql(conn, sql, params = []) {
   });
 }
 
+function isColumnMissingError(err, columnName) {
+  return !!(err && err.message && err.message.includes(`Invalid column name '${columnName}'`));
+}
+
 // Service Principals CRUD
 async function getServicePrincipals() {
   const conn = await getConnection();
@@ -234,8 +238,7 @@ async function getCapacitySchedules() {
 async function saveCapacitySchedule(schedule) {
   const conn = await getConnection();
   try {
-    await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone, sp_id)
-      VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz, @spId)`, [
+    const baseParams = [
       { name: 'name', type: TYPES.NVarChar, value: schedule.capacityName },
       { name: 'sub', type: TYPES.NVarChar, value: schedule.subscriptionId },
       { name: 'rg', type: TYPES.NVarChar, value: schedule.resourceGroup },
@@ -246,8 +249,21 @@ async function saveCapacitySchedule(schedule) {
       { name: 'day', type: TYPES.NVarChar, value: schedule.day || null },
       { name: 'enabled', type: TYPES.Bit, value: schedule.enabled !== false },
       { name: 'tz', type: TYPES.NVarChar, value: schedule.timezone || 'UTC' },
-      { name: 'spId', type: TYPES.Int, value: schedule.spId != null ? schedule.spId : null },
-    ]);
+    ];
+    try {
+      await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone, sp_id)
+        VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz, @spId)`, [
+        ...baseParams,
+        { name: 'spId', type: TYPES.Int, value: schedule.spId != null ? schedule.spId : null },
+      ]);
+    } catch (err) {
+      if (isColumnMissingError(err, 'sp_id') || isColumnMissingError(err, 'spd_id')) {
+        await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone)
+          VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz)`, baseParams);
+      } else {
+        throw err;
+      }
+    }
   } finally {
     conn.close();
   }
@@ -287,9 +303,19 @@ async function updateCapacitySchedule(id, fields) {
     if (fields.minute !== undefined) { sets.push('schedule_minute=@minute'); params.push({ name: 'minute', type: TYPES.Int, value: fields.minute }); }
     if (fields.day !== undefined) { sets.push('schedule_day=@day'); params.push({ name: 'day', type: TYPES.NVarChar, value: fields.day }); }
     if (fields.timezone !== undefined) { sets.push('timezone=@tz'); params.push({ name: 'tz', type: TYPES.NVarChar, value: fields.timezone }); }
-    if (fields.spId !== undefined) { sets.push('sp_id=@spId'); params.push({ name: 'spId', type: TYPES.Int, value: fields.spId }); }
     if (sets.length === 0) return;
-    await execSql(conn, 'UPDATE capacity_schedules SET ' + sets.join(', ') + ' WHERE id=@id', params);
+    const baseSets = sets.slice();
+    const baseParams = params.slice();
+    if (fields.spId !== undefined) { sets.push('sp_id=@spId'); params.push({ name: 'spId', type: TYPES.Int, value: fields.spId }); }
+    try {
+      await execSql(conn, 'UPDATE capacity_schedules SET ' + sets.join(', ') + ' WHERE id=@id', params);
+    } catch (err) {
+      if ((isColumnMissingError(err, 'sp_id') || isColumnMissingError(err, 'spd_id')) && fields.spId !== undefined) {
+        await execSql(conn, 'UPDATE capacity_schedules SET ' + baseSets.join(', ') + ' WHERE id=@id', baseParams);
+      } else {
+        throw err;
+      }
+    }
   } finally {
     conn.close();
   }
@@ -417,6 +443,15 @@ async function runMigrations() {
     await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'timezone') ALTER TABLE capacity_schedules ADD timezone NVARCHAR(100) NULL`);
     // Add service principal reference to schedules if missing
     await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'sp_id') ALTER TABLE capacity_schedules ADD sp_id INT NULL`);
+    // If legacy typo column exists, copy values into sp_id
+    await execSql(conn, `
+      IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U')
+      AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'spd_id')
+      AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'sp_id')
+      BEGIN
+        UPDATE capacity_schedules SET sp_id = COALESCE(sp_id, spd_id) WHERE spd_id IS NOT NULL;
+      END
+    `);
     // Add Key Vault columns to service_principals if missing
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'key_vault_name') ALTER TABLE service_principals ADD key_vault_name NVARCHAR(255) NULL`);
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'key_vault_secret_name') ALTER TABLE service_principals ADD key_vault_secret_name NVARCHAR(255) NULL`);
