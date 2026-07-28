@@ -86,6 +86,13 @@ app.get('/health', (_req, res) => {
 // Global context: selected run + available runs, cached to avoid DB work on every request
 app.use(loadRuns);
 
+// Opportunistic scheduler catch-up tick on incoming traffic (throttled internally)
+const { kickScheduler } = require('./services/schedulerService');
+app.use((req, res, next) => {
+  kickScheduler();
+  next();
+});
+
 // API to switch selected run
 app.post('/api/select-run', (req, res) => {
   const selectedRunId = Number.parseInt(req.body.runId, 10);
