@@ -521,7 +521,7 @@ async function addSchedule() {
     var data = await resp.json();
     if (data.success) {
       showModal('Schedule Added', '<i class="bi bi-check-circle text-success fs-1"></i><p class="mt-2">Schedule created successfully.</p><p class="text-muted small">' + body.action + ' — ' + body.scheduleType + ' at ' + String(body.hour).padStart(2,'0') + ':' + String(body.minute).padStart(2,'0') + ' ' + body.timezone + '</p>');
-      setTimeout(function() { location.reload(); }, 1500);
+      reloadPageWithMessage('Schedule created. Reloading...', 1500);
     } else {
       showModal('Error', '<i class="bi bi-x-circle text-danger fs-2"></i><p class="mt-2">' + data.message + '</p>');
     }
@@ -558,7 +558,7 @@ async function saveEditSchedule() {
     if (data.success) {
       editSchedModal.hide();
       showToast('Schedule updated', 'success');
-      setTimeout(function() { location.reload(); }, 800);
+      reloadPageWithMessage('Schedule updated. Reloading...', 800);
     } else {
       showToast(data.message || 'Update failed', 'error');
     }
@@ -566,12 +566,23 @@ async function saveEditSchedule() {
 }
 
 async function deleteSchedule(id) {
-  if (!confirm('Delete this schedule?')) return;
-  try {
-    var resp = await fetch('/capacities/schedule/' + id, { method: 'DELETE' });
-    var data = await resp.json();
-    if (data.success) location.reload();
-  } catch (e) { console.error(e); }
+  showConfirmAction({
+    title: 'Delete Schedule',
+    message: 'Delete this schedule? This cannot be undone.',
+    confirmText: 'Delete',
+    confirmClass: 'btn-danger',
+    onConfirm: async function() {
+      try {
+        var resp = await fetch('/capacities/schedule/' + id, { method: 'DELETE' });
+        var data = await resp.json();
+        if (data.success) {
+          reloadPageWithMessage('Schedule deleted. Reloading...');
+        } else {
+          showToast(data.message || 'Delete failed', 'error');
+        }
+      } catch (e) { console.error(e); }
+    }
+  });
 }
 
 async function toggleSchedule(id, enabled) {

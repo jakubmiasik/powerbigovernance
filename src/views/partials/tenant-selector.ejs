@@ -11,7 +11,7 @@
         <% if (selectorType === 'sp') { %>
           <option value="<%= targetUrl %>?spId=<%= item.id %>" <%= item.id === selectedId ? 'selected' : '' %>><%= item.name %></option>
         <% } else { %>
-          <option value="<%= targetUrl %>?runId=<%= item.id %>" <%= item.id === selectedId ? 'selected' : '' %>><%= item.sp_name %> &mdash; Run #<%= item.id %> &mdash; <%= item.started_at ? new Date(item.started_at).toLocaleDateString() : '' %></option>
+          <option value="<%= targetUrl %>?runId=<%= item.id %>" <%= item.id === selectedId ? 'selected' : '' %>><%= item.sp_name %>: Run#<%= item.id %> &mdash; <%= item.started_at ? new Date(item.started_at).toLocaleString() : 'N/A' %></option>
         <% } %>
       <% }) %>
     </select>

@@ -69,7 +69,7 @@ async function refreshCapList() {
     var resp = await fetch('/capacities/refresh');
     var data = await resp.json();
     if (data.success) {
-      location.reload();
+      reloadPageWithMessage('Capacities refreshed. Reloading...');
     } else {
       showToast(data.message || 'Refresh failed', 'error');
     }

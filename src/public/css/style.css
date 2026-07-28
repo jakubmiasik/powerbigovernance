@@ -121,6 +121,8 @@
 [data-theme="dark"] .stat-card .fs-3 { color: inherit; }
 [data-theme="dark"] .form-check-input { background-color: var(--color-surface-offset); border-color: var(--color-border); }
 [data-theme="dark"] .form-check-input:checked { background-color: var(--color-primary); border-color: var(--color-primary); }
+[data-theme="dark"] .form-text { color: var(--color-text-muted) !important; }
+[data-theme="dark"] .modal .badge.bg-info { color: #082f49 !important; }
 [data-theme="dark"] h1, [data-theme="dark"] h2, [data-theme="dark"] h3, [data-theme="dark"] h4, [data-theme="dark"] h5, [data-theme="dark"] h6 { color: var(--color-text); }
 [data-theme="dark"] strong { color: var(--color-text); }
 [data-theme="dark"] small { color: var(--color-text-muted); }
@@ -678,6 +680,29 @@ body.sidebar-collapsed .main-content {
 .toast-item.toast-success { border-left: 3px solid var(--color-success); }
 .toast-item.toast-error { border-left: 3px solid var(--color-danger); }
 .toast-item.toast-info { border-left: 3px solid var(--color-primary); }
+
+.reload-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(7, 11, 22, 0.48);
+  backdrop-filter: blur(1px);
+}
+.reload-overlay-card {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 14px 18px;
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
 
 @keyframes slideInRight {
   from { transform: translateX(100%); opacity: 0; }

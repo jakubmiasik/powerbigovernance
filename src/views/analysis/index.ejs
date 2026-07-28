@@ -200,13 +200,20 @@ async function cancelAnalysis() {
 }
 
 async function deleteRun(runId) {
-  if (!confirm('Delete this analysis run?')) return;
-  try {
-    await fetch('/analysis/delete/' + runId, { method: 'POST' });
-    location.reload();
-  } catch (err) {
-    console.error(err);
-  }
+  showConfirmAction({
+    title: 'Delete Analysis Run',
+    message: 'Delete this analysis run? This cannot be undone.',
+    confirmText: 'Delete',
+    confirmClass: 'btn-danger',
+    onConfirm: async function() {
+      try {
+        await fetch('/analysis/delete/' + runId, { method: 'POST' });
+        reloadPageWithMessage('Analysis run deleted. Reloading...');
+      } catch (err) {
+        console.error(err);
+      }
+    }
+  });
 }
 
 // ── Grant SP Access ──

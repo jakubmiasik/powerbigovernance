@@ -46,7 +46,7 @@
             <strong><i class="bi bi-key me-1 text-primary"></i><%= sp.name %></strong>
             <span class="text-muted small ms-2 font-monospace"><%= sp.client_id %></span>
             <% if (sp.key_vault_name) { %>
-              <span class="badge bg-info text-dark ms-2"><i class="bi bi-safe me-1"></i>Key Vault</span>
+              <span class="badge bg-info ms-2"><i class="bi bi-safe me-1"></i>Key Vault</span>
             <% } %>
           </div>
           <div class="btn-group btn-group-sm ms-auto">
@@ -68,7 +68,7 @@
             >
               <i class="bi bi-pencil me-1"></i>Edit
             </button>
-            <button class="btn btn-outline-danger rounded-0" onclick="if(confirm('Delete this service principal?')) document.getElementById('delete-sp-<%= sp.id %>').submit()">
+            <button class="btn btn-outline-danger rounded-0" onclick="confirmDeleteSp('<%= sp.id %>', '<%- (sp.name || '').replace(/'/g, '&#39;') %>')">
               <i class="bi bi-trash me-1"></i>Delete
             </button>
           </div>
@@ -177,6 +177,21 @@ async function testSP(id) {
   } catch (err) {
     resultDiv.innerHTML = '<div class="alert alert-danger py-1 small"><i class="bi bi-x-circle me-2"></i>Test failed: ' + err.message + '</div>';
   }
+}
+
+function confirmDeleteSp(id, name) {
+  showConfirmAction({
+    title: 'Delete Service Principal',
+    message: 'Delete "' + name + '"? This cannot be undone.',
+    confirmText: 'Delete',
+    confirmClass: 'btn-danger',
+    onConfirm: function() {
+      if (typeof showPageReloading === 'function') {
+        showPageReloading('Deleting service principal...');
+      }
+      document.getElementById('delete-sp-' + id).submit();
+    }
+  });
 }
 </script>
 <%- include('partials/footer') %>
