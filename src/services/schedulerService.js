@@ -187,6 +187,13 @@ function startScheduler() {
         }
 
         lastTriggeredSlots.set(scheduleId, slotKey);
+        await db.logScheduleExecution(
+          schedule.id,
+          schedule.capacity_name,
+          schedule.action,
+          'triggered',
+          `Scheduler due window reached (${tz}) at ${String(now.hour).padStart(2, '0')}:${String(now.minute).padStart(2, '0')}`
+        );
         executeSchedule(schedule);
       }
     } catch (err) {
@@ -196,8 +203,10 @@ function startScheduler() {
 }
 
 function hasPassedScheduleTime(local, scheduleHour, scheduleMinute) {
-  if (scheduleHour == null) return false;
-  return local.hour > scheduleHour || (local.hour === scheduleHour && local.minute >= scheduleMinute);
+  const hour = parseInt(scheduleHour, 10);
+  const minute = parseInt(scheduleMinute, 10);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false;
+  return local.hour > hour || (local.hour === hour && local.minute >= minute);
 }
 
 function getDateKey(local) {
@@ -206,8 +215,8 @@ function getDateKey(local) {
 
 function getCurrentSlotKey(schedule, local) {
   const type = schedule.schedule_type;
-  const schedMin = schedule.schedule_minute || 0;
-  const schedHour = schedule.schedule_hour;
+  const schedMin = Number.isFinite(parseInt(schedule.schedule_minute, 10)) ? parseInt(schedule.schedule_minute, 10) : 0;
+  const schedHour = Number.isFinite(parseInt(schedule.schedule_hour, 10)) ? parseInt(schedule.schedule_hour, 10) : null;
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const dateKey = getDateKey(local);
 
