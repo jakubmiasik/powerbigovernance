@@ -352,6 +352,47 @@ async function getLastScheduleExecutions() {
 async function runMigrations() {
   const conn = await getConnection();
   try {
+    // Create capacity schedules table if missing
+    await execSql(conn, `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U')
+      BEGIN
+        CREATE TABLE capacity_schedules (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          capacity_name NVARCHAR(255) NOT NULL,
+          subscription_id NVARCHAR(100) NOT NULL,
+          resource_group NVARCHAR(255) NOT NULL,
+          action NVARCHAR(20) NOT NULL,
+          schedule_type NVARCHAR(20) NOT NULL,
+          schedule_hour INT NULL,
+          schedule_minute INT NULL,
+          schedule_day NVARCHAR(20) NULL,
+          enabled BIT NOT NULL DEFAULT 1,
+          timezone NVARCHAR(100) NULL,
+          created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+        )
+      END
+    `);
+
+    // Create capacity schedule history table if missing
+    await execSql(conn, `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedule_history') AND type = 'U')
+      BEGIN
+        CREATE TABLE capacity_schedule_history (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          schedule_id INT NULL,
+          capacity_name NVARCHAR(255) NOT NULL,
+          action NVARCHAR(20) NOT NULL,
+          status NVARCHAR(20) NOT NULL,
+          message NVARCHAR(2000) NULL,
+          executed_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+        );
+        CREATE INDEX IX_capacity_schedule_history_capacity_time
+          ON capacity_schedule_history (capacity_name, executed_at DESC);
+        CREATE INDEX IX_capacity_schedule_history_schedule_time
+          ON capacity_schedule_history (schedule_id, executed_at DESC);
+      END
+    `);
+
     // Add enterprise_app_object_id column if missing
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'enterprise_app_object_id') ALTER TABLE service_principals ADD enterprise_app_object_id NVARCHAR(255) NULL`);
     // Add timezone column to capacity_schedules if missing

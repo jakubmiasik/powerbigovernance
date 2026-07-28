@@ -250,6 +250,10 @@ function toggleDensity() {
   }
   // Last refreshed timestamp
   var ts = document.getElementById('lastRefreshed');
-  if (ts) ts.textContent = new Date().toLocaleTimeString();
+  if (ts) {
+    var updateTopClock = function() { ts.textContent = new Date().toLocaleTimeString(); };
+    updateTopClock();
+    setInterval(updateTopClock, 1000);
+  }
 })();
 </script>
