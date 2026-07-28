@@ -5,55 +5,73 @@ const { createPowerBIService } = require('./powerbiService');
 let schedulerStarted = false;
 const lastTriggeredSlots = new Map();
 
+async function runScheduleWithSp(schedule, sp) {
+  const pbi = createPowerBIService(sp);
+  const { subscription_id, resource_group, capacity_name, action } = schedule;
+  const spLabel = `${sp.name || 'SP'} (${sp.id})`;
+  console.log(`[Scheduler] Trying ${action} on "${capacity_name}" via ${spLabel}`);
+
+  // Check current state before executing to avoid 400 errors
+  try {
+    const detail = await pbi.getArmCapacityDetail(subscription_id, resource_group, capacity_name);
+    const currentState = (detail.properties && detail.properties.state) || '';
+    const provisioningState = (detail.properties && detail.properties.provisioningState) || '';
+
+    // Skip if already in target state
+    if (action === 'suspend' && (currentState === 'Paused' || currentState === 'Suspended')) {
+      return { status: 'skipped', message: `Capacity already paused (checked with ${spLabel})` };
+    }
+    if (action === 'resume' && currentState === 'Active') {
+      return { status: 'skipped', message: `Capacity already active (checked with ${spLabel})` };
+    }
+    // Skip if in transitional state (provisioning, updating, etc.)
+    if (provisioningState && provisioningState !== 'Succeeded') {
+      return { status: 'skipped', message: `Capacity in transitional state: ${provisioningState}` };
+    }
+  } catch (stateErr) {
+    // Continue anyway — worst case we get an action error and try next SP
+    console.warn(`[Scheduler] State check failed for "${capacity_name}" via ${spLabel}:`, stateErr.message);
+  }
+
+  if (action === 'suspend') {
+    await pbi.suspendCapacity(subscription_id, resource_group, capacity_name);
+  } else if (action === 'resume') {
+    await pbi.resumeCapacity(subscription_id, resource_group, capacity_name);
+  } else {
+    throw new Error(`Unsupported schedule action "${action}"`);
+  }
+
+  return { status: 'success', message: `${action} completed successfully via ${spLabel}` };
+}
+
 async function executeSchedule(schedule) {
   try {
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) {
+    const allSps = await db.getServicePrincipals();
+    if (allSps.length === 0) {
       console.log('[Scheduler] No SP configured, skipping schedule', schedule.id);
       await db.logScheduleExecution(schedule.id, schedule.capacity_name, schedule.action, 'error', 'No service principal configured');
       return;
     }
-    const pbi = createPowerBIService(sps[0]);
-    const { subscription_id, resource_group, capacity_name, action } = schedule;
 
-    console.log(`[Scheduler] Executing ${action} on capacity "${capacity_name}" (${resource_group})`);
+    const preferredSpId = schedule.sp_id != null ? parseInt(schedule.sp_id, 10) : null;
+    const preferred = Number.isFinite(preferredSpId) ? allSps.find(sp => parseInt(sp.id, 10) === preferredSpId) : null;
+    const candidates = preferred
+      ? [preferred].concat(allSps.filter(sp => parseInt(sp.id, 10) !== parseInt(preferred.id, 10)))
+      : allSps;
 
-    // Check current state before executing to avoid 400 errors
-    try {
-      const detail = await pbi.getArmCapacityDetail(subscription_id, resource_group, capacity_name);
-      const currentState = (detail.properties && detail.properties.state) || '';
-      const provisioningState = (detail.properties && detail.properties.provisioningState) || '';
-
-      // Skip if already in target state
-      if (action === 'suspend' && (currentState === 'Paused' || currentState === 'Suspended')) {
-        console.log(`[Scheduler] Capacity "${capacity_name}" already paused/suspended, skipping.`);
-        await db.logScheduleExecution(schedule.id, capacity_name, action, 'skipped', 'Capacity already paused');
+    let lastError = null;
+    for (const sp of candidates) {
+      try {
+        const result = await runScheduleWithSp(schedule, sp);
+        await db.logScheduleExecution(schedule.id, schedule.capacity_name, schedule.action, result.status, result.message);
         return;
+      } catch (err) {
+        lastError = err;
+        console.warn(`[Scheduler] Attempt failed for schedule ${schedule.id} via SP ${sp.id}:`, err.message);
       }
-      if (action === 'resume' && currentState === 'Active') {
-        console.log(`[Scheduler] Capacity "${capacity_name}" already active, skipping.`);
-        await db.logScheduleExecution(schedule.id, capacity_name, action, 'skipped', 'Capacity already active');
-        return;
-      }
-      // Skip if in transitional state (provisioning, updating, etc.)
-      if (provisioningState && provisioningState !== 'Succeeded') {
-        console.log(`[Scheduler] Capacity "${capacity_name}" in transitional state (${provisioningState}), skipping.`);
-        await db.logScheduleExecution(schedule.id, capacity_name, action, 'skipped', `Capacity in transitional state: ${provisioningState}`);
-        return;
-      }
-    } catch (stateErr) {
-      console.warn(`[Scheduler] Could not check state for "${capacity_name}":`, stateErr.message);
-      // Continue anyway — worst case we get the 400 and log it
     }
 
-    if (action === 'suspend') {
-      await pbi.suspendCapacity(subscription_id, resource_group, capacity_name);
-    } else if (action === 'resume') {
-      await pbi.resumeCapacity(subscription_id, resource_group, capacity_name);
-    }
-
-    console.log(`[Scheduler] ${action} completed for "${capacity_name}"`);
-    await db.logScheduleExecution(schedule.id, capacity_name, action, 'success', `${action} completed successfully`);
+    throw lastError || new Error('No service principal was able to execute this schedule.');
   } catch (err) {
     console.error(`[Scheduler] Error executing schedule ${schedule.id}:`, err.message);
     await db.logScheduleExecution(schedule.id, schedule.capacity_name, schedule.action, 'error', err.message);

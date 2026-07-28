@@ -183,6 +183,14 @@ router.post('/:name/schedule', async (req, res) => {
     if (!subscriptionId || !resourceGroup || !action || !scheduleType) {
       return res.json({ success: false, message: 'All fields are required.' });
     }
+    const allSps = await db.getServicePrincipals();
+    if (!allSps.length) {
+      return res.json({ success: false, message: 'No service principal configured. Add one in Settings first.' });
+    }
+    const preferredSpId = res.locals.globalRun && res.locals.globalRun.sp_id ? parseInt(res.locals.globalRun.sp_id, 10) : null;
+    const selectedSp = Number.isFinite(preferredSpId) ? allSps.find(s => parseInt(s.id, 10) === preferredSpId) : null;
+    const effectiveSp = selectedSp || allSps[0];
+
     await db.saveCapacitySchedule({
       capacityName: req.params.name,
       subscriptionId,
@@ -193,6 +201,7 @@ router.post('/:name/schedule', async (req, res) => {
       minute: minute != null ? parseInt(minute) : null,
       day: day || null,
       timezone: timezone || 'UTC',
+      spId: parseInt(effectiveSp.id, 10),
       enabled: true,
     });
     res.json({ success: true });
@@ -215,6 +224,10 @@ router.delete('/schedule/:id', async (req, res) => {
 router.put('/schedule/:id', async (req, res) => {
   try {
     const { action, scheduleType, hour, minute, day, timezone } = req.body;
+    const allSps = await db.getServicePrincipals();
+    const preferredSpId = res.locals.globalRun && res.locals.globalRun.sp_id ? parseInt(res.locals.globalRun.sp_id, 10) : null;
+    const selectedSp = Number.isFinite(preferredSpId) ? allSps.find(s => parseInt(s.id, 10) === preferredSpId) : null;
+    const effectiveSp = selectedSp || allSps[0] || null;
     await db.updateCapacitySchedule(parseInt(req.params.id), {
       action,
       scheduleType,
@@ -222,6 +235,7 @@ router.put('/schedule/:id', async (req, res) => {
       minute: minute != null ? parseInt(minute) : undefined,
       day: day || undefined,
       timezone: timezone || undefined,
+      spId: effectiveSp ? parseInt(effectiveSp.id, 10) : undefined,
     });
     res.json({ success: true });
   } catch (err) {
@@ -250,6 +264,5 @@ router.get('/history/:capacityName', async (req, res) => {
 });
 
 module.exports = router;
-
 
 
