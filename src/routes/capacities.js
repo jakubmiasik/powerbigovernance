@@ -3,6 +3,12 @@ const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
 
+function normalizeTimezoneInput(tz) {
+  const raw = (tz || 'UTC').toString().trim();
+  const cleaned = raw.replace(/\s*\(.*\)\s*$/, '').trim();
+  return cleaned || 'UTC';
+}
+
 // Helper to get a PBI service instance using the first configured SP
 async function getPbiService(res) {
   const globalRun = res ? res.locals.globalRun : null;
@@ -200,7 +206,7 @@ router.post('/:name/schedule', async (req, res) => {
       hour: hour != null ? parseInt(hour) : null,
       minute: minute != null ? parseInt(minute) : null,
       day: day || null,
-      timezone: timezone || 'UTC',
+      timezone: normalizeTimezoneInput(timezone),
       spId: parseInt(effectiveSp.id, 10),
       enabled: true,
     });
@@ -234,7 +240,7 @@ router.put('/schedule/:id', async (req, res) => {
       hour: hour != null ? parseInt(hour) : undefined,
       minute: minute != null ? parseInt(minute) : undefined,
       day: day || undefined,
-      timezone: timezone || undefined,
+      timezone: timezone !== undefined ? normalizeTimezoneInput(timezone) : undefined,
       spId: effectiveSp ? parseInt(effectiveSp.id, 10) : undefined,
     });
     res.json({ success: true });
@@ -264,5 +270,4 @@ router.get('/history/:capacityName', async (req, res) => {
 });
 
 module.exports = router;
-
 

@@ -436,6 +436,21 @@ async function runMigrations() {
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'enterprise_app_object_id') ALTER TABLE service_principals ADD enterprise_app_object_id NVARCHAR(255) NULL`);
     // Add timezone column to capacity_schedules if missing
     await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'timezone') ALTER TABLE capacity_schedules ADD timezone NVARCHAR(100) NULL`);
+    // Normalize legacy timezone labels like "Europe/Warsaw (CET)" to IANA IDs
+    await execSql(conn, `
+      IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U')
+      BEGIN
+        UPDATE capacity_schedules
+        SET timezone = LTRIM(RTRIM(LEFT(timezone, CHARINDEX('(', timezone) - 1)))
+        WHERE timezone IS NOT NULL AND timezone LIKE '%(%';
+        UPDATE capacity_schedules SET timezone = 'Europe/Warsaw' WHERE timezone IN ('CET', 'CEST');
+        UPDATE capacity_schedules SET timezone = 'Europe/Helsinki' WHERE timezone = 'EET';
+        UPDATE capacity_schedules SET timezone = 'America/New_York' WHERE timezone = 'ET';
+        UPDATE capacity_schedules SET timezone = 'America/Chicago' WHERE timezone = 'CT';
+        UPDATE capacity_schedules SET timezone = 'America/Denver' WHERE timezone = 'MT';
+        UPDATE capacity_schedules SET timezone = 'America/Los_Angeles' WHERE timezone = 'PT';
+      END
+    `);
     // Add service principal reference to schedules if missing
     await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'sp_id') ALTER TABLE capacity_schedules ADD sp_id INT NULL`);
     // If legacy typo column exists, copy values into sp_id

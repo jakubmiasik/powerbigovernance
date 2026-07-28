@@ -4,6 +4,45 @@ const { createPowerBIService } = require('./powerbiService');
 
 let schedulerStarted = false;
 const lastTriggeredSlots = new Map();
+const timezoneSupportCache = new Map();
+
+function normalizeTimezone(tz) {
+  const raw = (tz || 'UTC').toString().trim();
+  const cleaned = raw.replace(/\s*\(.*\)\s*$/, '').trim();
+  const upper = cleaned.toUpperCase();
+  const aliasMap = {
+    UTC: 'UTC',
+    CET: 'Europe/Warsaw',
+    CEST: 'Europe/Warsaw',
+    EET: 'Europe/Helsinki',
+    ET: 'America/New_York',
+    CT: 'America/Chicago',
+    MT: 'America/Denver',
+    PT: 'America/Los_Angeles',
+    GMT: 'Europe/London',
+    BST: 'Europe/London',
+    IST: 'Asia/Kolkata',
+    JST: 'Asia/Tokyo',
+    SGT: 'Asia/Singapore',
+    AEST: 'Australia/Sydney',
+    SAST: 'Africa/Johannesburg',
+  };
+  if (cleaned.includes('/')) return cleaned;
+  return aliasMap[upper] || 'UTC';
+}
+
+function isTimezoneSupported(tz) {
+  if (timezoneSupportCache.has(tz)) return timezoneSupportCache.get(tz);
+  let supported = true;
+  try {
+    // Throws RangeError when timezone is invalid/unsupported in this runtime
+    new Intl.DateTimeFormat('en-US', { timeZone: tz }).format(new Date());
+  } catch {
+    supported = false;
+  }
+  timezoneSupportCache.set(tz, supported);
+  return supported;
+}
 
 async function runScheduleWithSp(schedule, sp) {
   const pbi = createPowerBIService(sp);
@@ -126,7 +165,11 @@ function startScheduler() {
       for (const schedule of schedules) {
         if (!schedule.enabled) continue;
 
-        const tz = schedule.timezone || 'UTC';
+        const tz = normalizeTimezone(schedule.timezone);
+        if (!isTimezoneSupported(tz)) {
+          console.warn(`[Scheduler] Unsupported timezone "${schedule.timezone}" for schedule ${schedule.id}. Skipping.`);
+          continue;
+        }
         const now = getTimeInTimezone(tz);
         const slotKey = getCurrentSlotKey(schedule, now);
         if (!slotKey) continue;
