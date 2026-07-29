@@ -36,29 +36,40 @@ function normalizeTimezone(tz) {
 
 function getTimeInTimezone(tz, date) {
   const now = date || new Date();
-  const parts = {};
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz,
-    hour: 'numeric',
-    minute: 'numeric',
-    hour12: false,
-    weekday: 'short',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
-  for (const p of fmt.formatToParts(now)) {
-    parts[p.type] = p.value;
+  try {
+    const parts = {};
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour: 'numeric',
+      minute: 'numeric',
+      hour12: false,
+      weekday: 'short',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    for (const p of fmt.formatToParts(now)) {
+      parts[p.type] = p.value;
+    }
+    const weekdayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    return {
+      year: parseInt(parts.year, 10),
+      month: parseInt(parts.month, 10),
+      day: parseInt(parts.day, 10),
+      hour: parseInt(parts.hour, 10) % 24,
+      minute: parseInt(parts.minute, 10),
+      dayOfWeek: weekdayMap[parts.weekday] !== undefined ? weekdayMap[parts.weekday] : now.getUTCDay(),
+    };
+  } catch {
+    return {
+      year: now.getUTCFullYear(),
+      month: now.getUTCMonth() + 1,
+      day: now.getUTCDate(),
+      hour: now.getUTCHours(),
+      minute: now.getUTCMinutes(),
+      dayOfWeek: now.getUTCDay(),
+    };
   }
-  const weekdayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-  return {
-    year: parseInt(parts.year, 10),
-    month: parseInt(parts.month, 10),
-    day: parseInt(parts.day, 10),
-    hour: parseInt(parts.hour, 10) % 24,
-    minute: parseInt(parts.minute, 10),
-    dayOfWeek: weekdayMap[parts.weekday] !== undefined ? weekdayMap[parts.weekday] : now.getUTCDay(),
-  };
 }
 
 function getTimezoneOffsetMs(date, timezone) {
