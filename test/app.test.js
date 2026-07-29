@@ -66,3 +66,17 @@ test('scheduler resolves persisted UTC fields for hourly schedules', () => {
   });
   assert.deepEqual(resolved, { minuteUtc: 30, hourUtc: null, dayUtc: null });
 });
+
+test('scheduler marks successful schedule results complete', () => {
+  assert.equal(scheduler._private.isScheduleResultComplete({ status: 'success', message: 'done' }), true);
+});
+
+test('scheduler retries failed or transitional schedule results', () => {
+  assert.equal(scheduler._private.isScheduleResultComplete({ status: 'error', message: 'API error' }), false);
+  assert.equal(scheduler._private.isScheduleResultComplete({ status: 'skipped', message: 'Capacity in transitional state: Updating' }), false);
+});
+
+test('scheduler treats already-target-state skips as complete', () => {
+  assert.equal(scheduler._private.isScheduleResultComplete({ status: 'skipped', message: 'Capacity already paused' }), true);
+  assert.equal(scheduler._private.isScheduleResultComplete({ status: 'skipped', message: 'Capacity already active' }), true);
+});

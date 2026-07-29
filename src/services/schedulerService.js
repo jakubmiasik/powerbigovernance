@@ -53,7 +53,7 @@ async function executeSchedule(schedule) {
     if (allSps.length === 0) {
       console.log('[Scheduler] No SP configured, skipping schedule', schedule.id);
       await db.logScheduleExecution(schedule.id, schedule.capacity_name, schedule.action, 'error', 'No service principal configured');
-      return;
+      return { status: 'error', message: 'No service principal configured' };
     }
 
     const preferredSpId = schedule.sp_id != null ? parseInt(schedule.sp_id, 10) : null;
@@ -67,7 +67,7 @@ async function executeSchedule(schedule) {
       try {
         const result = await runScheduleWithSp(schedule, sp);
         await db.logScheduleExecution(schedule.id, schedule.capacity_name, schedule.action, result.status, result.message);
-        return;
+        return result;
       } catch (err) {
         lastError = err;
         console.warn(`[Scheduler] Attempt failed for schedule ${schedule.id} via SP ${sp.id}:`, err.message);
@@ -78,7 +78,15 @@ async function executeSchedule(schedule) {
   } catch (err) {
     console.error(`[Scheduler] Error executing schedule ${schedule.id}:`, err.message);
     await db.logScheduleExecution(schedule.id, schedule.capacity_name, schedule.action, 'error', err.message);
+    return { status: 'error', message: err.message };
   }
+}
+
+
+function isScheduleResultComplete(result) {
+  if (!result) return false;
+  if (result.status === 'success') return true;
+  return result.status === 'skipped' && /already (paused|active)/i.test(result.message || '');
 }
 
 function buildCronExpression(schedule) {
@@ -135,7 +143,10 @@ async function runSchedulerTick(source) {
         'triggered',
         `Scheduler due UTC window reached at ${String(nowUtc.hour).padStart(2, '0')}:${String(nowUtc.minute).padStart(2, '0')} via ${source || 'tick'}`
       );
-      await executeSchedule(schedule);
+      const result = await executeSchedule(schedule);
+      if (!isScheduleResultComplete(result)) {
+        lastTriggeredSlots.delete(scheduleId);
+      }
     }
   } catch (err) {
     console.error('[Scheduler] Error checking schedules:', err.message);
@@ -239,5 +250,5 @@ function resolveScheduleUtc(schedule) {
 module.exports = {
   startScheduler,
   kickScheduler,
-  _private: { buildCronExpression, getCurrentUtcSlotKey, resolveScheduleUtc },
+  _private: { buildCronExpression, getCurrentUtcSlotKey, resolveScheduleUtc, isScheduleResultComplete },
 };
