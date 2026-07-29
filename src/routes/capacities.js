@@ -4,6 +4,31 @@ const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
 const { normalizeTimezone, convertScheduleToUtc } = require('../services/scheduleTimeService');
 
+function getDetailedErrorMessage(err) {
+  if (!err) return 'Unknown error';
+  const parts = [];
+  if (err.message) parts.push(err.message);
+  if (err.code) parts.push(`code=${err.code}`);
+  if (err.number !== undefined) parts.push(`number=${err.number}`);
+  if (err.state !== undefined) parts.push(`state=${err.state}`);
+  if (err.class !== undefined) parts.push(`class=${err.class}`);
+
+  const original = err.originalError || err.cause;
+  if (original) {
+    if (original.message && original.message !== err.message) parts.push(`inner=${original.message}`);
+    if (original.info && original.info.message) parts.push(`sql=${original.info.message}`);
+  }
+
+  if (Array.isArray(err.precedingErrors) && err.precedingErrors.length) {
+    const nested = err.precedingErrors
+      .map(e => e && (e.message || (e.info && e.info.message)))
+      .filter(Boolean);
+    if (nested.length) parts.push(`details=${nested.join(' | ')}`);
+  }
+
+  return parts.join(' ; ');
+}
+
 // Helper to get a PBI service instance using the first configured SP
 async function getPbiService(res) {
   const globalRun = res ? res.locals.globalRun : null;
@@ -229,7 +254,9 @@ router.post('/:name/schedule', async (req, res) => {
     });
     res.json({ success: true });
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    const details = getDetailedErrorMessage(err);
+    console.error('[Capacities] Add schedule failed:', details);
+    res.json({ success: false, message: details });
   }
 });
 
@@ -284,7 +311,9 @@ router.put('/schedule/:id', async (req, res) => {
     });
     res.json({ success: true });
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    const details = getDetailedErrorMessage(err);
+    console.error('[Capacities] Update schedule failed:', details);
+    res.json({ success: false, message: details });
   }
 });
 
