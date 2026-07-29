@@ -254,30 +254,25 @@ async function saveCapacitySchedule(schedule) {
       { name: 'minuteUtc', type: TYPES.Int, value: schedule.minuteUtc != null ? schedule.minuteUtc : null },
       { name: 'dayUtc', type: TYPES.NVarChar, value: schedule.dayUtc || null },
     ];
+    const withSp = [...baseParams, { name: 'spId', type: TYPES.Int, value: schedule.spId != null ? schedule.spId : null }];
     try {
       await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone, schedule_hour_utc, schedule_minute_utc, schedule_day_utc, sp_id)
-        VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz, @hourUtc, @minuteUtc, @dayUtc, @spId)`, [
-        ...baseParams,
-        { name: 'spId', type: TYPES.Int, value: schedule.spId != null ? schedule.spId : null },
-      ]);
-    } catch (err) {
-      if (isColumnMissingError(err, 'sp_id') || isColumnMissingError(err, 'spd_id')) {
+        VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz, @hourUtc, @minuteUtc, @dayUtc, @spId)`, withSp);
+    } catch (err1) {
+      const utcColsMissing =
+        isColumnMissingError(err1, 'schedule_hour_utc') ||
+        isColumnMissingError(err1, 'schedule_minute_utc') ||
+        isColumnMissingError(err1, 'schedule_day_utc');
+      const spColsMissing = isColumnMissingError(err1, 'sp_id') || isColumnMissingError(err1, 'spd_id');
+      if (!utcColsMissing && !spColsMissing) throw err1;
+
+      try {
+        await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone, sp_id)
+          VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz, @spId)`, withSp);
+      } catch (err2) {
+        if (!(isColumnMissingError(err2, 'sp_id') || isColumnMissingError(err2, 'spd_id'))) throw err2;
         await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone)
           VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz)`, baseParams);
-      } else {
-        if (
-          isColumnMissingError(err, 'schedule_hour_utc') ||
-          isColumnMissingError(err, 'schedule_minute_utc') ||
-          isColumnMissingError(err, 'schedule_day_utc')
-        ) {
-          await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone, sp_id)
-            VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz, @spId)`, [
-            ...baseParams,
-            { name: 'spId', type: TYPES.Int, value: schedule.spId != null ? schedule.spId : null },
-          ]);
-        } else {
-          throw err;
-        }
       }
     }
   } finally {
