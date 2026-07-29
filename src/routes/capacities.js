@@ -192,13 +192,24 @@ router.post('/:name/schedule', async (req, res) => {
     const selectedSp = Number.isFinite(preferredSpId) ? allSps.find(s => parseInt(s.id, 10) === preferredSpId) : null;
     const effectiveSp = selectedSp || allSps[0];
     const normalizedTimezone = normalizeTimezone(timezone);
-    const utcSchedule = convertScheduleToUtc({
-      scheduleType,
-      hour,
-      minute,
-      day: day || null,
-      timezone: normalizedTimezone,
-    });
+    let utcSchedule;
+    try {
+      utcSchedule = convertScheduleToUtc({
+        scheduleType,
+        hour,
+        minute,
+        day: day || null,
+        timezone: normalizedTimezone,
+      });
+    } catch {
+      const parsedHour = Number.isFinite(parseInt(hour, 10)) ? parseInt(hour, 10) : 0;
+      const parsedMinute = Number.isFinite(parseInt(minute, 10)) ? parseInt(minute, 10) : 0;
+      utcSchedule = {
+        scheduleHourUtc: scheduleType === 'hourly' ? null : parsedHour,
+        scheduleMinuteUtc: parsedMinute,
+        scheduleDayUtc: day || null,
+      };
+    }
 
     await db.saveCapacitySchedule({
       capacityName: req.params.name,
@@ -241,13 +252,24 @@ router.put('/schedule/:id', async (req, res) => {
     const selectedSp = Number.isFinite(preferredSpId) ? allSps.find(s => parseInt(s.id, 10) === preferredSpId) : null;
     const effectiveSp = selectedSp || allSps[0] || null;
     const normalizedTimezone = timezone !== undefined ? normalizeTimezone(timezone) : undefined;
-    const utcSchedule = convertScheduleToUtc({
-      scheduleType,
-      hour,
-      minute,
-      day: day || null,
-      timezone: normalizedTimezone || 'UTC',
-    });
+    let utcSchedule;
+    try {
+      utcSchedule = convertScheduleToUtc({
+        scheduleType,
+        hour,
+        minute,
+        day: day || null,
+        timezone: normalizedTimezone || 'UTC',
+      });
+    } catch {
+      const parsedHour = Number.isFinite(parseInt(hour, 10)) ? parseInt(hour, 10) : 0;
+      const parsedMinute = Number.isFinite(parseInt(minute, 10)) ? parseInt(minute, 10) : 0;
+      utcSchedule = {
+        scheduleHourUtc: scheduleType === 'hourly' ? null : parsedHour,
+        scheduleMinuteUtc: parsedMinute,
+        scheduleDayUtc: day || null,
+      };
+    }
     await db.updateCapacitySchedule(parseInt(req.params.id), {
       action,
       scheduleType,
