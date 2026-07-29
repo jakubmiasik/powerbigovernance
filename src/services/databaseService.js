@@ -265,7 +265,7 @@ async function saveCapacitySchedule(schedule) {
       OUTPUT INSERTED.id
       VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz)`, baseParams);
     const insertedId = insertRows && insertRows[0] ? parseInt(insertRows[0].id, 10) : null;
-    if (!Number.isFinite(insertedId)) return;
+    if (!Number.isFinite(insertedId)) return null;
 
     try {
       await execSql(conn, `UPDATE capacity_schedules
@@ -280,6 +280,7 @@ async function saveCapacitySchedule(schedule) {
     } catch (err) {
       if (!isAnyScheduleCompatColumnMissing(err)) throw err;
     }
+    return insertedId;
   } finally {
     conn.close();
   }

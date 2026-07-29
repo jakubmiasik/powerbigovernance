@@ -4,8 +4,8 @@ const { validateConfig } = require('./config/settings');
 
 async function bootstrap() {
   validateConfig({ requireProductionSecrets: process.env.NODE_ENV === 'production' });
-  startScheduler();
   await runMigrations();
+  startScheduler();
 }
 
 module.exports = { bootstrap };
