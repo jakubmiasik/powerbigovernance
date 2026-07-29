@@ -192,8 +192,8 @@ function getDateKey(parts) {
 
 function getCurrentUtcSlotKey(schedule, nowUtc, effectiveUtc) {
   const type = schedule.schedule_type;
-  const schedMin = effectiveUtc.minuteUtc;
-  const schedHour = effectiveUtc.hourUtc;
+  const schedMin = effectiveUtc.minuteUtc != null ? effectiveUtc.minuteUtc : effectiveUtc.scheduleMinuteUtc;
+  const schedHour = effectiveUtc.hourUtc != null ? effectiveUtc.hourUtc : effectiveUtc.scheduleHourUtc;
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const dateKey = getDateKey(nowUtc);
 
@@ -235,13 +235,18 @@ function resolveScheduleUtc(schedule) {
   }
 
   try {
-    return convertScheduleToUtc({
+    const utc = convertScheduleToUtc({
       scheduleType: schedule.schedule_type,
       hour: schedule.schedule_hour,
       minute: schedule.schedule_minute,
       day: schedule.schedule_day,
       timezone: schedule.timezone,
     });
+    return {
+      minuteUtc: utc.scheduleMinuteUtc,
+      hourUtc: utc.scheduleHourUtc,
+      dayUtc: utc.scheduleDayUtc || null,
+    };
   } catch {
     return null;
   }

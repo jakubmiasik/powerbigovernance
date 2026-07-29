@@ -323,7 +323,10 @@ router.delete('/schedule/:id', async (req, res) => {
 router.put('/schedule/:id', async (req, res) => {
   try {
     const { action, scheduleType, hour, minute, day, timezone } = req.body;
-    const normalizedTimezone = timezone !== undefined ? normalizeTimezone(timezone) : undefined;
+    if (!action || !scheduleType) {
+      return res.json({ success: false, message: 'Action and schedule type are required.' });
+    }
+    const normalizedTimezone = normalizeTimezone(timezone || 'UTC');
     let utcSchedule;
     try {
       utcSchedule = convertScheduleToUtc({
@@ -331,7 +334,7 @@ router.put('/schedule/:id', async (req, res) => {
         hour,
         minute,
         day: day || null,
-        timezone: normalizedTimezone || 'UTC',
+        timezone: normalizedTimezone,
       });
     } catch {
       const parsedHour = Number.isFinite(parseInt(hour, 10)) ? parseInt(hour, 10) : 0;

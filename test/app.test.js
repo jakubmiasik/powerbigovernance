@@ -67,6 +67,23 @@ test('scheduler resolves persisted UTC fields for hourly schedules', () => {
   assert.deepEqual(resolved, { minuteUtc: 30, hourUtc: null, dayUtc: null });
 });
 
+
+test('scheduler normalizes calculated UTC fields before matching due slots', () => {
+  const resolved = scheduler._private.resolveScheduleUtc({
+    schedule_type: 'daily',
+    schedule_hour: 9,
+    schedule_minute: 45,
+    timezone: 'UTC',
+  });
+  assert.deepEqual(resolved, { minuteUtc: 45, hourUtc: 9, dayUtc: resolved.dayUtc });
+  const slotKey = scheduler._private.getCurrentUtcSlotKey(
+    { schedule_type: 'daily' },
+    { year: 2026, month: 7, day: 29, hour: 9, minute: 45, dayOfWeek: 3 },
+    resolved
+  );
+  assert.equal(slotKey, '2026-07-29');
+});
+
 test('scheduler marks successful schedule results complete', () => {
   assert.equal(scheduler._private.isScheduleResultComplete({ status: 'success', message: 'done' }), true);
 });
