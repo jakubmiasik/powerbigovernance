@@ -76,6 +76,16 @@ function isColumnMissingError(err, columnName) {
   return !!(err && err.message && err.message.includes(`Invalid column name '${columnName}'`));
 }
 
+function isAnyScheduleCompatColumnMissing(err) {
+  return (
+    isColumnMissingError(err, 'sp_id') ||
+    isColumnMissingError(err, 'spd_id') ||
+    isColumnMissingError(err, 'schedule_hour_utc') ||
+    isColumnMissingError(err, 'schedule_minute_utc') ||
+    isColumnMissingError(err, 'schedule_day_utc')
+  );
+}
+
 // Service Principals CRUD
 async function getServicePrincipals() {
   const conn = await getConnection();
@@ -250,30 +260,25 @@ async function saveCapacitySchedule(schedule) {
       { name: 'day', type: TYPES.NVarChar, value: schedule.day || null },
       { name: 'enabled', type: TYPES.Bit, value: schedule.enabled !== false },
       { name: 'tz', type: TYPES.NVarChar, value: schedule.timezone || 'UTC' },
-      { name: 'hourUtc', type: TYPES.Int, value: schedule.hourUtc != null ? schedule.hourUtc : null },
-      { name: 'minuteUtc', type: TYPES.Int, value: schedule.minuteUtc != null ? schedule.minuteUtc : null },
-      { name: 'dayUtc', type: TYPES.NVarChar, value: schedule.dayUtc || null },
     ];
-    const withSp = [...baseParams, { name: 'spId', type: TYPES.Int, value: schedule.spId != null ? schedule.spId : null }];
-    try {
-      await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone, schedule_hour_utc, schedule_minute_utc, schedule_day_utc, sp_id)
-        VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz, @hourUtc, @minuteUtc, @dayUtc, @spId)`, withSp);
-    } catch (err1) {
-      const utcColsMissing =
-        isColumnMissingError(err1, 'schedule_hour_utc') ||
-        isColumnMissingError(err1, 'schedule_minute_utc') ||
-        isColumnMissingError(err1, 'schedule_day_utc');
-      const spColsMissing = isColumnMissingError(err1, 'sp_id') || isColumnMissingError(err1, 'spd_id');
-      if (!utcColsMissing && !spColsMissing) throw err1;
+    const insertRows = await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone)
+      OUTPUT INSERTED.id
+      VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz)`, baseParams);
+    const insertedId = insertRows && insertRows[0] ? parseInt(insertRows[0].id, 10) : null;
+    if (!Number.isFinite(insertedId)) return;
 
-      try {
-        await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone, sp_id)
-          VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz, @spId)`, withSp);
-      } catch (err2) {
-        if (!(isColumnMissingError(err2, 'sp_id') || isColumnMissingError(err2, 'spd_id'))) throw err2;
-        await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone)
-          VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz)`, baseParams);
-      }
+    try {
+      await execSql(conn, `UPDATE capacity_schedules
+        SET sp_id=@spId, schedule_hour_utc=@hourUtc, schedule_minute_utc=@minuteUtc, schedule_day_utc=@dayUtc
+        WHERE id=@id`, [
+        { name: 'id', type: TYPES.Int, value: insertedId },
+        { name: 'spId', type: TYPES.Int, value: schedule.spId != null ? schedule.spId : null },
+        { name: 'hourUtc', type: TYPES.Int, value: schedule.hourUtc != null ? schedule.hourUtc : null },
+        { name: 'minuteUtc', type: TYPES.Int, value: schedule.minuteUtc != null ? schedule.minuteUtc : null },
+        { name: 'dayUtc', type: TYPES.NVarChar, value: schedule.dayUtc || null },
+      ]);
+    } catch (err) {
+      if (!isAnyScheduleCompatColumnMissing(err)) throw err;
     }
   } finally {
     conn.close();
@@ -306,42 +311,33 @@ async function toggleCapacitySchedule(id, enabled) {
 async function updateCapacitySchedule(id, fields) {
   const conn = await getConnection();
   try {
-    const sets = [];
-    const params = [{ name: 'id', type: TYPES.Int, value: id }];
-    if (fields.action !== undefined) { sets.push('action=@action'); params.push({ name: 'action', type: TYPES.NVarChar, value: fields.action }); }
-    if (fields.scheduleType !== undefined) { sets.push('schedule_type=@type'); params.push({ name: 'type', type: TYPES.NVarChar, value: fields.scheduleType }); }
-    if (fields.hour !== undefined) { sets.push('schedule_hour=@hour'); params.push({ name: 'hour', type: TYPES.Int, value: fields.hour }); }
-    if (fields.minute !== undefined) { sets.push('schedule_minute=@minute'); params.push({ name: 'minute', type: TYPES.Int, value: fields.minute }); }
-    if (fields.day !== undefined) { sets.push('schedule_day=@day'); params.push({ name: 'day', type: TYPES.NVarChar, value: fields.day }); }
-    if (fields.timezone !== undefined) { sets.push('timezone=@tz'); params.push({ name: 'tz', type: TYPES.NVarChar, value: fields.timezone }); }
-    if (fields.hourUtc !== undefined) { sets.push('schedule_hour_utc=@hourUtc'); params.push({ name: 'hourUtc', type: TYPES.Int, value: fields.hourUtc }); }
-    if (fields.minuteUtc !== undefined) { sets.push('schedule_minute_utc=@minuteUtc'); params.push({ name: 'minuteUtc', type: TYPES.Int, value: fields.minuteUtc }); }
-    if (fields.dayUtc !== undefined) { sets.push('schedule_day_utc=@dayUtc'); params.push({ name: 'dayUtc', type: TYPES.NVarChar, value: fields.dayUtc }); }
-    if (sets.length === 0) return;
-    const baseSets = sets.slice();
-    const baseParams = params.slice();
-    if (fields.spId !== undefined) { sets.push('sp_id=@spId'); params.push({ name: 'spId', type: TYPES.Int, value: fields.spId }); }
+    const baseSets = [];
+    const baseParams = [{ name: 'id', type: TYPES.Int, value: id }];
+    if (fields.action !== undefined) { baseSets.push('action=@action'); baseParams.push({ name: 'action', type: TYPES.NVarChar, value: fields.action }); }
+    if (fields.scheduleType !== undefined) { baseSets.push('schedule_type=@type'); baseParams.push({ name: 'type', type: TYPES.NVarChar, value: fields.scheduleType }); }
+    if (fields.hour !== undefined) { baseSets.push('schedule_hour=@hour'); baseParams.push({ name: 'hour', type: TYPES.Int, value: fields.hour }); }
+    if (fields.minute !== undefined) { baseSets.push('schedule_minute=@minute'); baseParams.push({ name: 'minute', type: TYPES.Int, value: fields.minute }); }
+    if (fields.day !== undefined) { baseSets.push('schedule_day=@day'); baseParams.push({ name: 'day', type: TYPES.NVarChar, value: fields.day }); }
+    if (fields.timezone !== undefined) { baseSets.push('timezone=@tz'); baseParams.push({ name: 'tz', type: TYPES.NVarChar, value: fields.timezone }); }
+    if (baseSets.length > 0) {
+      await execSql(conn, 'UPDATE capacity_schedules SET ' + baseSets.join(', ') + ' WHERE id=@id', baseParams);
+    }
+
+    if (fields.spId === undefined && fields.hourUtc === undefined && fields.minuteUtc === undefined && fields.dayUtc === undefined) return;
     try {
-      await execSql(conn, 'UPDATE capacity_schedules SET ' + sets.join(', ') + ' WHERE id=@id', params);
+      await execSql(conn, `UPDATE capacity_schedules
+        SET sp_id=@spId, schedule_hour_utc=@hourUtc, schedule_minute_utc=@minuteUtc, schedule_day_utc=@dayUtc
+        WHERE id=@id`, [
+        { name: 'id', type: TYPES.Int, value: id },
+        { name: 'spId', type: TYPES.Int, value: fields.spId !== undefined ? fields.spId : null },
+        { name: 'hourUtc', type: TYPES.Int, value: fields.hourUtc !== undefined ? fields.hourUtc : null },
+        { name: 'minuteUtc', type: TYPES.Int, value: fields.minuteUtc !== undefined ? fields.minuteUtc : null },
+        { name: 'dayUtc', type: TYPES.NVarChar, value: fields.dayUtc !== undefined ? fields.dayUtc : null },
+      ]);
     } catch (err) {
-      const hasCompatError =
-        isColumnMissingError(err, 'sp_id') ||
-        isColumnMissingError(err, 'spd_id') ||
-        isColumnMissingError(err, 'schedule_hour_utc') ||
-        isColumnMissingError(err, 'schedule_minute_utc') ||
-        isColumnMissingError(err, 'schedule_day_utc');
-      if (hasCompatError && (fields.spId !== undefined || fields.hourUtc !== undefined || fields.minuteUtc !== undefined || fields.dayUtc !== undefined)) {
-        const safeSets = baseSets.filter(s =>
-          s !== 'schedule_hour_utc=@hourUtc' &&
-          s !== 'schedule_minute_utc=@minuteUtc' &&
-          s !== 'schedule_day_utc=@dayUtc'
-        );
-        const safeParams = baseParams.filter(p => p.name !== 'hourUtc' && p.name !== 'minuteUtc' && p.name !== 'dayUtc');
-        if (safeSets.length) {
-          await execSql(conn, 'UPDATE capacity_schedules SET ' + safeSets.join(', ') + ' WHERE id=@id', safeParams);
-        }
+      if (!isAnyScheduleCompatColumnMissing(err)) {
+        throw err;
       }
-      else { throw err; }
     }
   } finally {
     conn.close();
