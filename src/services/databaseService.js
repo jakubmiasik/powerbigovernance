@@ -1,17 +1,19 @@
 const { Connection, Request, TYPES } = require('tedious');
 const { DefaultAzureCredential } = require('@azure/identity');
 const { convertScheduleToUtc, normalizeTimezone } = require('./scheduleTimeService');
+const { getConfig } = require('../config/settings');
 
-const SQL_SERVER = process.env.SQL_SERVER || 'sql-ydpx5q.database.windows.net';
-const SQL_DATABASE = process.env.SQL_DATABASE || 'pbigovernance';
+const cfg = getConfig();
+const SQL_SERVER = cfg.sql.server;
+const SQL_DATABASE = cfg.sql.database;
 
 let tokenCache = { token: null, expiresOn: null };
+const credential = new DefaultAzureCredential();
 
 async function getToken() {
   if (tokenCache.token && tokenCache.expiresOn && new Date() < new Date(tokenCache.expiresOn - 300000)) {
     return tokenCache.token;
   }
-  const credential = new DefaultAzureCredential();
   const response = await credential.getToken('https://database.windows.net/.default');
   tokenCache = { token: response.token, expiresOn: response.expiresOnTimestamp };
   return response.token;
@@ -20,6 +22,9 @@ async function getToken() {
 function getConnection() {
   return new Promise(async (resolve, reject) => {
     try {
+      if (!SQL_SERVER || !SQL_DATABASE) {
+        throw new Error('SQL_SERVER and SQL_DATABASE must be configured.');
+      }
       const token = await getToken();
       const config = {
         server: SQL_SERVER,

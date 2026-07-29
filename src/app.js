@@ -7,7 +7,8 @@ const cookieParser = require('cookie-parser');
 const path = require('path');
 const { getConfig } = require('./config/settings');
 const { parseEasyAuthUser } = require('./middleware/auth');
-const db = require('./services/databaseService');
+const { securityHeaders, createRateLimiter } = require('./middleware/security');
+const { loadRuns } = require('./middleware/loadRuns');
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
@@ -22,12 +23,19 @@ app.set('views', path.join(__dirname, 'views'));
 app.set('view engine', 'ejs');
 
 // Middleware
+app.use(securityHeaders);
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
 
 const config = getConfig();
+if (isProduction && config.session.secret === 'dev-secret-change-me') {
+  console.warn('[App] SESSION_SECRET is using the development default.');
+}
+if (isProduction) {
+  console.warn('[App] Configure a shared session store before scaling beyond one instance.');
+}
 
 app.use(
   session({
@@ -44,6 +52,7 @@ app.use(
 );
 
 app.use(flash());
+app.use('/api', createRateLimiter({ windowMs: 60 * 1000, max: 120 }));
 
 // Parse EasyAuth user from headers (Azure App Service built-in auth)
 app.use(parseEasyAuthUser);
@@ -74,40 +83,8 @@ app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
-// Global context: selected run + available runs, loaded once per request
-app.use(async (req, res, next) => {
-  res.locals.currentUser = req.user;
-
-  try {
-    const runs = await Promise.race([
-      db.getAnalysisRuns(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('DB timeout')), 5000)),
-    ]);
-    const completedRuns = runs.filter(r => r.status === 'completed');
-    res.locals.availableRuns = completedRuns;
-
-    // Allow ?runId= query param to switch the selection and persist in session
-    if (req.query.runId) {
-      req.session.selectedRunId = parseInt(req.query.runId);
-    }
-
-    const selectedRunId = req.session.selectedRunId;
-    let selectedRun = null;
-    if (selectedRunId) {
-      selectedRun = completedRuns.find(r => r.id === selectedRunId);
-    }
-    if (!selectedRun && completedRuns.length > 0) {
-      selectedRun = completedRuns[0];
-    }
-    res.locals.globalRun = selectedRun;
-    res.locals.selectedRunId = selectedRun ? selectedRun.id : null;
-  } catch {
-    res.locals.availableRuns = [];
-    res.locals.globalRun = null;
-    res.locals.selectedRunId = null;
-  }
-  next();
-});
+// Global context: selected run + available runs, cached to avoid DB work on every request
+app.use(loadRuns);
 
 // Opportunistic scheduler catch-up tick on incoming traffic (throttled internally)
 const { kickScheduler } = require('./services/schedulerService');
@@ -118,7 +95,11 @@ app.use((req, res, next) => {
 
 // API to switch selected run
 app.post('/api/select-run', (req, res) => {
-  req.session.selectedRunId = parseInt(req.body.runId);
+  const selectedRunId = Number.parseInt(req.body.runId, 10);
+  if (!Number.isInteger(selectedRunId) || selectedRunId <= 0) {
+    return res.status(400).json({ success: false, message: 'Invalid runId.' });
+  }
+  req.session.selectedRunId = selectedRunId;
   res.json({ success: true });
 });
 
@@ -162,13 +143,5 @@ app.use((err, req, res, _next) => {
     breadcrumb: [{ label: 'Error', href: '#' }],
   });
 });
-
-// Start capacity scheduler
-const { startScheduler } = require('./services/schedulerService');
-startScheduler();
-
-// Run DB migrations
-const { runMigrations } = require('./services/databaseService');
-runMigrations().catch(err => console.warn('[App] Migration error:', err.message));
 
 module.exports = app;
