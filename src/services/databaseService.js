@@ -98,7 +98,8 @@ function isAnyScheduleCompatColumnMissing(err) {
     isColumnMissingError(err, 'spd_id') ||
     isColumnMissingError(err, 'schedule_hour_utc') ||
     isColumnMissingError(err, 'schedule_minute_utc') ||
-    isColumnMissingError(err, 'schedule_day_utc')
+    isColumnMissingError(err, 'schedule_day_utc') ||
+    isColumnMissingError(err, 'timezone')
   );
 }
 
@@ -345,7 +346,16 @@ async function updateCapacitySchedule(id, fields) {
     if (fields.day !== undefined) { baseSets.push('schedule_day=@day'); baseParams.push({ name: 'day', type: TYPES.NVarChar, value: fields.day }); }
     if (fields.timezone !== undefined) { baseSets.push('timezone=@tz'); baseParams.push({ name: 'tz', type: TYPES.NVarChar, value: fields.timezone }); }
     if (baseSets.length > 0) {
-      await execSql(conn, 'UPDATE capacity_schedules SET ' + baseSets.join(', ') + ' WHERE id=@id', baseParams);
+      try {
+        await execSql(conn, 'UPDATE capacity_schedules SET ' + baseSets.join(', ') + ' WHERE id=@id', baseParams);
+      } catch (err) {
+        if (!isColumnMissingError(err, 'timezone') || fields.timezone === undefined) throw err;
+        const retrySets = baseSets.filter(set => set !== 'timezone=@tz');
+        const retryParams = baseParams.filter(param => param.name !== 'tz');
+        if (retrySets.length > 0) {
+          await execSql(conn, 'UPDATE capacity_schedules SET ' + retrySets.join(', ') + ' WHERE id=@id', retryParams);
+        }
+      }
     }
 
     if (fields.spId !== undefined) {

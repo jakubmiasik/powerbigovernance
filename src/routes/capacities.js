@@ -14,6 +14,38 @@ function formatUtcScheduleLabel(scheduleType, utcSchedule) {
   return utcSchedule.scheduleDayUtc ? `${time} (${utcSchedule.scheduleDayUtc})` : time;
 }
 
+
+function ensureScheduleUtcFields(schedule) {
+  if (!schedule) return schedule;
+  const needsMinute = schedule.schedule_minute_utc == null;
+  const needsHour = schedule.schedule_type !== 'hourly' && schedule.schedule_hour_utc == null;
+  const needsDay = schedule.schedule_day_utc == null;
+  const normalizedTimezone = normalizeTimezone(schedule.timezone || 'UTC');
+
+  if (!needsMinute && !needsHour && !needsDay && schedule.timezone === normalizedTimezone) {
+    return schedule;
+  }
+
+  try {
+    const utc = convertScheduleToUtc({
+      scheduleType: schedule.schedule_type,
+      hour: schedule.schedule_hour,
+      minute: schedule.schedule_minute,
+      day: schedule.schedule_day,
+      timezone: normalizedTimezone,
+    });
+    return {
+      ...schedule,
+      timezone: normalizedTimezone,
+      schedule_hour_utc: schedule.schedule_hour_utc != null ? schedule.schedule_hour_utc : utc.scheduleHourUtc,
+      schedule_minute_utc: schedule.schedule_minute_utc != null ? schedule.schedule_minute_utc : utc.scheduleMinuteUtc,
+      schedule_day_utc: schedule.schedule_day_utc != null ? schedule.schedule_day_utc : utc.scheduleDayUtc,
+    };
+  } catch {
+    return { ...schedule, timezone: normalizedTimezone };
+  }
+}
+
 function getDetailedErrorMessage(err) {
   if (!err) return 'Unknown error';
   const parts = [];
@@ -126,9 +158,9 @@ router.get('/:id', async (req, res) => {
 
     // Get schedules for this capacity
     const allSchedules = await db.getCapacitySchedules();
-    const schedules = allSchedules.filter(s =>
-      (s.capacity_name || '').toLowerCase() === (capacity.displayName || '').toLowerCase()
-    );
+    const schedules = allSchedules
+      .filter(s => (s.capacity_name || '').toLowerCase() === (capacity.displayName || '').toLowerCase())
+      .map(ensureScheduleUtcFields);
 
     // Get execution history
     const history = await db.getScheduleHistory(capacity.displayName || '', 5);
