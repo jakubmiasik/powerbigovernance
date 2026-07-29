@@ -1,5 +1,6 @@
 const { Connection, Request, TYPES } = require('tedious');
 const { DefaultAzureCredential } = require('@azure/identity');
+const { convertScheduleToUtc, normalizeTimezone } = require('./scheduleTimeService');
 const { getConfig } = require('../config/settings');
 
 const cfg = getConfig();
@@ -249,10 +250,13 @@ async function saveCapacitySchedule(schedule) {
       { name: 'day', type: TYPES.NVarChar, value: schedule.day || null },
       { name: 'enabled', type: TYPES.Bit, value: schedule.enabled !== false },
       { name: 'tz', type: TYPES.NVarChar, value: schedule.timezone || 'UTC' },
+      { name: 'hourUtc', type: TYPES.Int, value: schedule.hourUtc != null ? schedule.hourUtc : null },
+      { name: 'minuteUtc', type: TYPES.Int, value: schedule.minuteUtc != null ? schedule.minuteUtc : null },
+      { name: 'dayUtc', type: TYPES.NVarChar, value: schedule.dayUtc || null },
     ];
     try {
-      await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone, sp_id)
-        VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz, @spId)`, [
+      await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone, schedule_hour_utc, schedule_minute_utc, schedule_day_utc, sp_id)
+        VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz, @hourUtc, @minuteUtc, @dayUtc, @spId)`, [
         ...baseParams,
         { name: 'spId', type: TYPES.Int, value: schedule.spId != null ? schedule.spId : null },
       ]);
@@ -261,7 +265,19 @@ async function saveCapacitySchedule(schedule) {
         await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone)
           VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz)`, baseParams);
       } else {
-        throw err;
+        if (
+          isColumnMissingError(err, 'schedule_hour_utc') ||
+          isColumnMissingError(err, 'schedule_minute_utc') ||
+          isColumnMissingError(err, 'schedule_day_utc')
+        ) {
+          await execSql(conn, `INSERT INTO capacity_schedules (capacity_name, subscription_id, resource_group, action, schedule_type, schedule_hour, schedule_minute, schedule_day, enabled, timezone, sp_id)
+            VALUES (@name, @sub, @rg, @action, @type, @hour, @minute, @day, @enabled, @tz, @spId)`, [
+            ...baseParams,
+            { name: 'spId', type: TYPES.Int, value: schedule.spId != null ? schedule.spId : null },
+          ]);
+        } else {
+          throw err;
+        }
       }
     }
   } finally {
@@ -303,6 +319,9 @@ async function updateCapacitySchedule(id, fields) {
     if (fields.minute !== undefined) { sets.push('schedule_minute=@minute'); params.push({ name: 'minute', type: TYPES.Int, value: fields.minute }); }
     if (fields.day !== undefined) { sets.push('schedule_day=@day'); params.push({ name: 'day', type: TYPES.NVarChar, value: fields.day }); }
     if (fields.timezone !== undefined) { sets.push('timezone=@tz'); params.push({ name: 'tz', type: TYPES.NVarChar, value: fields.timezone }); }
+    if (fields.hourUtc !== undefined) { sets.push('schedule_hour_utc=@hourUtc'); params.push({ name: 'hourUtc', type: TYPES.Int, value: fields.hourUtc }); }
+    if (fields.minuteUtc !== undefined) { sets.push('schedule_minute_utc=@minuteUtc'); params.push({ name: 'minuteUtc', type: TYPES.Int, value: fields.minuteUtc }); }
+    if (fields.dayUtc !== undefined) { sets.push('schedule_day_utc=@dayUtc'); params.push({ name: 'dayUtc', type: TYPES.NVarChar, value: fields.dayUtc }); }
     if (sets.length === 0) return;
     const baseSets = sets.slice();
     const baseParams = params.slice();
@@ -310,11 +329,24 @@ async function updateCapacitySchedule(id, fields) {
     try {
       await execSql(conn, 'UPDATE capacity_schedules SET ' + sets.join(', ') + ' WHERE id=@id', params);
     } catch (err) {
-      if ((isColumnMissingError(err, 'sp_id') || isColumnMissingError(err, 'spd_id')) && fields.spId !== undefined) {
-        await execSql(conn, 'UPDATE capacity_schedules SET ' + baseSets.join(', ') + ' WHERE id=@id', baseParams);
-      } else {
-        throw err;
+      const hasCompatError =
+        isColumnMissingError(err, 'sp_id') ||
+        isColumnMissingError(err, 'spd_id') ||
+        isColumnMissingError(err, 'schedule_hour_utc') ||
+        isColumnMissingError(err, 'schedule_minute_utc') ||
+        isColumnMissingError(err, 'schedule_day_utc');
+      if (hasCompatError && (fields.spId !== undefined || fields.hourUtc !== undefined || fields.minuteUtc !== undefined || fields.dayUtc !== undefined)) {
+        const safeSets = baseSets.filter(s =>
+          s !== 'schedule_hour_utc=@hourUtc' &&
+          s !== 'schedule_minute_utc=@minuteUtc' &&
+          s !== 'schedule_day_utc=@dayUtc'
+        );
+        const safeParams = baseParams.filter(p => p.name !== 'hourUtc' && p.name !== 'minuteUtc' && p.name !== 'dayUtc');
+        if (safeSets.length) {
+          await execSql(conn, 'UPDATE capacity_schedules SET ' + safeSets.join(', ') + ' WHERE id=@id', safeParams);
+        }
       }
+      else { throw err; }
     }
   } finally {
     conn.close();
@@ -401,6 +433,9 @@ async function runMigrations() {
           schedule_day NVARCHAR(20) NULL,
           enabled BIT NOT NULL DEFAULT 1,
           timezone NVARCHAR(100) NULL,
+          schedule_hour_utc INT NULL,
+          schedule_minute_utc INT NULL,
+          schedule_day_utc NVARCHAR(20) NULL,
           sp_id INT NULL,
           created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
         )
@@ -441,6 +476,9 @@ async function runMigrations() {
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'enterprise_app_object_id') ALTER TABLE service_principals ADD enterprise_app_object_id NVARCHAR(255) NULL`);
     // Add timezone column to capacity_schedules if missing
     await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'timezone') ALTER TABLE capacity_schedules ADD timezone NVARCHAR(100) NULL`);
+    await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'schedule_hour_utc') ALTER TABLE capacity_schedules ADD schedule_hour_utc INT NULL`);
+    await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'schedule_minute_utc') ALTER TABLE capacity_schedules ADD schedule_minute_utc INT NULL`);
+    await execSql(conn, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'capacity_schedules') AND name = N'schedule_day_utc') ALTER TABLE capacity_schedules ADD schedule_day_utc NVARCHAR(20) NULL`);
     // Normalize legacy timezone labels like "Europe/Warsaw (CET)" to IANA IDs
     await execSql(conn, `
       IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U')
@@ -467,6 +505,40 @@ async function runMigrations() {
         UPDATE capacity_schedules SET sp_id = COALESCE(sp_id, spd_id) WHERE spd_id IS NOT NULL;
       END
     `);
+    // Backfill UTC schedule columns for existing rows
+    const schedulesToBackfill = await execSql(conn, `
+      SELECT id, schedule_type, schedule_hour, schedule_minute, schedule_day, timezone
+      FROM capacity_schedules
+      WHERE schedule_minute_utc IS NULL OR (schedule_type <> 'hourly' AND schedule_hour_utc IS NULL) OR schedule_day_utc IS NULL
+    `);
+    for (const s of schedulesToBackfill) {
+      try {
+        const normalizedTz = normalizeTimezone(s.timezone || 'UTC');
+        const utc = convertScheduleToUtc({
+          scheduleType: s.schedule_type,
+          hour: s.schedule_hour,
+          minute: s.schedule_minute,
+          day: s.schedule_day,
+          timezone: normalizedTz,
+        });
+        await execSql(conn, `
+          UPDATE capacity_schedules
+          SET timezone = @tz,
+              schedule_hour_utc = @hourUtc,
+              schedule_minute_utc = @minuteUtc,
+              schedule_day_utc = @dayUtc
+          WHERE id = @id
+        `, [
+          { name: 'id', type: TYPES.Int, value: s.id },
+          { name: 'tz', type: TYPES.NVarChar, value: normalizedTz },
+          { name: 'hourUtc', type: TYPES.Int, value: utc.scheduleHourUtc != null ? utc.scheduleHourUtc : null },
+          { name: 'minuteUtc', type: TYPES.Int, value: utc.scheduleMinuteUtc != null ? utc.scheduleMinuteUtc : null },
+          { name: 'dayUtc', type: TYPES.NVarChar, value: utc.scheduleDayUtc || null },
+        ]);
+      } catch (backfillErr) {
+        console.warn('[DB] Schedule UTC backfill skipped for id', s.id, backfillErr.message);
+      }
+    }
     // Add Key Vault columns to service_principals if missing
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'key_vault_name') ALTER TABLE service_principals ADD key_vault_name NVARCHAR(255) NULL`);
     await execSql(conn, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'key_vault_secret_name') ALTER TABLE service_principals ADD key_vault_secret_name NVARCHAR(255) NULL`);

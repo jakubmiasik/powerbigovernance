@@ -2,12 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
-
-function normalizeTimezoneInput(tz) {
-  const raw = (tz || 'UTC').toString().trim();
-  const cleaned = raw.replace(/\s*\(.*\)\s*$/, '').trim();
-  return cleaned || 'UTC';
-}
+const { normalizeTimezone, convertScheduleToUtc } = require('../services/scheduleTimeService');
 
 // Helper to get a PBI service instance using the first configured SP
 async function getPbiService(res) {
@@ -196,6 +191,14 @@ router.post('/:name/schedule', async (req, res) => {
     const preferredSpId = res.locals.globalRun && res.locals.globalRun.sp_id ? parseInt(res.locals.globalRun.sp_id, 10) : null;
     const selectedSp = Number.isFinite(preferredSpId) ? allSps.find(s => parseInt(s.id, 10) === preferredSpId) : null;
     const effectiveSp = selectedSp || allSps[0];
+    const normalizedTimezone = normalizeTimezone(timezone);
+    const utcSchedule = convertScheduleToUtc({
+      scheduleType,
+      hour,
+      minute,
+      day: day || null,
+      timezone: normalizedTimezone,
+    });
 
     await db.saveCapacitySchedule({
       capacityName: req.params.name,
@@ -206,7 +209,10 @@ router.post('/:name/schedule', async (req, res) => {
       hour: hour != null ? parseInt(hour) : null,
       minute: minute != null ? parseInt(minute) : null,
       day: day || null,
-      timezone: normalizeTimezoneInput(timezone),
+      timezone: normalizedTimezone,
+      hourUtc: utcSchedule.scheduleHourUtc,
+      minuteUtc: utcSchedule.scheduleMinuteUtc,
+      dayUtc: utcSchedule.scheduleDayUtc,
       spId: parseInt(effectiveSp.id, 10),
       enabled: true,
     });
@@ -234,13 +240,24 @@ router.put('/schedule/:id', async (req, res) => {
     const preferredSpId = res.locals.globalRun && res.locals.globalRun.sp_id ? parseInt(res.locals.globalRun.sp_id, 10) : null;
     const selectedSp = Number.isFinite(preferredSpId) ? allSps.find(s => parseInt(s.id, 10) === preferredSpId) : null;
     const effectiveSp = selectedSp || allSps[0] || null;
+    const normalizedTimezone = timezone !== undefined ? normalizeTimezone(timezone) : undefined;
+    const utcSchedule = convertScheduleToUtc({
+      scheduleType,
+      hour,
+      minute,
+      day: day || null,
+      timezone: normalizedTimezone || 'UTC',
+    });
     await db.updateCapacitySchedule(parseInt(req.params.id), {
       action,
       scheduleType,
       hour: hour != null ? parseInt(hour) : undefined,
       minute: minute != null ? parseInt(minute) : undefined,
       day: day || undefined,
-      timezone: timezone !== undefined ? normalizeTimezoneInput(timezone) : undefined,
+      timezone: normalizedTimezone,
+      hourUtc: utcSchedule.scheduleHourUtc,
+      minuteUtc: utcSchedule.scheduleMinuteUtc,
+      dayUtc: utcSchedule.scheduleDayUtc,
       spId: effectiveSp ? parseInt(effectiveSp.id, 10) : undefined,
     });
     res.json({ success: true });
@@ -270,4 +287,3 @@ router.get('/history/:capacityName', async (req, res) => {
 });
 
 module.exports = router;
-

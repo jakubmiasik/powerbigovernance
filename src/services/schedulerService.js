@@ -1,50 +1,12 @@
 const cron = require('node-cron');
 const db = require('./databaseService');
 const { createPowerBIService } = require('./powerbiService');
+const { convertScheduleToUtc } = require('./scheduleTimeService');
 
 let schedulerStarted = false;
 const lastTriggeredSlots = new Map();
-const timezoneSupportCache = new Map();
 let schedulerTickInProgress = false;
 let lastKickMs = 0;
-
-function normalizeTimezone(tz) {
-  const raw = (tz || 'UTC').toString().trim();
-  const cleaned = raw.replace(/\s*\(.*\)\s*$/, '').trim();
-  const upper = cleaned.toUpperCase();
-  const aliasMap = {
-    UTC: 'UTC',
-    CET: 'Europe/Warsaw',
-    CEST: 'Europe/Warsaw',
-    EET: 'Europe/Helsinki',
-    ET: 'America/New_York',
-    CT: 'America/Chicago',
-    MT: 'America/Denver',
-    PT: 'America/Los_Angeles',
-    GMT: 'Europe/London',
-    BST: 'Europe/London',
-    IST: 'Asia/Kolkata',
-    JST: 'Asia/Tokyo',
-    SGT: 'Asia/Singapore',
-    AEST: 'Australia/Sydney',
-    SAST: 'Africa/Johannesburg',
-  };
-  if (cleaned.includes('/')) return cleaned;
-  return aliasMap[upper] || 'UTC';
-}
-
-function isTimezoneSupported(tz) {
-  if (timezoneSupportCache.has(tz)) return timezoneSupportCache.get(tz);
-  let supported = true;
-  try {
-    // Throws RangeError when timezone is invalid/unsupported in this runtime
-    new Intl.DateTimeFormat('en-US', { timeZone: tz }).format(new Date());
-  } catch {
-    supported = false;
-  }
-  timezoneSupportCache.set(tz, supported);
-  return supported;
-}
 
 async function runScheduleWithSp(schedule, sp) {
   const pbi = createPowerBIService(sp);
@@ -150,13 +112,14 @@ async function runSchedulerTick(source) {
     for (const schedule of schedules) {
       if (!schedule.enabled) continue;
 
-      const tz = normalizeTimezone(schedule.timezone);
-      if (!isTimezoneSupported(tz)) {
-        console.warn(`[Scheduler] Unsupported timezone "${schedule.timezone}" for schedule ${schedule.id}. Skipping.`);
+      const effectiveUtc = resolveScheduleUtc(schedule);
+      if (!effectiveUtc) {
+        await db.logScheduleExecution(schedule.id, schedule.capacity_name, schedule.action, 'error', 'Invalid schedule UTC mapping');
         continue;
       }
-      const now = getTimeInTimezone(tz);
-      const slotKey = getCurrentSlotKey(schedule, now);
+
+      const nowUtc = getUtcNowParts();
+      const slotKey = getCurrentUtcSlotKey(schedule, nowUtc, effectiveUtc);
       if (!slotKey) continue;
 
       const scheduleId = parseInt(schedule.id, 10);
@@ -170,7 +133,7 @@ async function runSchedulerTick(source) {
         schedule.capacity_name,
         schedule.action,
         'triggered',
-        `Scheduler due window reached (${tz}) at ${String(now.hour).padStart(2, '0')}:${String(now.minute).padStart(2, '0')} via ${source || 'tick'}`
+        `Scheduler due UTC window reached at ${String(nowUtc.hour).padStart(2, '0')}:${String(nowUtc.minute).padStart(2, '0')} via ${source || 'tick'}`
       );
       await executeSchedule(schedule);
     }
@@ -205,73 +168,71 @@ function kickScheduler() {
   runSchedulerTick('request');
 }
 
-function hasPassedScheduleTime(local, scheduleHour, scheduleMinute) {
+function hasPassedScheduleTime(nowParts, scheduleHour, scheduleMinute) {
   const hour = parseInt(scheduleHour, 10);
   const minute = parseInt(scheduleMinute, 10);
   if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false;
-  return local.hour > hour || (local.hour === hour && local.minute >= minute);
+  return nowParts.hour > hour || (nowParts.hour === hour && nowParts.minute >= minute);
 }
 
-function getDateKey(local) {
-  return `${local.year}-${String(local.month).padStart(2, '0')}-${String(local.day).padStart(2, '0')}`;
+function getDateKey(parts) {
+  return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
 }
 
-function getCurrentSlotKey(schedule, local) {
+function getCurrentUtcSlotKey(schedule, nowUtc, effectiveUtc) {
   const type = schedule.schedule_type;
-  const schedMin = Number.isFinite(parseInt(schedule.schedule_minute, 10)) ? parseInt(schedule.schedule_minute, 10) : 0;
-  const schedHour = Number.isFinite(parseInt(schedule.schedule_hour, 10)) ? parseInt(schedule.schedule_hour, 10) : null;
+  const schedMin = effectiveUtc.minuteUtc;
+  const schedHour = effectiveUtc.hourUtc;
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const dateKey = getDateKey(local);
+  const dateKey = getDateKey(nowUtc);
 
   if (type === 'hourly') {
-    return local.minute >= schedMin ? `${dateKey}T${String(local.hour).padStart(2, '0')}` : null;
+    return nowUtc.minute >= schedMin ? `${dateKey}T${String(nowUtc.hour).padStart(2, '0')}` : null;
   }
   if (type === 'daily') {
-    return hasPassedScheduleTime(local, schedHour, schedMin) ? dateKey : null;
+    return hasPassedScheduleTime(nowUtc, schedHour, schedMin) ? dateKey : null;
   }
   if (type === 'weekdays') {
-    return local.dayOfWeek >= 1 && local.dayOfWeek <= 5 && hasPassedScheduleTime(local, schedHour, schedMin) ? dateKey : null;
+    return nowUtc.dayOfWeek >= 1 && nowUtc.dayOfWeek <= 5 && hasPassedScheduleTime(nowUtc, schedHour, schedMin) ? dateKey : null;
   }
   if (type === 'weekly') {
-    return dayNames[local.dayOfWeek] === schedule.schedule_day && hasPassedScheduleTime(local, schedHour, schedMin) ? dateKey : null;
+    const targetDay = effectiveUtc.dayUtc || schedule.schedule_day_utc || schedule.schedule_day;
+    return dayNames[nowUtc.dayOfWeek] === targetDay && hasPassedScheduleTime(nowUtc, schedHour, schedMin) ? dateKey : null;
   }
   return null;
 }
 
-// Get current time components in a given IANA timezone
-function getTimeInTimezone(tz, date) {
+function getUtcNowParts() {
+  const now = new Date();
+  return {
+    year: now.getUTCFullYear(),
+    month: now.getUTCMonth() + 1,
+    day: now.getUTCDate(),
+    hour: now.getUTCHours(),
+    minute: now.getUTCMinutes(),
+    dayOfWeek: now.getUTCDay(),
+  };
+}
+
+function resolveScheduleUtc(schedule) {
+  const minuteUtc = Number.isFinite(parseInt(schedule.schedule_minute_utc, 10)) ? parseInt(schedule.schedule_minute_utc, 10) : null;
+  const hourUtc = Number.isFinite(parseInt(schedule.schedule_hour_utc, 10)) ? parseInt(schedule.schedule_hour_utc, 10) : null;
+  const dayUtc = schedule.schedule_day_utc || null;
+
+  if (minuteUtc != null && (schedule.schedule_type === 'hourly' || hourUtc != null)) {
+    return { minuteUtc, hourUtc, dayUtc };
+  }
+
   try {
-    const now = date || new Date();
-    const parts = {};
-    const fmt = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      hour: 'numeric', minute: 'numeric', hour12: false, weekday: 'short',
-      year: 'numeric', month: '2-digit', day: '2-digit',
+    return convertScheduleToUtc({
+      scheduleType: schedule.schedule_type,
+      hour: schedule.schedule_hour,
+      minute: schedule.schedule_minute,
+      day: schedule.schedule_day,
+      timezone: schedule.timezone,
     });
-    for (const p of fmt.formatToParts(now)) {
-      parts[p.type] = p.value;
-    }
-    const dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-    const dow = dayMap[parts.weekday] !== undefined ? dayMap[parts.weekday] : new Date().getUTCDay();
-    return {
-      year: parseInt(parts.year, 10),
-      month: parseInt(parts.month, 10),
-      day: parseInt(parts.day, 10),
-      hour: parseInt(parts.hour, 10) % 24,
-      minute: parseInt(parts.minute, 10),
-      dayOfWeek: dow,
-    };
   } catch {
-    // Fallback to UTC if timezone is invalid
-    const now = date || new Date();
-    return {
-      year: now.getUTCFullYear(),
-      month: now.getUTCMonth() + 1,
-      day: now.getUTCDate(),
-      hour: now.getUTCHours(),
-      minute: now.getUTCMinutes(),
-      dayOfWeek: now.getUTCDay(),
-    };
+    return null;
   }
 }
 

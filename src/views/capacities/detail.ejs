@@ -252,7 +252,7 @@
 
     <% if (schedules.length) { %>
       <table class="table table-sm table-hover mb-0">
-        <thead><tr><th>Action</th><th>Frequency</th><th>Time</th><th>Timezone</th><th>Days</th><th>Enabled</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Action</th><th>Frequency</th><th>Time (Local)</th><th>Time (UTC)</th><th>Timezone</th><th>Days</th><th>Enabled</th><th>Actions</th></tr></thead>
         <tbody>
           <% schedules.forEach(function(s) {
             var dayLabel = '-';
@@ -265,6 +265,7 @@
               <td><span class="badge bg-<%= s.action === 'resume' ? 'success' : 'warning' %>"><%= s.action === 'resume' ? 'Resume' : 'Pause' %></span></td>
               <td><%= s.schedule_type %></td>
               <td><%= s.schedule_hour != null ? String(s.schedule_hour).padStart(2, '0') + ':' + String(s.schedule_minute || 0).padStart(2, '0') : '-' %></td>
+              <td><%= s.schedule_hour_utc != null ? String(s.schedule_hour_utc).padStart(2, '0') + ':' + String(s.schedule_minute_utc || 0).padStart(2, '0') : '-' %></td>
               <td><span class="badge bg-light text-dark"><%= s.timezone || 'UTC' %></span></td>
               <td><%= dayLabel %></td>
               <td><div class="form-check form-switch"><input class="form-check-input" type="checkbox" <%= s.enabled ? 'checked' : '' %> onchange="toggleSchedule(<%= s.id %>, this.checked)"></div></td>
