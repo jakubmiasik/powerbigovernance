@@ -48,3 +48,21 @@ test('security headers are applied', async () => {
     await new Promise(resolve => server.close(resolve));
   }
 });
+
+const { convertScheduleToUtc } = require('../src/services/scheduleTimeService');
+const scheduler = require('../src/services/schedulerService');
+
+test('hourly schedules expose UTC minute without an hour', () => {
+  const utc = convertScheduleToUtc({ scheduleType: 'hourly', hour: 18, minute: 15, timezone: 'UTC' });
+  assert.equal(utc.scheduleHourUtc, null);
+  assert.equal(utc.scheduleMinuteUtc, 15);
+});
+
+test('scheduler resolves persisted UTC fields for hourly schedules', () => {
+  const resolved = scheduler._private.resolveScheduleUtc({
+    schedule_type: 'hourly',
+    schedule_minute_utc: 30,
+    schedule_hour_utc: null,
+  });
+  assert.deepEqual(resolved, { minuteUtc: 30, hourUtc: null, dayUtc: null });
+});

@@ -236,4 +236,8 @@ function resolveScheduleUtc(schedule) {
   }
 }
 
-module.exports = { startScheduler, kickScheduler };
+module.exports = {
+  startScheduler,
+  kickScheduler,
+  _private: { buildCronExpression, getCurrentUtcSlotKey, resolveScheduleUtc },
+};

@@ -3,6 +3,16 @@ const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
 const { normalizeTimezone, convertScheduleToUtc } = require('../services/scheduleTimeService');
+const { kickScheduler } = require('../services/schedulerService');
+
+function formatUtcScheduleLabel(scheduleType, utcSchedule) {
+  if (!utcSchedule || utcSchedule.scheduleMinuteUtc == null) return null;
+  const minute = String(utcSchedule.scheduleMinuteUtc).padStart(2, '0');
+  if (scheduleType === 'hourly') return `Every hour at minute ${minute} UTC`;
+  if (utcSchedule.scheduleHourUtc == null) return null;
+  const time = `${String(utcSchedule.scheduleHourUtc).padStart(2, '0')}:${minute} UTC`;
+  return utcSchedule.scheduleDayUtc ? `${time} (${utcSchedule.scheduleDayUtc})` : time;
+}
 
 function getDetailedErrorMessage(err) {
   if (!err) return 'Unknown error';
@@ -236,7 +246,7 @@ router.post('/:name/schedule', async (req, res) => {
       };
     }
 
-    await db.saveCapacitySchedule({
+    const scheduleId = await db.saveCapacitySchedule({
       capacityName: req.params.name,
       subscriptionId,
       resourceGroup,
@@ -252,7 +262,14 @@ router.post('/:name/schedule', async (req, res) => {
       spId: parseInt(effectiveSp.id, 10),
       enabled: true,
     });
-    res.json({ success: true });
+    kickScheduler();
+    const utcLabel = formatUtcScheduleLabel(scheduleType, utcSchedule);
+    res.json({ success: true, id: scheduleId, utcSchedule: {
+      hour: utcSchedule.scheduleHourUtc,
+      minute: utcSchedule.scheduleMinuteUtc,
+      day: utcSchedule.scheduleDayUtc,
+      label: utcLabel,
+    } });
   } catch (err) {
     const details = getDetailedErrorMessage(err);
     console.error('[Capacities] Add schedule failed:', details);
@@ -309,7 +326,14 @@ router.put('/schedule/:id', async (req, res) => {
       dayUtc: utcSchedule.scheduleDayUtc,
       spId: effectiveSp ? parseInt(effectiveSp.id, 10) : undefined,
     });
-    res.json({ success: true });
+    kickScheduler();
+    const utcLabel = formatUtcScheduleLabel(scheduleType, utcSchedule);
+    res.json({ success: true, utcSchedule: {
+      hour: utcSchedule.scheduleHourUtc,
+      minute: utcSchedule.scheduleMinuteUtc,
+      day: utcSchedule.scheduleDayUtc,
+      label: utcLabel,
+    } });
   } catch (err) {
     const details = getDetailedErrorMessage(err);
     console.error('[Capacities] Update schedule failed:', details);
