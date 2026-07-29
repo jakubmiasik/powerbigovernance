@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
+const { executeCapacityActionWithService } = require('../services/capacityActionService');
 const { normalizeTimezone, convertScheduleToUtc } = require('../services/scheduleTimeService');
 const { kickScheduler } = require('../services/schedulerService');
 
@@ -188,25 +189,13 @@ router.post('/:name/suspend', async (req, res) => {
       return res.json({ success: false, message: 'Subscription ID and Resource Group are required.' });
     }
     const pbi = await getPbiService(res);
-
-    // Check current state before executing
-    try {
-      const detail = await pbi.getArmCapacityDetail(subscriptionId, resourceGroup, req.params.name);
-      const state = (detail.properties && detail.properties.state) || '';
-      const provisioning = (detail.properties && detail.properties.provisioningState) || '';
-      if (state === 'Paused' || state === 'Suspended') {
-        return res.json({ success: false, message: 'Capacity is already paused.' });
-      }
-      if (provisioning && provisioning !== 'Succeeded') {
-        return res.json({ success: false, message: `Capacity is in transitional state (${provisioning}). Please wait and try again.` });
-      }
-    } catch (stateErr) {
-      // Continue anyway if state check fails
-      console.warn('[Capacities] State check failed:', stateErr.message);
-    }
-
-    await pbi.suspendCapacity(subscriptionId, resourceGroup, req.params.name);
-    res.json({ success: true, message: 'Capacity suspend initiated.' });
+    const result = await executeCapacityActionWithService(pbi, {
+      subscriptionId,
+      resourceGroup,
+      capacityName: req.params.name,
+      action: 'suspend',
+    });
+    res.json({ success: result.status === 'success', message: result.message });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
@@ -220,25 +209,13 @@ router.post('/:name/resume', async (req, res) => {
       return res.json({ success: false, message: 'Subscription ID and Resource Group are required.' });
     }
     const pbi = await getPbiService(res);
-
-    // Check current state before executing
-    try {
-      const detail = await pbi.getArmCapacityDetail(subscriptionId, resourceGroup, req.params.name);
-      const state = (detail.properties && detail.properties.state) || '';
-      const provisioning = (detail.properties && detail.properties.provisioningState) || '';
-      if (state === 'Active') {
-        return res.json({ success: false, message: 'Capacity is already active.' });
-      }
-      if (provisioning && provisioning !== 'Succeeded') {
-        return res.json({ success: false, message: `Capacity is in transitional state (${provisioning}). Please wait and try again.` });
-      }
-    } catch (stateErr) {
-      // Continue anyway if state check fails
-      console.warn('[Capacities] State check failed:', stateErr.message);
-    }
-
-    await pbi.resumeCapacity(subscriptionId, resourceGroup, req.params.name);
-    res.json({ success: true, message: 'Capacity resume initiated.' });
+    const result = await executeCapacityActionWithService(pbi, {
+      subscriptionId,
+      resourceGroup,
+      capacityName: req.params.name,
+      action: 'resume',
+    });
+    res.json({ success: result.status === 'success', message: result.message });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }

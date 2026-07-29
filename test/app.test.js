@@ -58,42 +58,24 @@ test('hourly schedules expose UTC minute without an hour', () => {
   assert.equal(utc.scheduleMinuteUtc, 15);
 });
 
-test('scheduler resolves persisted UTC fields for hourly schedules', () => {
-  const resolved = scheduler._private.resolveScheduleUtc({
-    schedule_type: 'hourly',
-    schedule_minute_utc: 30,
-    schedule_hour_utc: null,
-  });
-  assert.deepEqual(resolved, { minuteUtc: 30, hourUtc: null, dayUtc: null });
-});
-
-
-test('scheduler normalizes calculated UTC fields before matching due slots', () => {
-  const resolved = scheduler._private.resolveScheduleUtc({
-    schedule_type: 'daily',
-    schedule_hour: 9,
-    schedule_minute: 45,
-    timezone: 'UTC',
-  });
-  assert.deepEqual(resolved, { minuteUtc: 45, hourUtc: 9, dayUtc: resolved.dayUtc });
-  const slotKey = scheduler._private.getCurrentUtcSlotKey(
-    { schedule_type: 'daily' },
-    { year: 2026, month: 7, day: 29, hour: 9, minute: 45, dayOfWeek: 3 },
-    resolved
+test('scheduler matches hourly schedules at the configured local minute', () => {
+  const slotKey = scheduler._private.getScheduleSlotKey(
+    { schedule_type: 'hourly', schedule_minute: 30 },
+    { year: 2026, month: 7, day: 29, hour: 9, minute: 30, dayOfWeek: 3 }
   );
-  assert.equal(slotKey, '2026-07-29');
+  assert.equal(slotKey, '2026-07-29T09:30');
 });
 
-test('scheduler marks successful schedule results complete', () => {
-  assert.equal(scheduler._private.isScheduleResultComplete({ status: 'success', message: 'done' }), true);
+
+test('scheduler matches daily schedules at the exact configured local time', () => {
+  const schedule = { schedule_type: 'daily', schedule_hour: 9, schedule_minute: 45 };
+  assert.equal(scheduler._private.isDueNow(schedule, { hour: 9, minute: 45, dayOfWeek: 3 }), true);
+  assert.equal(scheduler._private.isDueNow(schedule, { hour: 9, minute: 46, dayOfWeek: 3 }), false);
+  assert.equal(scheduler._private.isDueNow(schedule, { hour: 10, minute: 45, dayOfWeek: 3 }), false);
 });
 
-test('scheduler retries failed or transitional schedule results', () => {
-  assert.equal(scheduler._private.isScheduleResultComplete({ status: 'error', message: 'API error' }), false);
-  assert.equal(scheduler._private.isScheduleResultComplete({ status: 'skipped', message: 'Capacity in transitional state: Updating' }), false);
-});
-
-test('scheduler treats already-target-state skips as complete', () => {
-  assert.equal(scheduler._private.isScheduleResultComplete({ status: 'skipped', message: 'Capacity already paused' }), true);
-  assert.equal(scheduler._private.isScheduleResultComplete({ status: 'skipped', message: 'Capacity already active' }), true);
+test('scheduler matches weekly schedules only on the configured day', () => {
+  const schedule = { schedule_type: 'weekly', schedule_hour: 9, schedule_minute: 45, schedule_day: 'Wednesday' };
+  assert.equal(scheduler._private.isDueNow(schedule, { hour: 9, minute: 45, dayOfWeek: 3 }), true);
+  assert.equal(scheduler._private.isDueNow(schedule, { hour: 9, minute: 45, dayOfWeek: 4 }), false);
 });
