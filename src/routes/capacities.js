@@ -323,10 +323,6 @@ router.delete('/schedule/:id', async (req, res) => {
 router.put('/schedule/:id', async (req, res) => {
   try {
     const { action, scheduleType, hour, minute, day, timezone } = req.body;
-    const allSps = await db.getServicePrincipals();
-    const preferredSpId = res.locals.globalRun && res.locals.globalRun.sp_id ? parseInt(res.locals.globalRun.sp_id, 10) : null;
-    const selectedSp = Number.isFinite(preferredSpId) ? allSps.find(s => parseInt(s.id, 10) === preferredSpId) : null;
-    const effectiveSp = selectedSp || allSps[0] || null;
     const normalizedTimezone = timezone !== undefined ? normalizeTimezone(timezone) : undefined;
     let utcSchedule;
     try {
@@ -349,14 +345,13 @@ router.put('/schedule/:id', async (req, res) => {
     await db.updateCapacitySchedule(parseInt(req.params.id), {
       action,
       scheduleType,
-      hour: hour != null ? parseInt(hour) : undefined,
-      minute: minute != null ? parseInt(minute) : undefined,
-      day: day || undefined,
+      hour: scheduleType === 'hourly' ? null : (hour != null ? parseInt(hour, 10) : undefined),
+      minute: minute != null ? parseInt(minute, 10) : undefined,
+      day: scheduleType === 'weekly' ? (day || null) : null,
       timezone: normalizedTimezone,
       hourUtc: utcSchedule.scheduleHourUtc,
       minuteUtc: utcSchedule.scheduleMinuteUtc,
       dayUtc: utcSchedule.scheduleDayUtc,
-      spId: effectiveSp ? parseInt(effectiveSp.id, 10) : undefined,
     });
     kickScheduler();
     const utcLabel = formatUtcScheduleLabel(scheduleType, utcSchedule);
