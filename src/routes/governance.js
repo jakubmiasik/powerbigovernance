@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
+const { buildUser360 } = require('../services/runMetricsService');
 
 function normalizeArtifactType(type) {
   return (type || 'all').trim().toLowerCase();
@@ -96,43 +97,6 @@ function summarizeTenantSettings(settings) {
     securityGroupScoped,
     groups: [...groups.values()].sort((a, b) => b.total - a.total || a.name.localeCompare(b.name)),
   };
-}
-
-function buildUser360(workspaces) {
-  const userMap = new Map();
-
-  function ensureUser(key, name, upn) {
-    if (!userMap.has(key)) {
-      userMap.set(key, { name: name || upn || 'Unknown', upn: upn || '', items: [], workspaces: [], workspaceKeys: new Set() });
-    }
-    return userMap.get(key);
-  }
-
-  for (const workspace of workspaces) {
-    const workspaceName = workspace.name || 'Unnamed Workspace';
-    for (const workspaceUser of workspace.users || []) {
-      const userKey = (workspaceUser.email || workspaceUser.name || workspaceName).toLowerCase();
-      const user = ensureUser(userKey, workspaceUser.name, workspaceUser.email);
-      const workspaceKey = workspaceName + '::' + (workspaceUser.role || '');
-      if (!user.workspaceKeys.has(workspaceKey)) {
-        user.workspaceKeys.add(workspaceKey);
-        user.workspaces.push({ name: workspaceName, role: workspaceUser.role || 'Unknown' });
-      }
-    }
-
-    for (const item of workspace.items || []) {
-      const creatorName = item.creator?.name || item.creator?.upn;
-      const creatorUpn = item.creator?.upn || '';
-      if (!creatorName && !creatorUpn) continue;
-      const userKey = (creatorUpn || creatorName).toLowerCase();
-      const user = ensureUser(userKey, creatorName, creatorUpn);
-      user.items.push({ name: item.name || 'Unnamed', type: item.type || '-', workspace: workspaceName });
-    }
-  }
-
-  return Array.from(userMap.values())
-    .map(user => { delete user.workspaceKeys; return user; })
-    .sort((a, b) => (a.name || a.upn || '').localeCompare(b.name || b.upn || ''));
 }
 
 router.get('/', async (req, res) => {

@@ -1,6 +1,7 @@
 const { Connection, Request, TYPES } = require('tedious');
 const { DefaultAzureCredential } = require('@azure/identity');
 const { convertScheduleToUtc, normalizeTimezone } = require('./scheduleTimeService');
+const { METRIC_DEFS } = require('./runMetricsService');
 const { getConfig } = require('../config/settings');
 
 const cfg = getConfig();
@@ -279,9 +280,80 @@ async function getAnalysisRunById(id) {
 async function deleteAnalysisRun(id) {
   const conn = await getConnection();
   try {
+    try {
+      await execSql(conn, 'DELETE FROM analysis_run_totals WHERE run_id=@id', [
+        { name: 'id', type: TYPES.Int, value: id },
+      ]);
+    } catch (err) {
+      if (!(err.message || '').includes('Invalid object name')) throw err;
+    }
     await execSql(conn, 'DELETE FROM analysis_runs WHERE id=@id', [
       { name: 'id', type: TYPES.Int, value: id },
     ]);
+  } finally {
+    conn.close();
+  }
+}
+
+// Analysis run totals — the Governance Overview numbers, materialized per run so
+// run-to-run comparison is a cheap read instead of parsing results_json twice.
+const TOTALS_COLUMNS = METRIC_DEFS.map(def => ({ key: def.key, column: def.column }));
+
+async function saveRunTotals(runId, { tenantId, spId, spName, startedAt }, totals) {
+  const conn = await getConnection();
+  try {
+    const parsedSpId = Number.parseInt(spId, 10);
+    await execSql(conn, 'DELETE FROM analysis_run_totals WHERE run_id=@runId', [
+      { name: 'runId', type: TYPES.Int, value: runId },
+    ]);
+    await execWithColumnFallback(conn, {
+      required: [
+        { column: 'run_id', param: { name: 'runId', type: TYPES.Int, value: runId } },
+        ...TOTALS_COLUMNS.map(({ key, column }) => ({
+          column,
+          param: { name: column, type: TYPES.BigInt, value: Number(totals[key]) || 0 },
+        })),
+      ],
+      optional: [
+        { column: 'tenant_id', param: { name: 'tenantId', type: TYPES.NVarChar, value: tenantId || null } },
+        { column: 'sp_id', param: { name: 'spId', type: TYPES.Int, value: Number.isFinite(parsedSpId) ? parsedSpId : null } },
+        { column: 'sp_name', param: { name: 'spName', type: TYPES.NVarChar, value: spName || null } },
+        { column: 'run_started_at', param: { name: 'startedAt', type: TYPES.DateTime2, value: startedAt ? new Date(startedAt) : null } },
+      ],
+      build: specs => buildInsert('analysis_run_totals', specs),
+    });
+  } finally {
+    conn.close();
+  }
+}
+
+async function getRunTotals(runId) {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(conn, 'SELECT * FROM analysis_run_totals WHERE run_id=@runId', [
+      { name: 'runId', type: TYPES.Int, value: runId },
+    ]);
+    return rows[0] || null;
+  } catch (err) {
+    if (err.message && err.message.includes('Invalid object name')) return null;
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+// Runs that can legitimately be compared with each other: same tenant only.
+async function getComparableRuns(tenantId) {
+  const conn = await getConnection();
+  try {
+    return await execSql(
+      conn,
+      `SELECT id, sp_id, sp_name, tenant_id, status, started_at, completed_at, total_workspaces
+       FROM analysis_runs
+       WHERE status = 'completed' AND tenant_id = @tenantId
+       ORDER BY started_at DESC`,
+      [{ name: 'tenantId', type: TYPES.NVarChar, value: tenantId }]
+    );
   } finally {
     conn.close();
   }
@@ -518,6 +590,30 @@ async function runMigrations() {
     // started with a Managed Identity (no service principal row to reference).
     await runStatement(conn, 'relax analysis_runs.sp_id', `IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'analysis_runs') AND name = N'sp_id' AND is_nullable = 0) ALTER TABLE analysis_runs ALTER COLUMN sp_id INT NULL`);
 
+    // Per-run snapshot of the Governance Overview totals, scoped by tenant so runs
+    // are only ever compared within the same tenant.
+    await runStatement(conn, 'create analysis_run_totals', `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_run_totals') AND type = 'U')
+      BEGIN
+        CREATE TABLE analysis_run_totals (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          run_id INT NOT NULL,
+          tenant_id NVARCHAR(100) NULL,
+          sp_id INT NULL,
+          sp_name NVARCHAR(255) NULL,
+          run_started_at DATETIME2 NULL,
+          ${METRIC_DEFS.map(def => `${def.column} BIGINT NOT NULL DEFAULT 0`).join(',\n          ')},
+          captured_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+        );
+        CREATE UNIQUE INDEX UX_analysis_run_totals_run ON analysis_run_totals (run_id);
+        CREATE INDEX IX_analysis_run_totals_tenant ON analysis_run_totals (tenant_id, run_started_at DESC);
+      END
+    `);
+    // Newer metrics are added as columns on existing installs.
+    for (const def of METRIC_DEFS) {
+      await runStatement(conn, `add analysis_run_totals.${def.column}`, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_run_totals') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'analysis_run_totals') AND name = N'${def.column}') ALTER TABLE analysis_run_totals ADD ${def.column} BIGINT NOT NULL DEFAULT 0`);
+    }
+
     // Create capacity schedules table if missing
     await runStatement(conn, 'create capacity_schedules', `
       IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U')
@@ -685,6 +781,9 @@ module.exports = {
   getAnalysisRuns,
   getAnalysisRunById,
   deleteAnalysisRun,
+  saveRunTotals,
+  getRunTotals,
+  getComparableRuns,
   getCapacitySchedules,
   saveCapacitySchedule,
   updateCapacitySchedule,
