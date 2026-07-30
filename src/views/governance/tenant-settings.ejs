@@ -47,18 +47,37 @@
   </div>
 
   <% if ((stats.groups || []).length) { %>
-    <div class="card mb-4">
-      <div class="card-header"><i class="bi bi-collection me-2"></i>Settings by Group</div>
+    <%
+      // Each group row carries the searchable text of the settings it contains, so a
+      // search for "API" surfaces the group even when the term only appears in the
+      // settings underneath it.
+      var settingTextByGroup = {};
+      settings.forEach(function(s) {
+        var key = s.tenantSettingGroup || 'Ungrouped';
+        var text = [s.title || '', s.settingName || ''].join(' ').toLowerCase();
+        settingTextByGroup[key] = (settingTextByGroup[key] || '') + ' ' + text;
+      });
+    %>
+    <div class="card mb-4" id="tenant-groups-card">
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+          <span><i class="bi bi-collection me-2"></i>Settings by Group</span>
+          <span class="badge bg-light text-dark border ms-2" id="tenantGroupsFilterLabel">Showing all groups</span>
+        </div>
+        <input type="text" class="form-control form-control-sm" style="max-width:320px;" placeholder="Search groups and settings..." id="tenantGroupSearch" oninput="onTenantSearch(this.value)">
+      </div>
       <div class="table-responsive">
-        <table class="table table-sm table-hover mb-0">
-          <thead><tr><th>Group</th><th>Total</th><th>Enabled</th><th>Disabled</th><th style="width:180px;">Enabled %</th></tr></thead>
+        <table class="table table-sm table-hover mb-0" id="tenant-groups-table">
+          <thead><tr><th>Group</th><th>Total</th><th>Enabled</th><th>Disabled</th><th class="tenant-match-col d-none">Matching</th><th style="width:180px;">Enabled %</th></tr></thead>
           <tbody>
             <% stats.groups.forEach(function(group) { var pct = group.total ? Math.round((group.enabled / group.total) * 100) : 0; %>
-              <tr>
+              <tr data-group="<%= (group.name || '').toLowerCase() %>"
+                  data-settings="<%= (settingTextByGroup[group.name] || '').trim() %>">
                 <td><a href="#tenant-settings-card" onclick="filterByGroup('<%= (group.name || '').replace(/'/g, "\\'") %>'); return false;"><%= group.name %></a></td>
                 <td><strong><%= group.total %></strong></td>
                 <td><%= group.enabled %></td>
                 <td><%= group.total - group.enabled %></td>
+                <td class="tenant-match-col d-none"><span class="badge bg-primary group-match-count">0</span></td>
                 <td>
                   <div class="progress" style="height:18px;">
                     <div class="progress-bar bg-success" style="width:<%= pct %>%"><%= pct %>%</div>
@@ -79,12 +98,13 @@
         <span class="badge bg-light text-dark border ms-2" id="tenantSettingsFilterLabel">Showing all settings</span>
       </div>
       <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary d-none" id="tenantClearFilter" onclick="clearTenantFilters()"><i class="bi bi-x-lg me-1"></i>Clear</button>
         <select class="form-select form-select-sm" style="max-width:160px;" id="tenantStateFilter" onchange="filterTenantSettings()">
           <option value="">All states</option>
           <option value="enabled">Enabled only</option>
           <option value="disabled">Disabled only</option>
         </select>
-        <input type="text" class="form-control form-control-sm" style="max-width:320px;" placeholder="Filter settings..." id="tenantSettingsFilter" oninput="filterTenantSettings()">
+        <input type="text" class="form-control form-control-sm" style="max-width:320px;" placeholder="Search settings..." id="tenantSettingsFilter" oninput="onTenantSearch(this.value)">
       </div>
     </div>
     <div class="table-responsive">
@@ -164,23 +184,82 @@ function filterByGroup(group) {
   filterTenantSettings();
 }
 
+// Both search boxes drive the same term, so typing in either keeps the group
+// breakdown and the settings list describing the same query.
+function onTenantSearch(value) {
+  ['tenantSettingsFilter', 'tenantGroupSearch'].forEach(function(id) {
+    var input = document.getElementById(id);
+    if (input && input.value !== value) input.value = value;
+  });
+  filterTenantSettings();
+}
+
+function clearTenantFilters() {
+  tenantGroupFilter = '';
+  var state = document.getElementById('tenantStateFilter');
+  if (state) state.value = '';
+  onTenantSearch('');
+}
+
 function filterTenantSettings() {
-  var textFilter = (document.getElementById('tenantSettingsFilter').value || '').toLowerCase();
-  var stateFilter = document.getElementById('tenantStateFilter').value;
+  var searchInput = document.getElementById('tenantSettingsFilter') || document.getElementById('tenantGroupSearch');
+  var textFilter = ((searchInput && searchInput.value) || '').toLowerCase().trim();
+  var stateEl = document.getElementById('tenantStateFilter');
+  var stateFilter = stateEl ? stateEl.value : '';
+
+  // Pass 1: the settings list, tallying how many settings each group contributes so
+  // the group table can show match counts for the same term.
   var shown = 0;
+  var matchesByGroup = {};
   document.querySelectorAll('#tenant-settings-table tbody tr').forEach(function(row) {
-    var matchesText = (row.getAttribute('data-filter') || '').includes(textFilter);
+    var group = row.getAttribute('data-group') || '';
+    var matchesText = !textFilter || (row.getAttribute('data-filter') || '').includes(textFilter);
     var matchesState = !stateFilter || row.getAttribute('data-state') === stateFilter;
-    var matchesGroup = !tenantGroupFilter || row.getAttribute('data-group') === tenantGroupFilter;
-    var visible = matchesText && matchesState && matchesGroup;
+    if (matchesText && matchesState) matchesByGroup[group] = (matchesByGroup[group] || 0) + 1;
+
+    var visible = matchesText && matchesState && (!tenantGroupFilter || group === tenantGroupFilter);
     row.style.display = visible ? '' : 'none';
     if (visible) shown++;
   });
+
+  // Pass 2: a group stays visible when its own name matches or when it holds a
+  // matching setting — searching "API" finds both the group and the settings in it.
+  var groupsShown = 0;
+  var showMatchColumn = !!textFilter || !!stateFilter;
+  document.querySelectorAll('#tenant-groups-table tbody tr').forEach(function(row) {
+    var group = row.getAttribute('data-group') || '';
+    var nameMatches = !textFilter || group.includes(textFilter);
+    var settingsMatch = !textFilter || (row.getAttribute('data-settings') || '').includes(textFilter);
+    var count = matchesByGroup[group] || 0;
+    var visible = (nameMatches || settingsMatch) && (!stateFilter || count > 0) && (!tenantGroupFilter || group === tenantGroupFilter);
+    row.style.display = visible ? '' : 'none';
+    if (visible) groupsShown++;
+
+    var badge = row.querySelector('.group-match-count');
+    if (badge) {
+      badge.textContent = count;
+      badge.className = 'badge group-match-count ' + (count ? 'bg-primary' : 'bg-secondary');
+    }
+  });
+  document.querySelectorAll('.tenant-match-col').forEach(function(cell) {
+    cell.classList.toggle('d-none', !showMatchColumn);
+  });
+
   var parts = [];
+  if (textFilter) parts.push('"' + textFilter + '"');
   if (tenantGroupFilter) parts.push('group "' + tenantGroupFilter + '"');
   if (stateFilter) parts.push(stateFilter);
-  document.getElementById('tenantSettingsFilterLabel').textContent =
-    parts.length ? 'Showing ' + shown + ' — ' + parts.join(', ') : 'Showing all settings';
+
+  var settingsLabel = document.getElementById('tenantSettingsFilterLabel');
+  if (settingsLabel) {
+    settingsLabel.textContent = parts.length ? 'Showing ' + shown + ' — ' + parts.join(', ') : 'Showing all settings';
+  }
+  var groupsLabel = document.getElementById('tenantGroupsFilterLabel');
+  if (groupsLabel) {
+    groupsLabel.textContent = parts.length ? 'Showing ' + groupsShown + ' matching group' + (groupsShown === 1 ? '' : 's') : 'Showing all groups';
+  }
+  var clearBtn = document.getElementById('tenantClearFilter');
+  if (clearBtn) clearBtn.classList.toggle('d-none', !parts.length);
 }
 
 function escapeHtml(value) {

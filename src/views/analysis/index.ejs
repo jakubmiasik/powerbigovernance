@@ -5,7 +5,10 @@
     <p class="text-muted">Scan your Power BI tenant and save results to the database.</p>
 
     <div class="card mb-4">
-      <div class="card-header"><i class="bi bi-rocket me-2"></i>New Analysis</div>
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span><i class="bi bi-rocket me-2"></i>New Analysis</span>
+        <a href="/analysis/compare" class="btn btn-sm btn-outline-primary text-nowrap"><i class="bi bi-arrow-left-right me-1"></i>Compare Runs</a>
+      </div>
       <div class="card-body">
         <% if (!servicePrincipals.length) { %>
           <div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle me-2"></i>No service principals configured. <a href="/settings">Add one in Settings</a> first.</div>
@@ -34,10 +37,7 @@
     <div class="card">
       <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <span><i class="bi bi-clock-history me-2"></i>Previous Runs (<%= runs.length %>)</span>
-        <div class="d-flex gap-2 flex-wrap">
-          <a href="/analysis/compare" class="btn btn-sm btn-outline-primary text-nowrap"><i class="bi bi-arrow-left-right me-1"></i>Compare Runs</a>
-          <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter runs..." oninput="filterTable(this, 'analysis-runs-table')">
-        </div>
+        <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter runs..." oninput="filterTable(this, 'analysis-runs-table')">
       </div>
       <div class="table-responsive">
         <table class="table table-hover table-sm mb-0" id="analysis-runs-table">
