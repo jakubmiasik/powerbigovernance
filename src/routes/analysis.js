@@ -1,12 +1,65 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
-const { createPowerBIService } = require('../services/powerbiService');
+const { createPowerBIService, runWithApiReporter } = require('../services/powerbiService');
 const {
   METRIC_DEFS, computeRunTotals, diffTotals, diffRunDetails,
 } = require('../services/runMetricsService');
 
 const activeAnalyses = new Map();
+
+const MAX_PROGRESS_EVENTS = 25;
+// How long without a progress update before the UI calls the run stalled.
+const STALL_SECONDS = Number.parseInt(process.env.ANALYSIS_STALL_SECONDS || '90', 10);
+
+// Every progress write goes through here so `updatedAt` is always accurate — it is
+// what tells the UI the difference between "slow" and "hung".
+function setProgress(progress, patch) {
+  Object.assign(progress, patch);
+  progress.updatedAt = Date.now();
+}
+
+function addProgressEvent(progress, level, message) {
+  progress.events.push({ at: Date.now(), level, message });
+  if (progress.events.length > MAX_PROGRESS_EVENTS) progress.events.shift();
+  progress.updatedAt = Date.now();
+}
+
+// Turns raw API telemetry into counters plus a readable event log, so a run that
+// is being throttled says so instead of just sitting at the same percentage.
+function handleApiEvent(progress, event) {
+  const counters = progress.counters;
+  if (event.type === 'request') {
+    counters.apiCalls += 1;
+    // Requests are far too frequent to log individually; the counter moving is the
+    // signal that the run is alive.
+    progress.updatedAt = Date.now();
+    return;
+  }
+  if (event.type === 'throttled') {
+    counters.throttled += 1;
+    counters.waitedMs += event.delayMs || 0;
+    progress.throttledUntil = Date.now() + (event.delayMs || 0);
+    const capped = event.cappedFrom
+      ? ' (tenant asked for ' + Math.round(event.cappedFrom / 1000) + 's, capped)'
+      : '';
+    addProgressEvent(progress, 'warning',
+      'Throttled by the API on ' + event.path + ' — waiting ' + Math.round((event.delayMs || 0) / 1000) + 's' + capped);
+    return;
+  }
+  if (event.type === 'retry') {
+    counters.retries += 1;
+    counters.waitedMs += event.delayMs || 0;
+    addProgressEvent(progress, 'warning',
+      'HTTP ' + (event.status || '?') + ' on ' + event.path + ' — retry ' + event.attempt + ' in ' + Math.round((event.delayMs || 0) / 1000) + 's');
+    return;
+  }
+  if (event.type === 'failure') {
+    counters.failures += 1;
+    addProgressEvent(progress, 'error',
+      'Request failed on ' + event.path + (event.status ? ' (HTTP ' + event.status + ')' : '') + ': ' + (event.message || 'unknown error'));
+  }
+}
 
 function ensureNotCancelled(progress) {
   if (progress.cancelRequested) {
@@ -72,8 +125,27 @@ router.post('/cancel/:runId', async (req, res) => {
 
 router.get('/progress/:runId', (req, res) => {
   const runId = parseInt(req.params.runId);
-  const progress = activeAnalyses.get(runId) || { status: 'unknown', progress: 0, message: '' };
-  res.json(progress);
+  const progress = activeAnalyses.get(runId);
+  if (!progress) {
+    return res.json({ status: 'unknown', progress: 0, message: '', events: [], counters: null });
+  }
+
+  const now = Date.now();
+  const secondsSinceUpdate = Math.floor((now - (progress.updatedAt || now)) / 1000);
+  const throttleRemaining = progress.throttledUntil && progress.throttledUntil > now
+    ? Math.ceil((progress.throttledUntil - now) / 1000)
+    : 0;
+
+  res.json({
+    ...progress,
+    elapsedSeconds: Math.floor((now - (progress.startedAt || now)) / 1000),
+    secondsSinceUpdate,
+    throttleRemainingSeconds: throttleRemaining,
+    // "Stalled" means nothing has moved, not even an API call — a run that is merely
+    // waiting out a documented throttle is reported as throttled, not stalled.
+    stalled: progress.status === 'running' && !throttleRemaining && secondsSinceUpdate >= STALL_SECONDS,
+    stallThresholdSeconds: STALL_SECONDS,
+  });
 });
 
 router.get('/results/:runId', async (req, res) => {
@@ -243,25 +315,47 @@ router.post('/delete/:runId', async (req, res) => {
 });
 
 async function runAnalysis(runId, sp) {
-  const progress = { status: 'running', progress: 0, message: 'Starting analysis...', current: 0, total: 0, cancelRequested: false };
+  const progress = {
+    status: 'running',
+    progress: 0,
+    phase: 'Starting',
+    message: 'Starting analysis...',
+    detail: '',
+    current: 0,
+    total: 0,
+    cancelRequested: false,
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    throttledUntil: null,
+    counters: { apiCalls: 0, retries: 0, throttled: 0, failures: 0, waitedMs: 0, skippedItems: 0 },
+    events: [],
+  };
   activeAnalyses.set(runId, progress);
+  addProgressEvent(progress, 'info', 'Analysis started for ' + (sp.name || 'service principal'));
 
+  // Everything below runs inside the reporter, so retries and throttling anywhere in
+  // the Power BI client surface as run progress instead of silent delay.
+  await runWithApiReporter(event => handleApiEvent(progress, event), async () => {
   try {
     const pbi = createPowerBIService(sp);
 
-    progress.message = 'Fetching workspaces...';
+    setProgress(progress, { phase: 'Workspaces', message: 'Fetching workspaces...' });
     const workspaces = await pbi.getWorkspaces();
     ensureNotCancelled(progress);
-    progress.total = workspaces.length;
-    progress.message = 'Found ' + workspaces.length + ' workspaces. Fetching all items...';
-    progress.progress = 10;
+    setProgress(progress, {
+      total: workspaces.length,
+      progress: 10,
+      message: 'Found ' + workspaces.length + ' workspaces. Fetching all items...',
+    });
+    addProgressEvent(progress, 'info', 'Found ' + workspaces.length + ' workspaces');
 
-    progress.message = 'Fetching all items via Fabric Admin API...';
+    setProgress(progress, { phase: 'Items', message: 'Fetching all items via Fabric Admin API...' });
     const allItems = await pbi.getAllItems();
     ensureNotCancelled(progress);
-    progress.progress = 40;
-    progress.message = 'Found ' + allItems.length + ' items. Processing...';
+    setProgress(progress, { progress: 40, message: 'Found ' + allItems.length + ' items. Processing...' });
+    addProgressEvent(progress, 'info', 'Found ' + allItems.length + ' items');
 
+    setProgress(progress, { phase: 'Capacities', message: 'Fetching capacities...' });
     const capacities = await pbi.getCapacities().catch(() => []);
     ensureNotCancelled(progress);
 
@@ -311,8 +405,7 @@ async function runAnalysis(runId, sp) {
       }
     }
 
-    progress.message = 'Building workspace details...';
-    progress.progress = 60;
+    setProgress(progress, { phase: 'Workspace details', message: 'Building workspace details...', progress: 60 });
     ensureNotCancelled(progress);
 
     const workspaceDetails = [];
@@ -384,15 +477,17 @@ async function runAnalysis(runId, sp) {
       });
     }
 
-    progress.progress = 80;
-    progress.message = 'Fetching workspace users...';
+    setProgress(progress, { phase: 'Workspace access', progress: 80, message: 'Fetching workspace users...' });
     const batchSize = 10;
     let usersFetched = 0;
+    let userFetchFailures = 0;
     for (let i = 0; i < workspaces.length; i += batchSize) {
       ensureNotCancelled(progress);
       const batch = workspaces.slice(i, i + batchSize);
+      setProgress(progress, { detail: 'Reading access for ' + batch.map(ws => ws.displayName || ws.name || ws.id).slice(0, 3).join(', ') + (batch.length > 3 ? ' and ' + (batch.length - 3) + ' more' : '') });
       const userResults = await Promise.allSettled(batch.map((ws) => pbi.getWorkspaceUsers(ws.id)));
       ensureNotCancelled(progress);
+      userFetchFailures += userResults.filter(r => r.status === 'rejected').length;
       for (let j = 0; j < userResults.length; j += 1) {
         if (userResults[j].status === 'fulfilled') {
           const users = userResults[j].value;
@@ -410,23 +505,37 @@ async function runAnalysis(runId, sp) {
         }
       }
       usersFetched = Math.min(i + batchSize, workspaces.length);
-      progress.current = usersFetched;
-      progress.progress = 80 + Math.round((usersFetched / Math.max(workspaces.length, 1)) * 10);
-      progress.message = 'Fetching users: ' + usersFetched + ' / ' + workspaces.length + ' workspaces...';
+      setProgress(progress, {
+        current: usersFetched,
+        progress: 80 + Math.round((usersFetched / Math.max(workspaces.length, 1)) * 10),
+        message: 'Fetching users: ' + usersFetched + ' / ' + workspaces.length + ' workspaces...',
+      });
+    }
+    if (userFetchFailures) {
+      addProgressEvent(progress, 'warning', userFetchFailures + ' workspace(s) would not return their access list — usually missing permission');
     }
 
     // ── OneLake Storage Scan ──
-    progress.progress = 90;
-    progress.message = 'Scanning OneLake storage sizes...';
+    // The longest phase by far: one call per storage item. It reports the workspace
+    // and item being read so a slow tenant looks slow rather than frozen.
+    setProgress(progress, { phase: 'OneLake storage', progress: 90, message: 'Scanning OneLake storage sizes...' });
     let totalStorageSize = 0;
     let totalStorageFiles = 0;
     let storageScannedCount = 0;
+    let storageItemsScanned = 0;
+    let storageItemsSkipped = 0;
 
     const storageTypes = new Set([
       'Lakehouse', 'Warehouse', 'SQLDatabase', 'SemanticModel', 'Dataset',
       'Dataflow', 'DataflowGen2', 'KQLDatabase', 'Notebook',
       'Environment', 'EventStream', 'DataPipeline', 'SparkJobDefinition',
     ]);
+
+    const totalStorageItems = workspaceDetails.reduce(
+      (sum, wsDetail) => sum + (wsDetail.items || []).filter(it => storageTypes.has(it.type)).length,
+      0
+    );
+    addProgressEvent(progress, 'info', 'Scanning storage for ' + totalStorageItems + ' item(s) across ' + workspaceDetails.length + ' workspaces');
 
     for (let i = 0; i < workspaceDetails.length; i++) {
       ensureNotCancelled(progress);
@@ -439,6 +548,10 @@ async function runAnalysis(runId, sp) {
       const wsItemSizes = {};
 
       for (const item of storageItems) {
+        ensureNotCancelled(progress);
+        setProgress(progress, {
+          detail: wsDetail.name + ' → ' + (item.name || item.type || 'item') + ' (' + (storageItemsScanned + 1) + ' of ~' + totalStorageItems + ')',
+        });
         try {
           const result = await pbi.getItemStorageSize(wsDetail.id, item.id);
           if (result.success && result.totalSize > 0) {
@@ -446,7 +559,14 @@ async function runAnalysis(runId, sp) {
             wsStorageSize += result.totalSize;
             wsStorageFiles += result.fileCount;
           }
-        } catch { /* skip items that fail */ }
+        } catch {
+          // Items without OneLake storage or without permission are expected; they
+          // are counted so a scan that skips everything is visibly different from
+          // one that finds nothing.
+          storageItemsSkipped += 1;
+          progress.counters.skippedItems += 1;
+        }
+        storageItemsScanned += 1;
       }
 
       wsDetail.storageSize = wsStorageSize;
@@ -457,8 +577,13 @@ async function runAnalysis(runId, sp) {
       totalStorageSize += wsStorageSize;
       totalStorageFiles += wsStorageFiles;
 
-      progress.progress = 90 + Math.round(((i + 1) / workspaceDetails.length) * 10);
-      progress.message = 'Scanning storage: ' + (i + 1) + ' / ' + workspaceDetails.length + ' workspaces...';
+      setProgress(progress, {
+        progress: 90 + Math.round(((i + 1) / workspaceDetails.length) * 10),
+        message: 'Scanning storage: ' + (i + 1) + ' / ' + workspaceDetails.length + ' workspaces...',
+      });
+    }
+    if (storageItemsSkipped) {
+      addProgressEvent(progress, 'info', storageItemsSkipped + ' item(s) had no readable OneLake storage and were skipped');
     }
 
     const summary = {
@@ -515,12 +640,14 @@ async function runAnalysis(runId, sp) {
     // A service principal without Tenant.Read.All still produces a valid run; the
     // snapshot is simply absent, and comparisons say so rather than reporting the
     // settings as deleted.
-    progress.message = 'Capturing tenant settings...';
+    setProgress(progress, { phase: 'Tenant settings', message: 'Capturing tenant settings...', detail: '' });
     let tenantSettings = null;
     try {
       tenantSettings = await pbi.getTenantSettings();
+      addProgressEvent(progress, 'info', 'Captured ' + tenantSettings.length + ' tenant setting(s)');
     } catch (tenantErr) {
       console.warn('[Analysis] Tenant settings not captured for run', runId, tenantErr.message);
+      addProgressEvent(progress, 'warning', 'Tenant settings not captured: ' + tenantErr.message);
     }
 
     const analysisResults = { summary, workspaces: workspaceDetails };
@@ -550,13 +677,24 @@ async function runAnalysis(runId, sp) {
       console.warn('[Analysis] Could not store run totals for run', runId, totalsErr.message);
     }
 
-    progress.status = 'completed';
-    progress.progress = 100;
-    progress.message = 'Analysis complete!';
+    setProgress(progress, {
+      status: 'completed',
+      progress: 100,
+      phase: 'Complete',
+      detail: '',
+      message: 'Analysis complete!',
+    });
+    addProgressEvent(progress, 'info',
+      'Finished in ' + Math.round((Date.now() - progress.startedAt) / 1000) + 's after ' + progress.counters.apiCalls + ' API call(s)');
   } catch (err) {
     const cancelled = !!err.isCancelled;
-    progress.status = cancelled ? 'cancelled' : 'failed';
-    progress.message = cancelled ? 'Analysis cancelled.' : 'Error: ' + err.message;
+    setProgress(progress, {
+      status: cancelled ? 'cancelled' : 'failed',
+      phase: cancelled ? 'Cancelled' : 'Failed',
+      message: cancelled ? 'Analysis cancelled.' : 'Error: ' + err.message,
+    });
+    addProgressEvent(progress, cancelled ? 'info' : 'error',
+      cancelled ? 'Cancelled by user' : 'Run failed: ' + err.message);
     try {
       await db.updateAnalysisRun(runId, {
         status: cancelled ? 'cancelled' : 'failed',
@@ -572,6 +710,7 @@ async function runAnalysis(runId, sp) {
       // ignore
     }
   }
+  });
 
   setTimeout(() => activeAnalyses.delete(runId), 5 * 60 * 1000);
 }
