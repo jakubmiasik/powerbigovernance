@@ -237,12 +237,27 @@ router.get('/:workspaceId/lineage/:itemId', async (req, res) => {
 });
 
 // ── Item details ──
-// One endpoint for every artifact type. Each section is fetched independently so a
-// permission gap on one (Lakehouse tables, say) still returns everything else.
+// One endpoint for every artifact type. Results are cached in the database so
+// opening an artifact repeatedly does not re-read the APIs; ?refresh=1 forces a
+// fresh read.
 router.get('/:workspaceId/items/:itemId/details', async (req, res) => {
   const { workspaceId, itemId } = req.params;
   const requestedType = (req.query.type || '').toString();
+  const forceRefresh = req.query.refresh === '1';
+
   try {
+    if (!forceRefresh) {
+      const cached = await db.getItemDetailsCache(workspaceId, itemId);
+      if (cached && cached.payload) {
+        try {
+          const payload = JSON.parse(cached.payload);
+          return res.json({ ...payload, success: true, fromCache: true, cachedAt: cached.fetched_at });
+        } catch {
+          // Unreadable cache row: fall through and rebuild it.
+        }
+      }
+    }
+
     const pbi = await getPbiService(res);
     const sections = [];
     const warnings = [];
@@ -250,6 +265,17 @@ router.get('/:workspaceId/items/:itemId/details', async (req, res) => {
 
     const runIndex = await buildRunItemIndex(req, res);
     const known = runIndex.get(itemId) || {};
+    // Resolving ids to names is the whole point of showing details, so every
+    // id-shaped field below is looked up in the run index before being rendered.
+    const nameFor = id => {
+      const entry = runIndex.get(id);
+      return entry && entry.name ? entry.name : null;
+    };
+    const labelFor = (id) => {
+      if (!id) return '-';
+      const name = nameFor(id);
+      return name ? name : id;
+    };
 
     const item = {
       id: itemId,
@@ -269,7 +295,6 @@ router.get('/:workspaceId/items/:itemId/details', async (req, res) => {
       }
     }
 
-    // Live metadata: also fills in the description and canonical display name.
     await section('Item metadata', 'info-circle', 'metadata', async () => {
       const detail = await pbi.getItemDetail(workspaceId, itemId);
       if (!detail) return null;
@@ -279,8 +304,9 @@ router.get('/:workspaceId/items/:itemId/details', async (req, res) => {
       return {
         kind: 'keyvalue',
         rows: [
-          { label: 'Display name', value: detail.displayName || '-' },
+          { label: 'Name', value: detail.displayName || item.name || '-' },
           { label: 'Type', value: detail.type || item.type || '-' },
+          { label: 'Workspace', value: item.workspaceName || workspaceId },
           { label: 'Description', value: detail.description || '-' },
           { label: 'Item ID', value: detail.id || itemId, mono: true },
           { label: 'Workspace ID', value: detail.workspaceId || workspaceId, mono: true },
@@ -296,6 +322,45 @@ router.get('/:workspaceId/items/:itemId/details', async (req, res) => {
           columns: ['Name', 'Type', 'Format', 'Location'],
           rows: tables.map(t => [t.name || '-', t.type || '-', t.format || '-', t.location || '-']),
           emptyText: 'No tables found in this lakehouse.',
+        };
+      });
+    }
+
+    // Lakehouses and warehouses expose a SQL analytics endpoint; its schema is the
+    // closest thing to "tables and attributes" this app can report.
+    if (type === 'lakehouse' || type === 'warehouse') {
+      await section('SQL endpoint', 'hdd-network', 'sqlendpoint', async () => {
+        const endpoint = await pbi.getSqlEndpointInfo(workspaceId, itemId, requestedType);
+        if (!endpoint) return { kind: 'note', note: 'No SQL analytics endpoint is exposed for this item.' };
+
+        let schema = [];
+        let schemaError = null;
+        try {
+          schema = await pbi.getSqlEndpointSchema(endpoint);
+        } catch (err) {
+          schemaError = err.message;
+        }
+
+        const rows = [];
+        for (const table of schema) {
+          for (const column of table.columns) {
+            rows.push([table.schema + '.' + table.name, table.type === 'VIEW' ? 'View' : 'Table', column.name, column.dataType, column.nullable ? 'Yes' : 'No']);
+          }
+          if (!table.columns.length) rows.push([table.schema + '.' + table.name, table.type === 'VIEW' ? 'View' : 'Table', '-', '-', '-']);
+        }
+
+        if (schemaError) {
+          warnings.push('SQL endpoint schema: ' + schemaError);
+        }
+
+        return {
+          kind: 'table',
+          summary: endpoint.connectionString + (schema.length ? ' · ' + schema.length + ' table(s)' : ''),
+          columns: ['Table', 'Kind', 'Column', 'Data type', 'Nullable'],
+          rows,
+          emptyText: schemaError
+            ? 'The endpoint is available but its schema could not be read.'
+            : 'The SQL endpoint reports no tables.',
         };
       });
     }
@@ -344,14 +409,14 @@ router.get('/:workspaceId/items/:itemId/details', async (req, res) => {
         const tiles = await pbi.getDashboardTiles(workspaceId, itemId);
         return {
           kind: 'table',
-          columns: ['Title', 'Report ID', 'Dataset ID'],
-          rows: (tiles || []).map(t => [t.title || t.subTitle || '-', t.reportId || '-', t.datasetId || '-']),
+          columns: ['Title', 'Report', 'Semantic model'],
+          // Tiles reference their report and model by id; show the names instead.
+          rows: (tiles || []).map(t => [t.title || t.subTitle || '-', labelFor(t.reportId), labelFor(t.datasetId)]),
           emptyText: 'No tiles on this dashboard.',
         };
       });
     }
 
-    // OneLake content applies to every item type that stores files.
     await section('OneLake content', 'hdd', 'onelake', async () => {
       const breakdown = await pbi.getOneLakeBreakdown(workspaceId, itemId, 20);
       if (!breakdown.totalFiles && !breakdown.folders.length) {
@@ -359,14 +424,23 @@ router.get('/:workspaceId/items/:itemId/details', async (req, res) => {
       }
       return {
         kind: 'table',
-        summary: breakdown.totalFiles + ' file(s), ' + breakdown.totalSize + ' bytes',
+        summary: breakdown.totalFiles + ' file(s)',
         columns: ['Folder', 'Area', 'Files', 'Size (bytes)'],
         rows: breakdown.folders.map(f => [f.folder, f.area, f.files, f.size]),
         emptyText: 'No OneLake folders found.',
       };
     });
 
-    res.json({ success: true, item, sections, warnings });
+    const payload = { item, sections, warnings };
+    await db.saveItemDetailsCache({
+      workspaceId,
+      itemId,
+      itemType: item.type,
+      itemName: item.name,
+      payload: JSON.stringify(payload),
+    });
+
+    res.json({ ...payload, success: true, fromCache: false, cachedAt: new Date().toISOString() });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }

@@ -1,7 +1,9 @@
 const axios = require('axios');
 const { AsyncLocalStorage } = require('node:async_hooks');
+const { Connection: TediousConnection, Request: TediousRequest } = require('tedious');
 const {
   getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP, getOneLakeTokenForSP,
+  getSqlTokenForSP,
 } = require('./authService');
 
 const PBI_BASE = 'https://api.powerbi.com/v1.0/myorg';
@@ -174,6 +176,51 @@ async function fetchAllPaged(token, url, params = {}) {
     }
   }
   return allItems;
+}
+
+
+// Runs one read-only query against a Fabric SQL analytics endpoint over TDS.
+// tedious is already a dependency (Azure SQL), so this adds no new package.
+function querySqlEndpoint(server, database, token, sql) {
+  return new Promise((resolve, reject) => {
+    const connection = new TediousConnection({
+      server,
+      authentication: { type: 'azure-active-directory-access-token', options: { token } },
+      options: {
+        database,
+        encrypt: true,
+        trustServerCertificate: false,
+        requestTimeout: 60000,
+        connectTimeout: 30000,
+        rowCollectionOnRequestCompletion: false,
+      },
+    });
+
+    const rows = [];
+    let settled = false;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      try { connection.close(); } catch { /* already closing */ }
+      if (err) reject(err); else resolve(value);
+    };
+
+    connection.on('connect', (err) => {
+      if (err) return finish(new Error('SQL endpoint connection failed: ' + err.message));
+      const request = new TediousRequest(sql, (reqErr) => {
+        if (reqErr) return finish(new Error('SQL endpoint query failed: ' + reqErr.message));
+        finish(null, rows);
+      });
+      request.on('row', (columns) => {
+        const row = {};
+        columns.forEach((col) => { row[col.metadata.colName] = col.value; });
+        rows.push(row);
+      });
+      connection.execSql(request);
+    });
+    connection.on('error', (err) => finish(new Error('SQL endpoint error: ' + err.message)));
+    connection.connect();
+  });
 }
 
 function createPowerBIService(spConfig) {
@@ -411,6 +458,67 @@ function createPowerBIService(spConfig) {
       totalFiles,
       folders: [...folders.values()].sort((a, b) => b.size - a.size || a.folder.localeCompare(b.folder)),
     };
+  }
+
+  // ── SQL analytics endpoint ──
+  // Lakehouses and warehouses expose a read-only SQL endpoint. Its connection
+  // string comes from the item's own Fabric route; the schema then comes from
+  // querying INFORMATION_SCHEMA over TDS with a SQL-scoped token.
+  async function getSqlEndpointInfo(workspaceId, itemId, itemType) {
+    const token = await getFabricToken();
+    const type = (itemType || '').toLowerCase();
+    const route = type === 'warehouse' ? 'warehouses' : type === 'lakehouse' ? 'lakehouses' : null;
+    if (!route) return null;
+
+    const detail = await safeGet(token, FABRIC_CORE + '/workspaces/' + workspaceId + '/' + route + '/' + itemId);
+    const properties = detail.properties || {};
+    const sqlProps = properties.sqlEndpointProperties || {};
+    const connectionString = sqlProps.connectionString || properties.connectionString || null;
+    if (!connectionString) return null;
+
+    return {
+      connectionString,
+      // A lakehouse's SQL endpoint is a separate item with its own id and database name.
+      database: sqlProps.id || detail.displayName || itemId,
+      provisioningStatus: sqlProps.provisioningStatus || properties.provisioningStatus || null,
+      itemType: detail.type || itemType,
+    };
+  }
+
+  // Tables and columns behind a SQL analytics endpoint, read over TDS.
+  async function getSqlEndpointSchema(endpoint) {
+    const token = await getSqlTokenForSP(spConfig);
+    const rows = await querySqlEndpoint(endpoint.connectionString, endpoint.database, token, `
+      SELECT t.TABLE_SCHEMA, t.TABLE_NAME, t.TABLE_TYPE,
+             c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.ORDINAL_POSITION,
+             c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE
+      FROM INFORMATION_SCHEMA.TABLES t
+      LEFT JOIN INFORMATION_SCHEMA.COLUMNS c
+        ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
+      ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME, c.ORDINAL_POSITION
+    `);
+
+    const tables = new Map();
+    for (const row of rows) {
+      const key = row.TABLE_SCHEMA + '.' + row.TABLE_NAME;
+      if (!tables.has(key)) {
+        tables.set(key, { schema: row.TABLE_SCHEMA, name: row.TABLE_NAME, type: row.TABLE_TYPE, columns: [] });
+      }
+      if (row.COLUMN_NAME) {
+        let dataType = row.DATA_TYPE;
+        if (row.CHARACTER_MAXIMUM_LENGTH) dataType += '(' + (row.CHARACTER_MAXIMUM_LENGTH === -1 ? 'max' : row.CHARACTER_MAXIMUM_LENGTH) + ')';
+        else if (row.NUMERIC_PRECISION && row.NUMERIC_SCALE !== null && row.NUMERIC_SCALE !== undefined) {
+          dataType += '(' + row.NUMERIC_PRECISION + ',' + row.NUMERIC_SCALE + ')';
+        }
+        tables.get(key).columns.push({
+          name: row.COLUMN_NAME,
+          dataType,
+          nullable: row.IS_NULLABLE === 'YES',
+          position: row.ORDINAL_POSITION,
+        });
+      }
+    }
+    return [...tables.values()].sort((a, b) => a.schema.localeCompare(b.schema) || a.name.localeCompare(b.name));
   }
 
   // ── Tenant settings: Fabric Admin API ──
@@ -823,6 +931,8 @@ function createPowerBIService(spConfig) {
     getItemDetail,
     getLakehouseTables,
     getOneLakeBreakdown,
+    getSqlEndpointInfo,
+    getSqlEndpointSchema,
     scanWorkspaces,
     getScanStatus,
     getScanResult,

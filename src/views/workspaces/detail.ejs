@@ -1069,22 +1069,23 @@ async function calculateStorage() {
 // shows the actual artifact icon where a diagram could only draw a box.
 function lineageNodeHtml(node, isCurrent) {
   var name = node.name || node.id || 'Unknown';
-  var workspace = node.workspaceName ? node.workspaceName + ': ' : '';
   var cls = isCurrent ? 'border-primary bg-body-tertiary' : '';
   var clickable = node.workspaceId && node.id && !isCurrent;
   var onclick = clickable
     ? ' onclick="showItemDetails(\'' + node.workspaceId + '\', \'' + node.id + '\', \'' + String(name).replace(/'/g, "\\'") + '\', \'' + (node.type || '') + '\')" style="cursor:pointer;"'
     : '';
 
+  // Artifact name leads; workspace and type are supporting detail underneath.
   return '<div class="card mb-2 ' + cls + '"' + onclick + '>' +
     '<div class="card-body py-2 px-3 d-flex align-items-center gap-2">' +
     '<span>' + fabricIconImg(node.type, 20) + '</span>' +
     '<div class="flex-grow-1" style="min-width:0;">' +
-      '<div class="small fw-bold text-truncate" title="' + escapeItemHtml(workspace + name) + '">' +
-        (workspace ? '<span class="text-muted fw-normal">' + escapeItemHtml(node.workspaceName) + ': </span>' : '') +
-        escapeItemHtml(name) +
+      '<div class="fw-bold text-truncate" title="' + escapeItemHtml(name) + '">' + escapeItemHtml(name) + '</div>' +
+      '<div class="text-muted text-truncate" style="font-size:0.72rem;">' +
+        '<i class="bi bi-folder2-open me-1"></i>' + escapeItemHtml(node.workspaceName || 'Workspace unknown') +
       '</div>' +
-      '<div class="text-muted" style="font-size:0.7rem;">' + escapeItemHtml(node.type || 'Unknown type') +
+      '<div class="text-muted" style="font-size:0.72rem;">' +
+        '<i class="bi bi-tag me-1"></i>' + escapeItemHtml(node.type || 'Unknown type') +
         (node.resolved === false ? ' · <span class="text-warning">name unavailable</span>' : '') +
       '</div>' +
     '</div>' +

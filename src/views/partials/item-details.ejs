@@ -7,7 +7,13 @@
           <span id="itemDetailsIcon"></span>
           <span id="itemDetailsName">Item details</span>
         </h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        <div class="ms-auto d-flex align-items-center gap-2">
+          <span class="small text-muted" id="itemDetailsCacheInfo"></span>
+          <button class="btn btn-sm btn-outline-secondary" id="itemDetailsRefresh" onclick="refreshItemDetails()" title="Re-read from the API">
+            <i class="bi bi-arrow-clockwise"></i>
+          </button>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
       </div>
       <div class="modal-body">
         <div id="itemDetailsLoading" class="text-center py-4">
@@ -79,8 +85,17 @@ function formatItemBytes(bytes) {
 }
 
 var itemDetailsModalInstance = null;
+var itemDetailsCurrent = null;
 
-async function showItemDetails(workspaceId, itemId, itemName, itemType) {
+function refreshItemDetails() {
+  if (!itemDetailsCurrent) return;
+  showItemDetails(itemDetailsCurrent.workspaceId, itemDetailsCurrent.itemId, itemDetailsCurrent.itemName, itemDetailsCurrent.itemType, true);
+}
+
+// Details are served from the database cache; `force` re-reads the APIs and
+// replaces the stored copy.
+async function showItemDetails(workspaceId, itemId, itemName, itemType, force) {
+  itemDetailsCurrent = { workspaceId: workspaceId, itemId: itemId, itemName: itemName, itemType: itemType };
   if (!itemDetailsModalInstance) {
     itemDetailsModalInstance = new bootstrap.Modal(document.getElementById('itemDetailsModal'));
   }
@@ -91,11 +106,13 @@ async function showItemDetails(workspaceId, itemId, itemName, itemType) {
   document.getElementById('itemDetailsWarnings').classList.add('d-none');
   document.getElementById('itemDetailsBody').classList.add('d-none');
   document.getElementById('itemDetailsBody').innerHTML = '';
+  document.getElementById('itemDetailsCacheInfo').textContent = '';
   itemDetailsModalInstance.show();
 
   try {
     var url = '/workspaces/' + encodeURIComponent(workspaceId) + '/items/' + encodeURIComponent(itemId) +
-      '/details?type=' + encodeURIComponent(itemType || '') + '&name=' + encodeURIComponent(itemName || '');
+      '/details?type=' + encodeURIComponent(itemType || '') + '&name=' + encodeURIComponent(itemName || '') +
+      (force ? '&refresh=1' : '');
     var resp = await fetch(url);
     var data = await resp.json();
     document.getElementById('itemDetailsLoading').classList.add('d-none');
@@ -108,6 +125,14 @@ async function showItemDetails(workspaceId, itemId, itemName, itemType) {
     }
 
     if (data.item && data.item.name) document.getElementById('itemDetailsName').textContent = data.item.name;
+
+    var cacheInfo = document.getElementById('itemDetailsCacheInfo');
+    if (data.cachedAt) {
+      var when = new Date(data.cachedAt).toLocaleString();
+      cacheInfo.innerHTML = data.fromCache
+        ? '<i class="bi bi-database me-1"></i>Stored ' + when
+        : '<i class="bi bi-cloud-download me-1"></i>Read from API ' + when;
+    }
 
     // Sections that could not be read are listed rather than silently missing, so a
     // permission gap is visible instead of looking like "this item has no tables".
