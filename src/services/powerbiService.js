@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const {
   getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP, getOneLakeTokenForSP,
 } = require('./authService');
@@ -10,8 +11,41 @@ const FABRIC_ADMIN = FABRIC_CORE + '/admin';
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 const ARM_BASE = 'https://management.azure.com';
 
+// A throttled tenant can hold a single request for minutes. Cap how long one wait
+// may block so a run reports slow progress instead of appearing frozen.
+const MAX_RETRY_DELAY_MS = Number.parseInt(process.env.API_MAX_RETRY_DELAY_MS || '120000', 10);
+
+// Carries a reporter through the whole call tree without threading a parameter
+// into every request helper, so callers like the analysis run can see retries and
+// throttling as they happen.
+const apiContext = new AsyncLocalStorage();
+
+function reportApiEvent(event) {
+  const store = apiContext.getStore();
+  if (store && typeof store.onApiEvent === 'function') {
+    try {
+      store.onApiEvent(event);
+    } catch {
+      // Telemetry must never break the request it is describing.
+    }
+  }
+}
+
+function runWithApiReporter(onApiEvent, fn) {
+  return apiContext.run({ onApiEvent }, fn);
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function describeUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname;
+  } catch {
+    return url;
+  }
 }
 
 function getRetryDelay(err, attempt) {
@@ -19,20 +53,43 @@ function getRetryDelay(err, attempt) {
   if (![408, 429, 500, 502, 503, 504].includes(status)) return null;
   const retryAfter = Number.parseInt(err.response?.headers?.['retry-after'], 10);
   if (Number.isInteger(retryAfter) && retryAfter > 0) {
-    return retryAfter * 1000;
+    return Math.min(retryAfter * 1000, MAX_RETRY_DELAY_MS);
   }
   return Math.min(1000 * Math.pow(2, attempt), 10000);
 }
 
-async function withRetry(operation) {
+async function withRetry(operation, context = {}) {
+  const path = context.url ? describeUrl(context.url) : 'request';
   let lastError;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      return await operation();
+      const result = await operation();
+      reportApiEvent({ type: 'request', path });
+      return result;
     } catch (err) {
       lastError = err;
+      const status = err.response?.status;
       const delay = getRetryDelay(err, attempt);
-      if (delay === null || attempt === 2) break;
+      if (delay === null || attempt === 2) {
+        reportApiEvent({
+          type: 'failure',
+          path,
+          status,
+          message: err.response?.data?.error?.message || err.message,
+          retriedOut: delay !== null,
+        });
+        break;
+      }
+      const retryAfter = Number.parseInt(err.response?.headers?.['retry-after'], 10);
+      reportApiEvent({
+        type: status === 429 ? 'throttled' : 'retry',
+        path,
+        status,
+        delayMs: delay,
+        attempt: attempt + 1,
+        // A tenant-supplied Retry-After longer than the cap is worth saying out loud.
+        cappedFrom: Number.isInteger(retryAfter) && retryAfter * 1000 > delay ? retryAfter * 1000 : null,
+      });
       await sleep(delay);
     }
   }
@@ -51,7 +108,7 @@ async function safeGet(token, url, params = {}) {
       headers: { Authorization: 'Bearer ' + token },
       params,
       timeout: 60000,
-    }));
+    }), { url });
     return response.data;
   } catch (err) {
     throw buildApiError(err);
@@ -64,7 +121,7 @@ async function safePost(token, url, body, params = {}) {
       headers: { Authorization: 'Bearer ' + token },
       params,
       timeout: 60000,
-    }));
+    }), { url });
     return response.data;
   } catch (err) {
     throw buildApiError(err);
@@ -76,7 +133,7 @@ async function safeDelete(token, url) {
     const response = await withRetry(() => axios.delete(url, {
       headers: { Authorization: 'Bearer ' + token },
       timeout: 60000,
-    }));
+    }), { url });
     return response.data;
   } catch (err) {
     throw buildApiError(err);
@@ -88,7 +145,7 @@ async function safePatch(token, url, body) {
     const response = await withRetry(() => axios.patch(url, body, {
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
       timeout: 60000,
-    }));
+    }), { url });
     return response.data;
   } catch (err) {
     throw buildApiError(err);
@@ -696,4 +753,4 @@ function createPowerBIService(spConfig) {
   };
 }
 
-module.exports = { createPowerBIService };
+module.exports = { createPowerBIService, runWithApiReporter, _private: { withRetry, getRetryDelay, MAX_RETRY_DELAY_MS } };

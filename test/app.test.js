@@ -294,6 +294,64 @@ test('detailed diff caps item samples but keeps counts exact', () => {
   assert.equal(details.items.truncated, true);
 });
 
+const pbi = require('../src/services/powerbiService');
+
+function httpError(status, headers) {
+  const err = new Error('HTTP ' + status);
+  err.response = { status, headers: headers || {}, data: { error: { message: 'boom' } } };
+  return err;
+}
+
+test('retry delay honours Retry-After but caps how long one wait can block', () => {
+  const { getRetryDelay, MAX_RETRY_DELAY_MS } = pbi._private;
+  assert.equal(getRetryDelay(httpError(429, { 'retry-after': '30' }), 0), 30000);
+  // A tenant asking for an hour must not freeze the run for an hour.
+  assert.equal(getRetryDelay(httpError(429, { 'retry-after': '3600' }), 0), MAX_RETRY_DELAY_MS);
+  // Non-retryable statuses opt out entirely.
+  assert.equal(getRetryDelay(httpError(403), 0), null);
+  assert.equal(getRetryDelay(httpError(404), 0), null);
+});
+
+test('throttling is reported to the caller instead of failing silently', async () => {
+  const events = [];
+  let attempts = 0;
+  await pbi.runWithApiReporter(evt => events.push(evt), async () => {
+    await pbi._private.withRetry(async () => {
+      attempts += 1;
+      if (attempts === 1) throw httpError(429, { 'retry-after': '0' });
+      return 'ok';
+    }, { url: 'https://api.powerbi.com/v1.0/myorg/admin/groups' });
+  });
+
+  const throttled = events.find(e => e.type === 'throttled');
+  assert.ok(throttled, 'expected a throttled event');
+  assert.equal(throttled.status, 429);
+  assert.equal(throttled.path, '/v1.0/myorg/admin/groups');
+  assert.ok(events.some(e => e.type === 'request'), 'expected the eventual success to be reported');
+});
+
+test('a request that exhausts its retries reports a failure event', async () => {
+  const events = [];
+  await pbi.runWithApiReporter(evt => events.push(evt), async () => {
+    await assert.rejects(() => pbi._private.withRetry(
+      async () => { throw httpError(500, { 'retry-after': '0' }); },
+      { url: 'https://api.fabric.microsoft.com/v1/admin/workspaces' }
+    ));
+  });
+
+  const failure = events.find(e => e.type === 'failure');
+  assert.ok(failure, 'expected a failure event');
+  assert.equal(failure.status, 500);
+  assert.equal(failure.path, '/v1/admin/workspaces');
+  assert.equal(events.filter(e => e.type === 'retry').length, 2, 'two retries before giving up');
+});
+
+test('api reporting stays silent when no reporter is active', async () => {
+  // Requests made outside a run must not throw for lack of a reporter.
+  const result = await pbi._private.withRetry(async () => 'fine', { url: 'https://example.com/x' });
+  assert.equal(result, 'fine');
+});
+
 const insights = require('../src/services/workspaceInsightsService');
 
 const SCAN_DATE = '2026-07-30T00:00:00Z';
