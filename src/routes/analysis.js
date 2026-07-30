@@ -149,6 +149,7 @@ router.get('/compare', async (req, res) => {
       toRun: null,
       metrics: [],
       error: null,
+      tenantSettingsComparable: true,
     };
 
     if (!Number.isInteger(fromId) || !Number.isInteger(toId)) {
@@ -187,11 +188,17 @@ router.get('/compare', async (req, res) => {
       });
     }
 
+    // A run that predates tenant-settings capture stores zeroes, which would read
+    // as "every setting removed". Drop those rows and say why instead.
+    const tenantSettingsComparable = !!fromTotals.totals.tenantSettingsCaptured && !!toTotals.totals.tenantSettingsCaptured;
     res.render('analysis/compare', {
       ...base,
       fromRun,
       toRun,
-      metrics: diffTotals(fromTotals.totals, toTotals.totals),
+      metrics: diffTotals(fromTotals.totals, toTotals.totals, {
+        skipGroups: tenantSettingsComparable ? [] : ['tenantSettings'],
+      }),
+      tenantSettingsComparable,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -504,7 +511,20 @@ async function runAnalysis(runId, sp) {
       }
     }
 
+    // Snapshot tenant settings with the run so they can be compared over time.
+    // A service principal without Tenant.Read.All still produces a valid run; the
+    // snapshot is simply absent, and comparisons say so rather than reporting the
+    // settings as deleted.
+    progress.message = 'Capturing tenant settings...';
+    let tenantSettings = null;
+    try {
+      tenantSettings = await pbi.getTenantSettings();
+    } catch (tenantErr) {
+      console.warn('[Analysis] Tenant settings not captured for run', runId, tenantErr.message);
+    }
+
     const analysisResults = { summary, workspaces: workspaceDetails };
+    if (tenantSettings) analysisResults.tenantSettings = tenantSettings;
     const resultsJson = JSON.stringify(analysisResults);
 
     await db.updateAnalysisRun(runId, {
