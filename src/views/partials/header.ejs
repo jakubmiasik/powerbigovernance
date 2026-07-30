@@ -117,10 +117,18 @@
     </header>
 
     <!-- Run selector -->
+    <%
+      // Pages that show one specific run (analysis results and anything reached from
+      // them) lock the selector: switching scans there would silently contradict the
+      // run whose data is on screen.
+      var runSelectorLocked = typeof lockRunSelector !== 'undefined' && lockRunSelector;
+      var lockedRunId = typeof lockedRun !== 'undefined' && lockedRun ? lockedRun.id : null;
+      var runSelectorValue = runSelectorLocked && lockedRunId ? lockedRunId : (typeof selectedRunId !== 'undefined' ? selectedRunId : null);
+    %>
     <% if (typeof availableRuns !== 'undefined' && availableRuns && availableRuns.length > 0) { %>
       <div class="run-selector-bar">
         <span class="fw-bold small text-nowrap" style="color: var(--color-primary);"><i class="bi bi-building me-1"></i>Service Principal / Scan:</span>
-        <select class="form-select form-select-sm" style="max-width: 440px;" id="globalRunSelector" onchange="switchGlobalRun(this.value)">
+        <select class="form-select form-select-sm" style="max-width: 440px;" id="globalRunSelector" onchange="switchGlobalRun(this.value)" <%= runSelectorLocked ? 'disabled' : '' %>>
           <%
             var runsBySp = {};
             availableRuns.forEach(function(r) {
@@ -137,14 +145,20 @@
           %>
             <optgroup label="<%= spName %>">
               <% spRuns.forEach(function(r) { %>
-                <option value="<%= r.id %>" <%= (typeof selectedRunId !== 'undefined' && selectedRunId === r.id) ? 'selected' : '' %>>
+                <option value="<%= r.id %>" <%= (runSelectorValue === r.id) ? 'selected' : '' %>>
                   <%= spName %>: Run#<%= r.id %> &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
                 </option>
               <% }) %>
             </optgroup>
           <% }) %>
         </select>
-        <% if (typeof globalRun !== 'undefined' && globalRun) { %>
+        <% if (runSelectorLocked) { %>
+          <% var lockedInfo = (typeof lockedRun !== 'undefined' && lockedRun) ? lockedRun : null; %>
+          <span class="badge bg-primary"><i class="bi bi-eye me-1"></i>Viewing Run #<%= lockedInfo ? lockedInfo.id : '-' %></span>
+          <span class="small" style="color: var(--color-text-muted);">
+            <i class="bi bi-lock me-1"></i>Scan switching is disabled while exploring this run.
+          </span>
+        <% } else if (typeof globalRun !== 'undefined' && globalRun) { %>
           <span class="badge bg-primary"><i class="bi bi-check-circle me-1"></i>Run #<%= globalRun.id %></span>
           <span class="small" style="color: var(--color-text-muted);">Workspaces: <%= globalRun.total_workspaces || '-' %> | Reports: <%= globalRun.total_reports || '-' %></span>
         <% } %>

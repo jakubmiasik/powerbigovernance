@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
+const {
+  METRIC_DEFS, computeRunTotals, diffTotals, diffRunDetails,
+} = require('../services/runMetricsService');
 
 const activeAnalyses = new Map();
 
@@ -88,9 +91,138 @@ router.get('/results/:runId', async (req, res) => {
       user: req.user,
       run,
       results,
+      // This page is bound to one run, so the global scan selector is locked to it.
+      lockRunSelector: true,
+      lockedRun: run,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
+  }
+});
+
+function parseRunResults(run) {
+  if (!run || !run.results_json) return null;
+  try { return JSON.parse(run.results_json); } catch { return null; }
+}
+
+// Totals for a run, computing and storing them on first use. Runs created before
+// the totals table existed are backfilled here rather than in a startup migration,
+// which would have meant parsing every historic run's results_json at boot.
+async function loadRunTotals(runId) {
+  const stored = await db.getRunTotals(runId);
+  if (stored) {
+    const totals = {};
+    for (const def of METRIC_DEFS) totals[def.key] = Number(stored[def.column]) || 0;
+    return { totals, run: null, backfilled: false };
+  }
+
+  const run = await db.getAnalysisRunById(runId);
+  const results = parseRunResults(run);
+  if (!results) return { totals: null, run, backfilled: false };
+
+  const totals = computeRunTotals(results);
+  try {
+    await db.saveRunTotals(
+      runId,
+      { tenantId: run.tenant_id, spId: run.sp_id, spName: run.sp_name, startedAt: run.started_at },
+      totals
+    );
+  } catch (err) {
+    console.warn('[Analysis] Could not backfill run totals for run', runId, err.message);
+  }
+  return { totals, run, backfilled: true };
+}
+
+// ── Run comparison (same tenant only) ──
+router.get('/compare', async (req, res) => {
+  try {
+    const allRuns = await db.getAnalysisRuns();
+    const completed = allRuns.filter(r => r.status === 'completed');
+
+    const fromId = Number.parseInt(req.query.from, 10);
+    const toId = Number.parseInt(req.query.to, 10);
+    const base = {
+      title: 'Compare Runs',
+      user: req.user,
+      runs: completed,
+      fromRun: null,
+      toRun: null,
+      metrics: [],
+      error: null,
+    };
+
+    if (!Number.isInteger(fromId) || !Number.isInteger(toId)) {
+      return res.render('analysis/compare', base);
+    }
+    if (fromId === toId) {
+      return res.render('analysis/compare', { ...base, error: 'Pick two different runs to compare.' });
+    }
+
+    const [fromRun, toRun] = await Promise.all([
+      db.getAnalysisRunById(fromId),
+      db.getAnalysisRunById(toId),
+    ]);
+    if (!fromRun || !toRun) {
+      return res.render('analysis/compare', { ...base, error: 'One of the selected runs no longer exists.' });
+    }
+
+    // Comparing across tenants would produce numbers that look like change but are
+    // really two different estates, so it is refused rather than rendered.
+    if ((fromRun.tenant_id || '') !== (toRun.tenant_id || '')) {
+      return res.render('analysis/compare', {
+        ...base,
+        fromRun,
+        toRun,
+        error: 'These runs are from different tenants. Comparison is only available within a single tenant.',
+      });
+    }
+
+    const [fromTotals, toTotals] = await Promise.all([loadRunTotals(fromId), loadRunTotals(toId)]);
+    if (!fromTotals.totals || !toTotals.totals) {
+      return res.render('analysis/compare', {
+        ...base,
+        fromRun,
+        toRun,
+        error: 'One of the selected runs has no stored results to compare.',
+      });
+    }
+
+    res.render('analysis/compare', {
+      ...base,
+      fromRun,
+      toRun,
+      metrics: diffTotals(fromTotals.totals, toTotals.totals),
+    });
+  } catch (err) {
+    res.render('error', { title: 'Error', user: req.user, message: err.message });
+  }
+});
+
+// Detailed diff, loaded on demand — this is the expensive path that parses both runs.
+router.get('/compare/details', async (req, res) => {
+  try {
+    const fromId = Number.parseInt(req.query.from, 10);
+    const toId = Number.parseInt(req.query.to, 10);
+    if (!Number.isInteger(fromId) || !Number.isInteger(toId) || fromId === toId) {
+      return res.json({ success: false, message: 'Pick two different runs to compare.' });
+    }
+
+    const [fromRun, toRun] = await Promise.all([
+      db.getAnalysisRunById(fromId),
+      db.getAnalysisRunById(toId),
+    ]);
+    if (!fromRun || !toRun) return res.json({ success: false, message: 'One of the selected runs no longer exists.' });
+    if ((fromRun.tenant_id || '') !== (toRun.tenant_id || '')) {
+      return res.json({ success: false, message: 'Comparison is only available within a single tenant.' });
+    }
+
+    const fromResults = parseRunResults(fromRun);
+    const toResults = parseRunResults(toRun);
+    if (!fromResults || !toResults) return res.json({ success: false, message: 'One of the selected runs has no stored results.' });
+
+    res.json({ success: true, details: diffRunDetails(fromResults, toResults) });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
   }
 });
 
@@ -372,7 +504,8 @@ async function runAnalysis(runId, sp) {
       }
     }
 
-    const resultsJson = JSON.stringify({ summary, workspaces: workspaceDetails });
+    const analysisResults = { summary, workspaces: workspaceDetails };
+    const resultsJson = JSON.stringify(analysisResults);
 
     await db.updateAnalysisRun(runId, {
       status: 'completed',
@@ -384,6 +517,18 @@ async function runAnalysis(runId, sp) {
       totalUsers: allUsers.size,
       resultsJson,
     });
+
+    // Materialize the Governance Overview totals for this run so comparisons do not
+    // have to parse results_json. Failing here must not fail an otherwise good run.
+    try {
+      await db.saveRunTotals(
+        runId,
+        { tenantId: sp.tenant_id, spId: sp.id, spName: sp.name, startedAt: new Date() },
+        computeRunTotals(analysisResults)
+      );
+    } catch (totalsErr) {
+      console.warn('[Analysis] Could not store run totals for run', runId, totalsErr.message);
+    }
 
     progress.status = 'completed';
     progress.progress = 100;

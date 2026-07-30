@@ -34,7 +34,10 @@
     <div class="card">
       <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <span><i class="bi bi-clock-history me-2"></i>Previous Runs (<%= runs.length %>)</span>
-        <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter runs..." oninput="filterTable(this, 'analysis-runs-table')">
+        <div class="d-flex gap-2 flex-wrap">
+          <a href="/analysis/compare" class="btn btn-sm btn-outline-primary text-nowrap"><i class="bi bi-arrow-left-right me-1"></i>Compare Runs</a>
+          <input type="text" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Filter runs..." oninput="filterTable(this, 'analysis-runs-table')">
+        </div>
       </div>
       <div class="table-responsive">
         <table class="table table-hover table-sm mb-0" id="analysis-runs-table">

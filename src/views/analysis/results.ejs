@@ -41,7 +41,7 @@
             <% } else { %>
               <a href="#workspace-results-card" class="text-decoration-none text-reset" onclick="<%= card.action === 'filter' ? 'applyWorkspaceFilter(\'' + card.key + '\')' : 'clearWorkspaceFilter()' %>">
             <% } %>
-              <div class="card text-center h-100 border-<%= card.color %>">
+              <div class="card text-center h-100 stat-card">
                 <div class="card-body py-3">
                   <div class="text-<%= card.color %> mb-2"><i class="bi bi-<%= card.icon %>"></i></div>
                   <div class="fs-3 fw-bold text-<%= card.color %>"><%= card.count %></div>
@@ -174,7 +174,7 @@
                   <td><%= ws.pipelineCount || 0 %></td>
                   <td><%= ws.warehouseCount || 0 %></td>
                   <td><%= ws.userCount || 0 %></td>
-                  <td><a href="/workspaces/<%= ws.id %>" class="btn btn-sm btn-outline-primary">Details</a></td>
+                  <td><a href="/workspaces/<%= ws.id %>?runId=<%= run.id %>" class="btn btn-sm btn-outline-primary">Details</a></td>
                 </tr>
               <% }) %>
             </tbody>

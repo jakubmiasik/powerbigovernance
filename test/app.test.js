@@ -106,6 +106,112 @@ test('scheduler resolves due slots in the schedule timezone', () => {
   assert.equal(due.minutesLate, 0);
 });
 
+const runMetrics = require('../src/services/runMetricsService');
+
+function sampleRun(overrides) {
+  return Object.assign({
+    summary: {
+      totalWorkspaces: 2, totalItems: 3, totalReports: 2, totalDatasets: 1,
+      totalUsers: 2, totalStorageSize: 1024, capacities: [{ id: 'c1' }],
+      workspacesOnCapacity: 1, workspacesOnSharedCapacity: 1,
+    },
+    workspaces: [
+      {
+        id: 'ws-1', name: 'Finance', state: 'Active', totalItems: 2, reportCount: 2,
+        capacitySku: 'F64', licenseType: 'Fabric', capacityId: 'cap-a',
+        items: [
+          { id: 'i1', name: 'Report A', type: 'Report', creator: { name: 'Ann', upn: 'ann@x.com' } },
+          { id: 'i2', name: 'Report B', type: 'Report' },
+        ],
+        users: [{ name: 'Ann', email: 'ann@x.com', role: 'Admin' }],
+      },
+      {
+        id: 'ws-2', name: 'Sales', state: 'Active', totalItems: 1, datasetCount: 1,
+        licenseType: 'Pro',
+        items: [{ id: 'i3', name: 'Model', type: 'SemanticModel' }],
+        users: [{ name: 'Bob', email: 'bob@x.com', role: 'Viewer' }],
+      },
+    ],
+  }, overrides);
+}
+
+test('run totals capture the governance overview numbers', () => {
+  const totals = runMetrics.computeRunTotals(sampleRun());
+  assert.equal(totals.totalWorkspaces, 2);
+  assert.equal(totals.totalReports, 2);
+  assert.equal(totals.capacityCount, 1);
+  assert.equal(totals.totalStorageSize, 1024);
+  // Ann created an item, Bob only has access.
+  assert.equal(totals.creatorCount, 1);
+  assert.equal(totals.explorerCount, 1);
+});
+
+test('summary comparison reports deltas and flags unchanged metrics', () => {
+  const before = runMetrics.computeRunTotals(sampleRun());
+  const after = runMetrics.computeRunTotals(sampleRun({
+    summary: { totalWorkspaces: 3, totalItems: 3, totalReports: 4, capacities: [{ id: 'c1' }] },
+  }));
+  const rows = runMetrics.diffTotals(before, after);
+  const byKey = Object.fromEntries(rows.map(r => [r.key, r]));
+
+  assert.equal(byKey.totalWorkspaces.delta, 1);
+  assert.equal(byKey.totalWorkspaces.percent, 50);
+  assert.equal(byKey.totalReports.delta, 2);
+  assert.equal(byKey.totalItems.changed, false);
+  assert.equal(byKey.capacityCount.delta, 0);
+});
+
+test('detailed diff finds workspace, capacity, access and item churn', () => {
+  const from = sampleRun();
+  const to = sampleRun();
+  // Sales disappears, Marketing appears, Finance loses a report and moves SKU.
+  to.workspaces = [
+    Object.assign({}, from.workspaces[0], {
+      totalItems: 1,
+      reportCount: 1,
+      capacitySku: 'F128',
+      items: [from.workspaces[0].items[0]],
+      users: [
+        { name: 'Ann', email: 'ann@x.com', role: 'Member' },
+        { name: 'Cleo', email: 'cleo@x.com', role: 'Viewer' },
+      ],
+    }),
+    { id: 'ws-3', name: 'Marketing', state: 'Active', totalItems: 1, licenseType: 'Pro', items: [{ id: 'i9', name: 'New', type: 'Report' }], users: [] },
+  ];
+
+  const details = runMetrics.diffRunDetails(from, to);
+
+  assert.deepEqual(details.workspaces.added.map(w => w.name), ['Marketing']);
+  assert.deepEqual(details.workspaces.removed.map(w => w.name), ['Sales']);
+  assert.deepEqual(details.workspaces.changed.map(w => w.name), ['Finance']);
+  assert.deepEqual(details.capacityMoves.map(m => [m.fromSku, m.toSku]), [['F64', 'F128']]);
+
+  const financeAccess = details.accessChanges.find(a => a.name === 'Finance');
+  assert.deepEqual(financeAccess.added.map(u => u.name), ['Cleo']);
+  assert.deepEqual(financeAccess.roleChanged.map(u => [u.from, u.to]), [['Admin', 'Member']]);
+
+  // Report B removed from Finance plus Sales' model; Marketing's item added.
+  assert.equal(details.items.removedCount, 2);
+  assert.equal(details.items.addedCount, 1);
+});
+
+test('detailed diff caps item samples but keeps counts exact', () => {
+  const from = { summary: {}, workspaces: [{ id: 'ws-1', name: 'Big', items: [], users: [] }] };
+  const to = {
+    summary: {},
+    workspaces: [{
+      id: 'ws-1',
+      name: 'Big',
+      items: Array.from({ length: 10 }, (_, i) => ({ id: 'item-' + i, name: 'Item ' + i, type: 'Report' })),
+      users: [],
+    }],
+  };
+  const details = runMetrics.diffRunDetails(from, to, { itemSampleLimit: 3 });
+  assert.equal(details.items.addedCount, 10);
+  assert.equal(details.items.added.length, 3);
+  assert.equal(details.items.truncated, true);
+});
+
 const dbPrivate = require('../src/services/databaseService')._private;
 
 test('analysis run insert includes sp_id so NOT NULL schemas accept it', () => {
