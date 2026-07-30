@@ -236,6 +236,23 @@ router.get('/:workspaceId/lineage/:itemId', async (req, res) => {
   }
 });
 
+// Turns a raw TDS failure into something actionable. Workspace roles already grant
+// SQL access, so a login failure here usually means the service principal has no
+// role on the workspace at all rather than a missing database-level grant.
+function describeSqlEndpointError(message, endpoint) {
+  const text = String(message || '');
+  if (/Cannot open database/i.test(text)) {
+    return text + ' — the endpoint was reached but database "' + endpoint.database + '" was not found under it.';
+  }
+  if (/Login failed|not associated with a trusted|principal/i.test(text)) {
+    return text + ' — the service principal reached the endpoint but was refused. Check it holds a workspace role (Admin, Member, Contributor or Viewer) on this workspace.';
+  }
+  if (/ENOTFOUND|ETIMEDOUT|ECONNREFUSED|connection failed/i.test(text)) {
+    return text + ' — could not reach ' + endpoint.connectionString + '. Outbound TCP 1433 must be open from the app.';
+  }
+  return text;
+}
+
 // ── Item details ──
 // One endpoint for every artifact type. Results are cached in the database so
 // opening an artifact repeatedly does not re-read the APIs; ?refresh=1 forces a
@@ -333,12 +350,22 @@ router.get('/:workspaceId/items/:itemId/details', async (req, res) => {
         const endpoint = await pbi.getSqlEndpointInfo(workspaceId, itemId, requestedType);
         if (!endpoint) return { kind: 'note', note: 'No SQL analytics endpoint is exposed for this item.' };
 
+        // A lakehouse endpoint is provisioned asynchronously; querying one that is
+        // still building fails in a way that looks like an access problem.
+        const status = (endpoint.provisioningStatus || '').toLowerCase();
+        if (status && status !== 'success' && status !== 'succeeded') {
+          return {
+            kind: 'note',
+            note: 'The SQL analytics endpoint is not ready yet (provisioning status: ' + endpoint.provisioningStatus + '). Try again once provisioning completes.',
+          };
+        }
+
         let schema = [];
         let schemaError = null;
         try {
           schema = await pbi.getSqlEndpointSchema(endpoint);
         } catch (err) {
-          schemaError = err.message;
+          schemaError = describeSqlEndpointError(err.message, endpoint);
         }
 
         const rows = [];

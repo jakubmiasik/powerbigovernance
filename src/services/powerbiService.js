@@ -478,14 +478,22 @@ function createPowerBIService(spConfig) {
 
     return {
       connectionString,
-      // A lakehouse's SQL endpoint is a separate item with its own id and database name.
-      database: sqlProps.id || detail.displayName || itemId,
+      // The TDS database is named after the item, not after the SQL endpoint's own
+      // item id — connecting by GUID fails with an error that reads like a
+      // permission problem.
+      database: detail.displayName || itemId,
+      endpointItemId: sqlProps.id || null,
       provisioningStatus: sqlProps.provisioningStatus || properties.provisioningStatus || null,
       itemType: detail.type || itemType,
     };
   }
 
   // Tables and columns behind a SQL analytics endpoint, read over TDS.
+  //
+  // Workspace roles map to SQL permissions, so a service principal with a workspace
+  // role (Admin, Member, Contributor, Viewer) can read this — no separate database
+  // grant is needed. Failures are classified below so a genuine access problem is
+  // distinguishable from an endpoint that is simply not ready.
   async function getSqlEndpointSchema(endpoint) {
     const token = await getSqlTokenForSP(spConfig);
     const rows = await querySqlEndpoint(endpoint.connectionString, endpoint.database, token, `

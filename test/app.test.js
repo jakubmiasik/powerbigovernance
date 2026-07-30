@@ -346,6 +346,24 @@ test('a request that exhausts its retries reports a failure event', async () => 
   assert.equal(events.filter(e => e.type === 'retry').length, 2, 'two retries before giving up');
 });
 
+test('sql endpoint failures are classified rather than passed through raw', () => {
+  // Mirrors describeSqlEndpointError in the workspaces route.
+  const endpoint = { database: 'Sales LH', connectionString: 'abc.datawarehouse.fabric.microsoft.com' };
+  const describe = (message) => {
+    const text = String(message || '');
+    if (/Cannot open database/i.test(text)) return 'database';
+    if (/Login failed|not associated with a trusted|principal/i.test(text)) return 'access';
+    if (/ENOTFOUND|ETIMEDOUT|ECONNREFUSED|connection failed/i.test(text)) return 'network';
+    return 'other';
+  };
+
+  assert.equal(describe('Cannot open database "Sales LH" requested by the login.'), 'database');
+  assert.equal(describe('Login failed for user \'<token-identified principal>\'.'), 'access');
+  assert.equal(describe('SQL endpoint connection failed: ETIMEDOUT'), 'network');
+  assert.equal(describe('Something else entirely'), 'other');
+  assert.ok(endpoint.database);
+});
+
 test('lineage endpoints keep a workspace-qualified name instead of a bare id', () => {
   // Mirrors what the lineage route builds before rendering: a resolved endpoint
   // shows "Workspace: Name", an unresolved one falls back to the id and says so.
