@@ -125,6 +125,8 @@ router.get('/artifacts', async (req, res) => {
       for (const item of workspace.items || []) {
         if (!matchesArtifactType(item, requestedType)) continue;
         artifacts.push({
+          id: item.id || null,
+          workspaceId: workspace.id || null,
           type: item.type || '-', name: item.name || 'Unnamed',
           workspace: workspace.name || 'Unnamed Workspace',
           creator: item.creator?.upn || item.creator?.name || '-',

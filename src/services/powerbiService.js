@@ -361,6 +361,58 @@ function createPowerBIService(spConfig) {
     }
   }
 
+  // ── Item detail: Fabric Core API ──
+  // GET /v1/workspaces/{workspaceId}/items/{itemId}
+  async function getItemDetail(workspaceId, itemId) {
+    const token = await getFabricToken();
+    return safeGet(token, FABRIC_CORE + '/workspaces/' + workspaceId + '/items/' + itemId);
+  }
+
+  // ── Lakehouse tables: Fabric Core API ──
+  // GET /v1/workspaces/{workspaceId}/lakehouses/{lakehouseId}/tables
+  async function getLakehouseTables(workspaceId, lakehouseId) {
+    const token = await getFabricToken();
+    const data = await safeGet(token, FABRIC_CORE + '/workspaces/' + workspaceId + '/lakehouses/' + lakehouseId + '/tables');
+    return data.data || data.value || [];
+  }
+
+  // ── OneLake content breakdown ──
+  // Groups the flat OneLake path listing into the folders a user recognises
+  // (Tables/<name>, Files/<name>) with per-folder size and file counts.
+  async function getOneLakeBreakdown(workspaceId, itemId, maxPages) {
+    const paths = await listOneLakePaths(workspaceId, itemId, null, maxPages || 20);
+    const folders = new Map();
+    let totalSize = 0;
+    let totalFiles = 0;
+
+    for (const entry of paths) {
+      const size = Number.parseInt(entry.contentLength, 10) || 0;
+      const isDirectory = entry.isDirectory === true || entry.isDirectory === 'true';
+      if (!isDirectory) {
+        totalSize += size;
+        totalFiles += 1;
+      }
+
+      const segments = String(entry.name || '').split('/').filter(Boolean);
+      if (!segments.length) continue;
+      // Tables/foo/part.parquet and Files/bar/x.csv both roll up to their second segment.
+      const area = segments[0];
+      const folder = segments.length > 1 ? segments[0] + '/' + segments[1] : segments[0];
+      if (!folders.has(folder)) folders.set(folder, { folder, area, files: 0, size: 0 });
+      const bucket = folders.get(folder);
+      if (!isDirectory) {
+        bucket.files += 1;
+        bucket.size += size;
+      }
+    }
+
+    return {
+      totalSize,
+      totalFiles,
+      folders: [...folders.values()].sort((a, b) => b.size - a.size || a.folder.localeCompare(b.folder)),
+    };
+  }
+
   // ── Tenant settings: Fabric Admin API ──
   // GET https://api.fabric.microsoft.com/v1/admin/tenantsettings
   // Needs Tenant.Read.All (or Tenant.ReadWrite.All) on the service principal.
@@ -443,21 +495,62 @@ function createPowerBIService(spConfig) {
           // Extract lineage from datasets (upstreamDataflows, upstreamDatasets)
           const ws = (result.workspaces || [])[0];
           if (!ws) return [];
+          const workspaceName = ws.name || ws.displayName || '';
+
+          // The scan reports upstream items by id only. Resolving them here is what
+          // turns the graph from a wall of GUIDs into readable names.
+          const nameIndex = new Map();
+          const addToIndex = (id, name, type) => {
+            if (id && !nameIndex.has(id)) nameIndex.set(id, { name: name || null, type });
+          };
+          for (const d of ws.datasets || []) addToIndex(d.id, d.name, 'SemanticModel');
+          for (const d of ws.dataflows || []) addToIndex(d.objectId || d.id, d.name, 'Dataflow');
+          for (const r of ws.reports || []) addToIndex(r.id, r.name, 'Report');
+          for (const d of ws.dashboards || []) addToIndex(d.id, d.displayName || d.name, 'Dashboard');
+
+          const endpoint = (id, fallbackName, type, sameWorkspace) => {
+            const known = nameIndex.get(id);
+            return {
+              id,
+              name: (known && known.name) || fallbackName || null,
+              type: (known && known.type) || type,
+              workspaceId: sameWorkspace ? ws.id || workspaceId : null,
+              workspaceName: sameWorkspace ? workspaceName : null,
+            };
+          };
+
           const lineageLinks = [];
+          const push = (source, target) => {
+            lineageLinks.push({
+              // Legacy field names kept so existing callers keep working.
+              sourceItemId: source.id,
+              sourceItemDisplayName: source.name || source.id,
+              sourceItemType: source.type,
+              targetItemId: target.id,
+              targetItemDisplayName: target.name || target.id,
+              targetItemType: target.type,
+              source,
+              target,
+            });
+          };
+
           // Datasets have upstreamDataflows and upstreamDatasets
           for (const ds of ws.datasets || []) {
+            const dsEndpoint = endpoint(ds.id, ds.name, 'SemanticModel', true);
             for (const udf of ds.upstreamDataflows || []) {
-              lineageLinks.push({ sourceItemId: udf.groupId ? udf.targetDataflowId : udf.targetDataflowId, sourceItemDisplayName: udf.targetDataflowId, sourceItemType: 'Dataflow', targetItemId: ds.id, targetItemDisplayName: ds.name, targetItemType: 'Dataset' });
+              const upstreamId = udf.targetDataflowId;
+              const sameWorkspace = !udf.groupId || udf.groupId === ws.id;
+              push(endpoint(upstreamId, null, 'Dataflow', sameWorkspace), dsEndpoint);
             }
             for (const uds of ds.upstreamDatasets || []) {
-              lineageLinks.push({ sourceItemId: uds.datasetId, sourceItemDisplayName: uds.datasetId, sourceItemType: 'Dataset', targetItemId: ds.id, targetItemDisplayName: ds.name, targetItemType: 'Dataset' });
+              const sameWorkspace = !uds.groupId || uds.groupId === ws.id;
+              push(endpoint(uds.datasetId, null, 'SemanticModel', sameWorkspace), dsEndpoint);
             }
           }
           // Reports have datasetId (link to dataset)
           for (const r of ws.reports || []) {
             if (r.datasetId) {
-              const dsObj = (ws.datasets || []).find(d => d.id === r.datasetId);
-              lineageLinks.push({ sourceItemId: r.datasetId, sourceItemDisplayName: dsObj ? dsObj.name : r.datasetId, sourceItemType: 'Dataset', targetItemId: r.id, targetItemDisplayName: r.name, targetItemType: 'Report' });
+              push(endpoint(r.datasetId, null, 'SemanticModel', true), endpoint(r.id, r.name, 'Report', true));
             }
           }
           // Dashboards have tiles with datasetId
@@ -466,8 +559,7 @@ function createPowerBIService(spConfig) {
             for (const t of d.tiles || []) {
               if (t.datasetId && !dsIds.has(t.datasetId)) {
                 dsIds.add(t.datasetId);
-                const dsObj = (ws.datasets || []).find(ds => ds.id === t.datasetId);
-                lineageLinks.push({ sourceItemId: t.datasetId, sourceItemDisplayName: dsObj ? dsObj.name : t.datasetId, sourceItemType: 'Dataset', targetItemId: d.id, targetItemDisplayName: d.displayName || d.id, targetItemType: 'Dashboard' });
+                push(endpoint(t.datasetId, null, 'SemanticModel', true), endpoint(d.id, d.displayName || d.name, 'Dashboard', true));
               }
             }
           }
@@ -728,6 +820,9 @@ function createPowerBIService(spConfig) {
     getDashboardTiles,
     getCapacities,
     getTenantSettings,
+    getItemDetail,
+    getLakehouseTables,
+    getOneLakeBreakdown,
     scanWorkspaces,
     getScanStatus,
     getScanResult,
