@@ -1,4 +1,29 @@
 <%- include('../partials/header') %>
+<%
+  // Same mapping the workspace pages use, so an artifact looks identical wherever
+  // it appears.
+  function artifactIcon(type) {
+    var map = {
+      'report': 'report_20_item.svg', 'paginatedreport': 'paginated_report_20_item.svg',
+      'semanticmodel': 'semantic_model_20_item.svg', 'dataset': 'semantic_model_20_item.svg',
+      'dashboard': 'dashboard_20_item.svg', 'dataflow': 'dataflow_20_item.svg',
+      'dataflowgen2': 'dataflow_gen2_20_item.svg', 'datagen2': 'dataflow_gen2_20_item.svg',
+      'lakehouse': 'lakehouse_20_item.svg', 'notebook': 'notebook_20_item.svg',
+      'datapipeline': 'pipeline_20_item.svg', 'pipeline': 'pipeline_20_item.svg',
+      'warehouse': 'data_warehouse_20_item.svg', 'sqldatabase': 'sql_database_20_item.svg',
+      'kqldatabase': 'kql_database_20_item.svg', 'kqlqueryset': 'kql_queryset_20_item.svg',
+      'eventstream': 'eventstream_20_item.svg', 'environment': 'environment_20_item.svg',
+      'sparkjobdefinition': 'spark_job_direction_20_item.svg', 'app': 'apps_20_item.svg',
+      'mobilereport': 'mobile_report_20_item.svg', 'activator': 'activator_20_item.svg',
+      'reflex': 'activator_20_item.svg', 'variablelibrary': 'variable_library_item.svg',
+      'mlexperiment': 'experimentsitem.svg', 'mlmodel': 'modelitem.svg',
+      'copyjob': 'copyjobitem.svg', 'eventhouse': 'event_houseitem.svg',
+      'kqldashboard': 'dashboard_20_item.svg', 'sqlendpoint': 'endpointregular.svg',
+      'dataagent': 'data_agent_item.svg'
+    };
+    return map[(type || '').toLowerCase()] || null;
+  }
+%>
 <div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
   <div>
     <h2><i class="bi bi-boxes me-2"></i><%= artifactType %> Artifacts</h2>
@@ -21,16 +46,21 @@
           <th>Creator</th>
           <th>Last Updated</th>
           <th>Description / State</th>
+          <th style="width:60px;"></th>
         </tr>
       </thead>
       <tbody>
         <% if (!artifacts.length) { %>
-          <tr data-filter="no artifacts"><td colspan="5" class="text-center text-muted py-3">No matching artifacts found.</td></tr>
+          <tr data-filter="no artifacts"><td colspan="6" class="text-center text-muted py-3">No matching artifacts found.</td></tr>
         <% } %>
         <% artifacts.forEach(function(artifact) { %>
           <tr data-filter="<%= [artifact.name || '', artifact.workspace || '', (artifact.creator && artifact.creator.name ? artifact.creator.name : artifact.creator || ''), artifact.type || '', artifact.description || '', artifact.state || ''].join(' ').toLowerCase() %>">
             <td>
-              <strong><%= artifact.name || 'Unnamed' %></strong>
+              <span class="d-inline-flex align-items-center gap-2">
+                <% var iconFile = artifactIcon(artifact.type); %>
+                <% if (iconFile) { %><img src="/img/icons/<%= iconFile %>" width="18" height="18" alt="<%= artifact.type %>"><% } %>
+                <strong><%= artifact.name || 'Unnamed' %></strong>
+              </span>
               <% if (artifact.type && artifactType === 'All') { %>
                 <div><span class="badge bg-secondary mt-1"><%= artifact.type %></span></div>
               <% } %>
@@ -44,10 +74,18 @@
                 <span class="badge bg-light text-dark border"><%= artifact.state %></span>
               <% } %>
             </td>
+            <td>
+              <% if (artifact.id && artifact.workspaceId) { %>
+                <button class="btn btn-sm btn-outline-secondary p-0 px-1"
+                        onclick="showItemDetails('<%= artifact.workspaceId %>', '<%= artifact.id %>', '<%= (artifact.name || 'Unnamed').replace(/'/g, "\\'") %>', '<%= artifact.type || '' %>')"
+                        title="View details"><i class="bi bi-info-circle"></i></button>
+              <% } %>
+            </td>
           </tr>
         <% }) %>
       </tbody>
     </table>
   </div>
 </div>
+<%- include('../partials/item-details') %>
 <%- include('../partials/footer') %>

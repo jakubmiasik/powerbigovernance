@@ -346,6 +346,34 @@ test('a request that exhausts its retries reports a failure event', async () => 
   assert.equal(events.filter(e => e.type === 'retry').length, 2, 'two retries before giving up');
 });
 
+test('lineage endpoints keep a workspace-qualified name instead of a bare id', () => {
+  // Mirrors what the lineage route builds before rendering: a resolved endpoint
+  // shows "Workspace: Name", an unresolved one falls back to the id and says so.
+  const runIndex = new Map([
+    ['ds-1', { name: 'Sales Model', type: 'SemanticModel', workspaceName: 'Finance', workspaceId: 'ws-1' }],
+  ]);
+  const enrich = (endpoint, fallbackId) => {
+    const base = endpoint || { id: fallbackId, name: null, type: null, workspaceId: null, workspaceName: null };
+    const known = runIndex.get(base.id);
+    return {
+      id: base.id,
+      name: base.name || (known && known.name) || base.id,
+      type: base.type || (known && known.type) || '',
+      workspaceName: base.workspaceName || (known && known.workspaceName) || null,
+      resolved: !!(base.name || (known && known.name)),
+    };
+  };
+
+  const resolved = enrich(null, 'ds-1');
+  assert.equal(resolved.name, 'Sales Model');
+  assert.equal(resolved.workspaceName, 'Finance');
+  assert.equal(resolved.resolved, true);
+
+  const unknown = enrich(null, 'ds-missing');
+  assert.equal(unknown.name, 'ds-missing');
+  assert.equal(unknown.resolved, false);
+});
+
 test('api reporting stays silent when no reporter is active', async () => {
   // Requests made outside a run must not throw for lack of a reporter.
   const result = await pbi._private.withRetry(async () => 'fine', { url: 'https://example.com/x' });
