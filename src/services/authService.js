@@ -113,6 +113,16 @@ async function getAzureManagementTokenForSP(spConfig) {
   return result.accessToken;
 }
 
+// Fabric SQL analytics endpoints authenticate with an Azure SQL scoped token.
+async function getSqlTokenForSP(spConfig) {
+  const app = await getConfidentialClient(spConfig);
+  const result = await app.acquireTokenByClientCredential({
+    scopes: ['https://database.windows.net/.default'],
+  });
+  if (!result || !result.accessToken) throw new Error('Failed to acquire SQL access token');
+  return result.accessToken;
+}
+
 function resetAuthCache() {
   appCache.clear();
 }
@@ -155,7 +165,7 @@ async function acquireDelegatedToken(code, redirectUri) {
 
 module.exports = {
   getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP,
-  getGraphTokenForSP, getOneLakeTokenForSP, resetAuthCache,
+  getGraphTokenForSP, getOneLakeTokenForSP, getSqlTokenForSP, resetAuthCache,
   getDelegatedAuthUrl, acquireDelegatedToken,
   getSecretFromKeyVault,
 };

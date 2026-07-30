@@ -359,6 +359,46 @@ async function getComparableRuns(tenantId) {
   }
 }
 
+// Artifact details cache
+async function getItemDetailsCache(workspaceId, itemId) {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(conn, 'SELECT payload, fetched_at FROM item_details_cache WHERE workspace_id=@ws AND item_id=@item', [
+      { name: 'ws', type: TYPES.NVarChar, value: workspaceId },
+      { name: 'item', type: TYPES.NVarChar, value: itemId },
+    ]);
+    return rows[0] || null;
+  } catch (err) {
+    if ((err.message || '').includes('Invalid object name')) return null;
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+async function saveItemDetailsCache({ workspaceId, itemId, itemType, itemName, payload }) {
+  const conn = await getConnection();
+  try {
+    await execSql(conn, 'DELETE FROM item_details_cache WHERE workspace_id=@ws AND item_id=@item', [
+      { name: 'ws', type: TYPES.NVarChar, value: workspaceId },
+      { name: 'item', type: TYPES.NVarChar, value: itemId },
+    ]);
+    await execSql(conn, `INSERT INTO item_details_cache (workspace_id, item_id, item_type, item_name, payload, fetched_at)
+      VALUES (@ws, @item, @type, @name, @payload, SYSUTCDATETIME())`, [
+      { name: 'ws', type: TYPES.NVarChar, value: workspaceId },
+      { name: 'item', type: TYPES.NVarChar, value: itemId },
+      { name: 'type', type: TYPES.NVarChar, value: itemType || null },
+      { name: 'name', type: TYPES.NVarChar, value: itemName || null },
+      { name: 'payload', type: TYPES.NVarChar, value: payload },
+    ]);
+  } catch (err) {
+    // A missing cache table must never stop the details from being shown.
+    console.warn('[DB] Could not cache item details:', err.message);
+  } finally {
+    conn.close();
+  }
+}
+
 // Capacity Schedules
 async function getCapacitySchedules() {
   const conn = await getConnection();
@@ -614,6 +654,24 @@ async function runMigrations() {
       await runStatement(conn, `add analysis_run_totals.${def.column}`, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_run_totals') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'analysis_run_totals') AND name = N'${def.column}') ALTER TABLE analysis_run_totals ADD ${def.column} BIGINT NOT NULL DEFAULT 0`);
     }
 
+    // Cached artifact details, so opening an artifact does not re-read the APIs
+    // every time. Refreshed on demand from the details modal.
+    await runStatement(conn, 'create item_details_cache', `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'item_details_cache') AND type = 'U')
+      BEGIN
+        CREATE TABLE item_details_cache (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          workspace_id NVARCHAR(100) NOT NULL,
+          item_id NVARCHAR(100) NOT NULL,
+          item_type NVARCHAR(100) NULL,
+          item_name NVARCHAR(400) NULL,
+          payload NVARCHAR(MAX) NOT NULL,
+          fetched_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+        );
+        CREATE UNIQUE INDEX UX_item_details_cache_item ON item_details_cache (workspace_id, item_id);
+      END
+    `);
+
     // Create capacity schedules table if missing
     await runStatement(conn, 'create capacity_schedules', `
       IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U')
@@ -784,6 +842,8 @@ module.exports = {
   saveRunTotals,
   getRunTotals,
   getComparableRuns,
+  getItemDetailsCache,
+  saveItemDetailsCache,
   getCapacitySchedules,
   saveCapacitySchedule,
   updateCapacitySchedule,
