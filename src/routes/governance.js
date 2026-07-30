@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
-const { buildUser360 } = require('../services/runMetricsService');
+const { buildUser360, summarizeTenantSettings } = require('../services/runMetricsService');
 
 function normalizeArtifactType(type) {
   return (type || 'all').trim().toLowerCase();
@@ -68,35 +68,6 @@ async function getPbiServiceForTenant(res) {
     sp = sps[0];
   }
   return createPowerBIService(sp);
-}
-
-function summarizeTenantSettings(settings) {
-  const groups = new Map();
-  let enabled = 0;
-  let delegated = 0;
-  let securityGroupScoped = 0;
-
-  for (const setting of settings) {
-    const groupName = setting.tenantSettingGroup || 'Ungrouped';
-    if (!groups.has(groupName)) groups.set(groupName, { name: groupName, total: 0, enabled: 0 });
-    const group = groups.get(groupName);
-    group.total += 1;
-    if (setting.enabled) {
-      group.enabled += 1;
-      enabled += 1;
-    }
-    if (setting.delegateToWorkspace || setting.delegateToCapacity || setting.delegateToDomain) delegated += 1;
-    if ((setting.enabledSecurityGroups || []).length || (setting.excludedSecurityGroups || []).length) securityGroupScoped += 1;
-  }
-
-  return {
-    total: settings.length,
-    enabled,
-    disabled: settings.length - enabled,
-    delegated,
-    securityGroupScoped,
-    groups: [...groups.values()].sort((a, b) => b.total - a.total || a.name.localeCompare(b.name)),
-  };
 }
 
 router.get('/', async (req, res) => {

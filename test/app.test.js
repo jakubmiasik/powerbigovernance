@@ -195,6 +195,88 @@ test('detailed diff finds workspace, capacity, access and item churn', () => {
   assert.equal(details.items.addedCount, 1);
 });
 
+function tenantRun(settings) {
+  return { summary: {}, workspaces: [], tenantSettings: settings };
+}
+
+test('run totals capture tenant settings and mark whether they were collected', () => {
+  const captured = runMetrics.computeRunTotals(tenantRun([
+    { settingName: 'A', enabled: true, enabledSecurityGroups: [{ name: 'G1' }] },
+    { settingName: 'B', enabled: false, delegateToWorkspace: true },
+  ]));
+  assert.equal(captured.tenantSettingsCaptured, 1);
+  assert.equal(captured.tenantSettingsTotal, 2);
+  assert.equal(captured.tenantSettingsEnabled, 1);
+  assert.equal(captured.tenantSettingsDisabled, 1);
+  assert.equal(captured.tenantSettingsGroupScoped, 1);
+  assert.equal(captured.tenantSettingsDelegated, 1);
+
+  // A run from before capture existed must be distinguishable from a tenant with
+  // genuinely zero settings.
+  const notCaptured = runMetrics.computeRunTotals({ summary: {}, workspaces: [] });
+  assert.equal(notCaptured.tenantSettingsCaptured, 0);
+  assert.equal(notCaptured.tenantSettingsTotal, 0);
+});
+
+test('tenant settings metrics can be excluded from the summary comparison', () => {
+  const before = runMetrics.computeRunTotals({ summary: {}, workspaces: [] });
+  const after = runMetrics.computeRunTotals(tenantRun([{ settingName: 'A', enabled: true }]));
+
+  const withThem = runMetrics.diffTotals(before, after);
+  assert.ok(withThem.some(r => r.key === 'tenantSettingsTotal'));
+
+  const withoutThem = runMetrics.diffTotals(before, after, { skipGroups: ['tenantSettings'] });
+  assert.ok(!withoutThem.some(r => r.key === 'tenantSettingsTotal'));
+  // The hidden capture flag is never a comparison row either way.
+  assert.ok(!withThem.some(r => r.key === 'tenantSettingsCaptured'));
+});
+
+test('tenant settings diff reports toggles, scope changes, and additions', () => {
+  const from = tenantRun([
+    { settingName: 'ExportToExcel', title: 'Export to Excel', enabled: true, tenantSettingGroup: 'Export' },
+    { settingName: 'UseFabricAPIs', title: 'Service principals can use Fabric APIs', enabled: true, tenantSettingGroup: 'Developer', enabledSecurityGroups: [{ name: 'PBI-SPs' }] },
+    { settingName: 'Retired', title: 'Retired setting', enabled: false, tenantSettingGroup: 'Export' },
+  ]);
+  const to = tenantRun([
+    { settingName: 'ExportToExcel', title: 'Export to Excel', enabled: false, tenantSettingGroup: 'Export' },
+    { settingName: 'UseFabricAPIs', title: 'Service principals can use Fabric APIs', enabled: true, tenantSettingGroup: 'Developer', enabledSecurityGroups: [{ name: 'PBI-SPs' }, { name: 'Platform-Team' }] },
+    { settingName: 'NewToggle', title: 'A brand new setting', enabled: true, tenantSettingGroup: 'Developer' },
+  ]);
+
+  const diff = runMetrics.diffTenantSettings(from, to);
+  assert.equal(diff.available, true);
+  assert.deepEqual(diff.enabledChanged.map(s => [s.name, s.from, s.to]), [['ExportToExcel', true, false]]);
+  assert.deepEqual(diff.scopeChanged.map(s => s.name), ['UseFabricAPIs']);
+  assert.match(diff.scopeChanged[0].to, /Platform-Team/);
+  assert.deepEqual(diff.added.map(s => s.name), ['NewToggle']);
+  assert.deepEqual(diff.removed.map(s => s.name), ['Retired']);
+});
+
+test('tenant settings diff refuses runs that never captured settings', () => {
+  const captured = tenantRun([{ settingName: 'A', enabled: true }]);
+  const uncaptured = { summary: {}, workspaces: [] };
+
+  const diff = runMetrics.diffTenantSettings(uncaptured, captured);
+  assert.equal(diff.available, false);
+  assert.match(diff.reason, /baseline/);
+  // Crucially, the captured run's settings are not reported as additions.
+  assert.deepEqual(diff.added, []);
+  assert.deepEqual(diff.removed, []);
+
+  const both = runMetrics.diffTenantSettings(captured, uncaptured);
+  assert.equal(both.available, false);
+  assert.deepEqual(both.removed, []);
+});
+
+test('detailed diff includes the tenant settings section', () => {
+  const details = runMetrics.diffRunDetails(
+    tenantRun([{ settingName: 'A', enabled: true }]),
+    tenantRun([{ settingName: 'A', enabled: false }])
+  );
+  assert.equal(details.tenantSettings.available, true);
+  assert.equal(details.tenantSettings.enabledChanged.length, 1);
+});
+
 test('detailed diff caps item samples but keeps counts exact', () => {
   const from = { summary: {}, workspaces: [{ id: 'ws-1', name: 'Big', items: [], users: [] }] };
   const to = {
