@@ -88,6 +88,9 @@ router.get('/results/:runId', async (req, res) => {
       user: req.user,
       run,
       results,
+      // This page is bound to one run, so the global scan selector is locked to it.
+      lockRunSelector: true,
+      lockedRun: run,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });

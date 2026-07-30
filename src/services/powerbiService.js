@@ -304,6 +304,17 @@ function createPowerBIService(spConfig) {
     }
   }
 
+  // ── Tenant settings: Fabric Admin API ──
+  // GET https://api.fabric.microsoft.com/v1/admin/tenantsettings
+  // Needs Tenant.Read.All (or Tenant.ReadWrite.All) on the service principal.
+  // Errors are propagated rather than swallowed: a permission problem here is
+  // something the operator needs to see, not an empty list.
+  async function getTenantSettings() {
+    const token = await getFabricToken();
+    const data = await safeGet(token, FABRIC_ADMIN + '/tenantsettings');
+    return data.tenantSettings || data.value || [];
+  }
+
   // ── Admin scanner: PBI Admin API ──
   async function scanWorkspaces(workspaceIds) {
     const token = await getToken();
@@ -659,6 +670,7 @@ function createPowerBIService(spConfig) {
     getDatasetParameters,
     getDashboardTiles,
     getCapacities,
+    getTenantSettings,
     scanWorkspaces,
     getScanStatus,
     getScanResult,

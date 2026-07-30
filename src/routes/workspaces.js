@@ -37,21 +37,41 @@ async function getPbiService(res) {
   return createPowerBIService(sp);
 }
 
-// Load workspace list from saved analysis (global run)
-async function loadWorkspacesFromRun(res) {
+// Resolve which run a page should read from. An explicit ?runId= wins over the
+// globally selected scan, so drilling into a workspace from one run's results
+// always shows that run's data rather than whatever scan is selected globally.
+async function resolveRun(req, res) {
+  const requestedId = Number.parseInt(req.query.runId, 10);
+  if (Number.isInteger(requestedId)) {
+    const requested = await db.getAnalysisRunById(requestedId);
+    if (requested) return { run: requested, explicit: true };
+  }
   const globalRun = res.locals.globalRun;
-  if (!globalRun) return null;
+  if (!globalRun) return { run: null, explicit: false };
+  return { run: await db.getAnalysisRunById(globalRun.id), explicit: false };
+}
 
-  const fullRun = await db.getAnalysisRunById(globalRun.id);
+function parseRunWorkspaces(run) {
+  if (!run || !run.results_json) return null;
   try {
-    const results = JSON.parse(fullRun.results_json);
+    const results = JSON.parse(run.results_json);
     return results.workspaces || [];
   } catch { return null; }
 }
 
+// Load workspace list from saved analysis
+async function loadWorkspacesFromRun(res, req) {
+  const { run } = req ? await resolveRun(req, res) : { run: null };
+  if (run) return parseRunWorkspaces(run);
+
+  const globalRun = res.locals.globalRun;
+  if (!globalRun) return null;
+  return parseRunWorkspaces(await db.getAnalysisRunById(globalRun.id));
+}
+
 router.get('/', async (req, res) => {
   try {
-    const savedWorkspaces = await loadWorkspacesFromRun(res);
+    const savedWorkspaces = await loadWorkspacesFromRun(res, req);
 
     if (savedWorkspaces) {
       // Use saved data
@@ -84,8 +104,9 @@ router.get('/:id', async (req, res) => {
   try {
     const workspaceId = req.params.id;
 
-    // Use saved analysis data from global run
-    const savedWorkspaces = await loadWorkspacesFromRun(res);
+    // Use saved analysis data — from the run named in ?runId= when there is one
+    const { run: sourceRun, explicit } = await resolveRun(req, res);
+    const savedWorkspaces = parseRunWorkspaces(sourceRun);
     if (savedWorkspaces) {
       const savedWs = savedWorkspaces.find(w => w.id === workspaceId);
       if (savedWs) {
@@ -94,6 +115,9 @@ router.get('/:id', async (req, res) => {
           title: savedWs.name || 'Workspace', user: req.user,
           workspace: savedWs, items: savedWs.items || [], ...categorized,
           users: savedWs.users || [],
+          sourceRun,
+          lockRunSelector: explicit,
+          lockedRun: explicit ? sourceRun : null,
         });
       }
     }

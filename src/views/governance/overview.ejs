@@ -25,7 +25,8 @@
     { label: 'Notebooks', count: governanceSummary.totalNotebooks || 0, color: 'secondary', icon: 'journal-code', href: '/governance/artifacts?type=Notebook' + (runId ? '&runId=' + runId : '') },
     { label: 'Pipelines', count: governanceSummary.totalPipelines || 0, color: 'secondary', icon: 'arrow-left-right', href: '/governance/artifacts?type=DataPipeline' + (runId ? '&runId=' + runId : '') },
     { label: 'Warehouses', count: governanceSummary.totalWarehouses || 0, color: 'secondary', icon: 'building', href: '/governance/artifacts?type=Warehouse' + (runId ? '&runId=' + runId : '') },
-    { label: 'Unique Users', count: governanceSummary.totalUsers || 0, color: 'secondary', icon: 'people', href: '/governance/users' + (runId ? '?runId=' + runId : ''), sub: '(' + (typeof creatorCount !== 'undefined' ? creatorCount : 0) + ' Creators / ' + (typeof explorerCount !== 'undefined' ? explorerCount : 0) + ' Explorers)' }
+    { label: 'Unique Users', count: governanceSummary.totalUsers || 0, color: 'secondary', icon: 'people', href: '/governance/users' + (runId ? '?runId=' + runId : ''), sub: '(' + (typeof creatorCount !== 'undefined' ? creatorCount : 0) + ' Creators / ' + (typeof explorerCount !== 'undefined' ? explorerCount : 0) + ' Explorers)' },
+    { label: 'Tenant Settings', count: '—', countId: 'tenantSettingsCount', color: 'teal', icon: 'sliders', href: '/governance/tenant-settings', sub: 'Live from admin API', subId: 'tenantSettingsSub' }
   ];
 %>
 <div class="mb-3">
@@ -46,9 +47,9 @@
           <div class="card text-center h-100 stat-card">
             <div class="card-body py-3">
               <div class="text-<%= card.color %> mb-2"><i class="bi bi-<%= card.icon %>"></i></div>
-              <div class="fs-3 fw-bold text-<%= card.color %>"><%= card.count %></div>
+              <div class="fs-3 fw-bold text-<%= card.color %>" <%= card.countId ? 'id=' + card.countId : '' %>><%= card.count %></div>
               <div class="small"><%= card.label %></div>
-              <% if (card.sub) { %><div class="text-muted" style="font-size: 0.7rem;"><%= card.sub %></div><% } %>
+              <% if (card.sub) { %><div class="text-muted" style="font-size: 0.7rem;" <%= card.subId ? 'id=' + card.subId : '' %>><%= card.sub %></div><% } %>
             </div>
           </div>
         </a>
@@ -189,6 +190,19 @@
     </div>
   </div>
 
+  <!-- Tenant Settings (live from the Fabric Admin API) -->
+  <div class="card mb-4" id="tenant-settings-summary-card">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span><i class="bi bi-sliders me-2"></i>Tenant Settings</span>
+      <a href="/governance/tenant-settings" class="btn btn-sm btn-outline-primary"><i class="bi bi-arrow-right me-1"></i>View all settings</a>
+    </div>
+    <div class="card-body py-3" id="tenantSettingsPanel">
+      <div class="text-muted small d-flex align-items-center gap-2" id="tenantSettingsLoading">
+        <span class="spinner-border spinner-border-sm"></span> Reading tenant settings from the admin API...
+      </div>
+    </div>
+  </div>
+
   <div class="card mb-4" id="workspace-governance-card">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
       <span><i class="bi bi-table me-2"></i>All Workspaces (<%= workspaces.length %>)</span>
@@ -243,7 +257,64 @@
   <div class="alert alert-info small">
     <i class="bi bi-info-circle me-2"></i>
     Data from analysis run #<%= run.id %> on <%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %>. <a href="/analysis">Run a new analysis</a> to refresh.
+    Tenant settings are read live and are not part of the saved run.
   </div>
+
+  <script>
+  (function loadTenantSettings() {
+    var panel = document.getElementById('tenantSettingsPanel');
+    var countEl = document.getElementById('tenantSettingsCount');
+    var subEl = document.getElementById('tenantSettingsSub');
+    if (!panel) return;
+
+    function fail(message) {
+      if (countEl) countEl.textContent = '—';
+      if (subEl) subEl.textContent = 'Unavailable';
+      panel.innerHTML = '<div class="alert alert-warning small mb-0">' +
+        '<i class="bi bi-exclamation-triangle me-1"></i><strong>Tenant settings unavailable.</strong> ' +
+        '<span class="text-muted"></span><hr class="my-2">' +
+        '<div class="small mb-0">The service principal needs <code>Tenant.Read.All</code> and must be in the security group ' +
+        'allowed under <strong>Admin Portal → Tenant settings → Service principals can use Fabric APIs</strong>.</div></div>';
+      panel.querySelector('.text-muted').textContent = message || 'Unknown error';
+    }
+
+    fetch('/governance/tenant-settings/data')
+      .then(function(resp) { return resp.json(); })
+      .then(function(data) {
+        if (!data.success) return fail(data.message);
+        if (countEl) countEl.textContent = data.total;
+        if (subEl) subEl.textContent = data.enabled + ' enabled / ' + data.disabled + ' disabled';
+
+        var tiles = [
+          { label: 'Total Settings', value: data.total, color: 'primary' },
+          { label: 'Enabled', value: data.enabled, color: 'success' },
+          { label: 'Disabled', value: data.disabled, color: 'secondary' },
+          { label: 'Scoped to Groups', value: data.securityGroupScoped, color: 'info' },
+          { label: 'Delegated', value: data.delegated, color: 'warning' }
+        ];
+        var tileHtml = tiles.map(function(t) {
+          return '<div class="col-sm-4 col-lg-2 text-center">' +
+            '<div class="fs-4 fw-bold text-' + t.color + '">' + t.value + '</div>' +
+            '<div class="text-muted small">' + t.label + '</div></div>';
+        }).join('');
+
+        var rows = (data.groups || []).map(function(g) {
+          var pct = g.total ? Math.round((g.enabled / g.total) * 100) : 0;
+          return '<tr><td><a href="/governance/tenant-settings">' + g.name + '</a></td>' +
+            '<td><strong>' + g.total + '</strong></td><td>' + g.enabled + '</td>' +
+            '<td>' + (g.total - g.enabled) + '</td>' +
+            '<td><div class="progress" style="height:16px;min-width:80px;"><div class="progress-bar bg-success" style="width:' + pct + '%">' + pct + '%</div></div></td></tr>';
+        }).join('');
+
+        panel.innerHTML =
+          '<div class="row g-3 mb-3">' + tileHtml + '</div>' +
+          (rows ? '<div class="table-responsive" style="max-height:300px;">' +
+            '<table class="table table-sm table-hover mb-0"><thead><tr><th>Group</th><th>Total</th><th>Enabled</th><th>Disabled</th><th style="width:160px;">Enabled %</th></tr></thead>' +
+            '<tbody>' + rows + '</tbody></table></div>' : '');
+      })
+      .catch(function(err) { fail(err.message); });
+  })();
+  </script>
 <% } %>
 
 <%- include('../partials/footer') %>
