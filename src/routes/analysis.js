@@ -34,7 +34,8 @@ router.post('/run', async (req, res) => {
   try {
     const sps = await db.getServicePrincipals();
     if (sps.length === 0) return res.json({ success: false, message: 'No service principal configured. Go to Settings to add one.' });
-    const sp = sps[0];
+    const requestedSpId = Number.parseInt(req.body ? req.body.spId : null, 10);
+    const sp = (Number.isFinite(requestedSpId) && sps.find(s => parseInt(s.id, 10) === requestedSpId)) || sps[0];
 
     const runId = await db.createAnalysisRun({
       spId: sp.id,
@@ -42,6 +43,9 @@ router.post('/run', async (req, res) => {
       tenantId: sp.tenant_id,
       runBy: req.user ? req.user.name : 'anonymous',
     });
+    if (!runId) {
+      return res.json({ success: false, message: 'Could not create the analysis run record in the database.' });
+    }
 
     runAnalysis(runId, sp);
     res.json({ success: true, runId });
