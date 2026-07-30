@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
+const { computeWorkspaceInsights, FINDING_DEFS } = require('../services/workspaceInsightsService');
 
 function categorizeItems(items) {
   const reports = [], datasets = [], dashboards = [], dataflows = [];
@@ -69,31 +70,36 @@ async function loadWorkspacesFromRun(res, req) {
   return parseRunWorkspaces(await db.getAnalysisRunById(globalRun.id));
 }
 
+// Workspace triage: rank workspaces by what needs attention rather than listing
+// them alphabetically, which Governance Overview already does.
 router.get('/', async (req, res) => {
   try {
-    const savedWorkspaces = await loadWorkspacesFromRun(res, req);
+    const { run } = await resolveRun(req, res);
+    const savedWorkspaces = parseRunWorkspaces(run);
 
-    if (savedWorkspaces) {
-      // Use saved data
-      const workspaces = savedWorkspaces.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-      const stats = { total: workspaces.length, byState: {}, byLicense: {}, bySku: {} };
-      for (const ws of workspaces) {
-        const state = ws.state || 'Active';
-        const license = ws.licenseType || 'Pro';
-        const sku = ws.capacitySku || 'Shared (Pro)';
-        stats.byState[state] = (stats.byState[state] || 0) + 1;
-        stats.byLicense[license] = (stats.byLicense[license] || 0) + 1;
-        stats.bySku[sku] = (stats.bySku[sku] || 0) + 1;
-      }
+    const staleDays = Number.parseInt(req.query.staleDays, 10);
+    const overSharedUsers = Number.parseInt(req.query.overSharedUsers, 10);
+
+    if (!savedWorkspaces) {
       return res.render('workspaces/list', {
-        title: 'Workspaces', user: req.user, workspaces, stats, fromSavedData: true,
+        title: 'Workspaces', user: req.user, fromSavedData: false, run: null,
+        insights: computeWorkspaceInsights(null, {}),
+        findingDefs: FINDING_DEFS,
       });
     }
 
-    // No saved data — show message
+    const insights = computeWorkspaceInsights({ workspaces: savedWorkspaces }, {
+      staleDays: Number.isFinite(staleDays) ? staleDays : Number.parseInt(process.env.WORKSPACE_STALE_DAYS, 10),
+      overSharedUsers: Number.isFinite(overSharedUsers) ? overSharedUsers : Number.parseInt(process.env.WORKSPACE_OVERSHARED_USERS, 10),
+      // Staleness is measured against when the scan ran, not today, so an old run
+      // keeps reporting what it reported at the time.
+      referenceDate: run ? (run.completed_at || run.started_at) : null,
+    });
+
     res.render('workspaces/list', {
-      title: 'Workspaces', user: req.user, workspaces: [],
-      stats: { total: 0, byState: {}, byLicense: {}, bySku: {} }, fromSavedData: false,
+      title: 'Workspaces', user: req.user, fromSavedData: true, run,
+      insights,
+      findingDefs: FINDING_DEFS,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });

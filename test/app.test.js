@@ -212,6 +212,147 @@ test('detailed diff caps item samples but keeps counts exact', () => {
   assert.equal(details.items.truncated, true);
 });
 
+const insights = require('../src/services/workspaceInsightsService');
+
+const SCAN_DATE = '2026-07-30T00:00:00Z';
+
+function ws(overrides) {
+  return Object.assign({
+    id: 'ws-' + Math.random().toString(36).slice(2, 8),
+    name: 'Workspace',
+    state: 'Active',
+    items: [{ id: 'i1', name: 'Report', type: 'Report', lastUpdated: '2026-07-29T00:00:00Z' }],
+    users: [{ name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' }],
+  }, overrides);
+}
+
+function findingKeys(result, workspaceName) {
+  const match = result.workspaces.find(w => w.name === workspaceName);
+  return match ? match.findings.map(f => f.key) : null;
+}
+
+test('triage flags workspaces with no admin and with only non-user admins', () => {
+  const result = insights.computeWorkspaceInsights({
+    workspaces: [
+      ws({ name: 'NoAdmin', users: [{ name: 'Bob', email: 'bob@x.com', role: 'Viewer', type: 'User' }] }),
+      ws({ name: 'RobotOnly', users: [{ name: 'sp-etl', role: 'Admin', type: 'App' }] }),
+      ws({ name: 'Healthy', users: [
+        { name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' },
+        { name: 'Cleo', email: 'cleo@x.com', role: 'Admin', type: 'User' },
+      ] }),
+    ],
+  }, { referenceDate: SCAN_DATE });
+
+  assert.ok(findingKeys(result, 'NoAdmin').includes('ownerless'));
+  assert.ok(findingKeys(result, 'RobotOnly').includes('orphanedAdmin'));
+  assert.deepEqual(findingKeys(result, 'Healthy'), []);
+  // Worst-first ordering puts the ownerless workspace above the robot-owned one.
+  assert.equal(result.workspaces[0].name, 'NoAdmin');
+  assert.equal(result.healthyCount, 1);
+});
+
+test('triage flags a single human admin but not two', () => {
+  const result = insights.computeWorkspaceInsights({
+    workspaces: [
+      ws({ name: 'Solo' }),
+      ws({ name: 'Pair', users: [
+        { name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' },
+        { name: 'Bob', email: 'bob@x.com', role: 'Admin', type: 'User' },
+      ] }),
+    ],
+  }, { referenceDate: SCAN_DATE });
+
+  assert.ok(findingKeys(result, 'Solo').includes('singleAdmin'));
+  assert.ok(!findingKeys(result, 'Pair').includes('singleAdmin'));
+});
+
+test('staleness is measured against the scan date, not today', () => {
+  const stale = ws({ name: 'Old', items: [{ id: 'i1', type: 'Report', lastUpdated: '2026-01-01T00:00:00Z' }] });
+  const result = insights.computeWorkspaceInsights({ workspaces: [stale] }, {
+    referenceDate: SCAN_DATE,
+    staleDays: 90,
+  });
+  const finding = result.workspaces[0].findings.find(f => f.key === 'staleContent');
+  assert.ok(finding, 'expected the stale finding');
+  assert.equal(finding.days, 210);
+
+  // Same data, a threshold longer than the gap: no longer stale.
+  const relaxed = insights.computeWorkspaceInsights({ workspaces: [stale] }, {
+    referenceDate: SCAN_DATE,
+    staleDays: 365,
+  });
+  assert.ok(!findingKeys(relaxed, 'Old').includes('staleContent'));
+});
+
+test('empty workspaces are flagged only when someone still has access', () => {
+  const result = insights.computeWorkspaceInsights({
+    workspaces: [
+      ws({ name: 'EmptyShared', items: [] }),
+      ws({ name: 'EmptyAndUnused', items: [], users: [] }),
+    ],
+  }, { referenceDate: SCAN_DATE });
+
+  assert.ok(findingKeys(result, 'EmptyShared').includes('emptyWorkspace'));
+  assert.deepEqual(findingKeys(result, 'EmptyAndUnused'), []);
+});
+
+test('orphaned content is detected only when the scan captured users', () => {
+  const workspaces = [
+    ws({
+      name: 'HasOrphans',
+      items: [
+        { id: 'i1', name: 'Old Report', type: 'Report', lastUpdated: SCAN_DATE, creator: { name: 'Gone', upn: 'gone@x.com' } },
+        { id: 'i2', name: 'Live Report', type: 'Report', lastUpdated: SCAN_DATE, creator: { name: 'Ann', upn: 'ann@x.com' } },
+      ],
+    }),
+  ];
+  const withUsers = insights.computeWorkspaceInsights({ workspaces }, { referenceDate: SCAN_DATE });
+  const orphan = withUsers.workspaces[0].findings.find(f => f.key === 'orphanedContent');
+  assert.ok(orphan, 'expected orphaned content');
+  assert.equal(orphan.count, 1);
+  assert.match(orphan.detail, /gone@x\.com/);
+
+  // No user data anywhere would make every creator look orphaned, so it is skipped.
+  const noUsers = insights.computeWorkspaceInsights({
+    workspaces: workspaces.map(w => Object.assign({}, w, { users: [] })),
+  }, { referenceDate: SCAN_DATE });
+  assert.equal(noUsers.orphanDetectionAvailable, false);
+  assert.ok(!findingKeys(noUsers, 'HasOrphans').includes('orphanedContent'));
+});
+
+test('fabric-only items off dedicated capacity are flagged', () => {
+  const result = insights.computeWorkspaceInsights({
+    workspaces: [
+      ws({ name: 'Shared', capacityId: '00000000-0000-0000-0000-000000000000', items: [{ id: 'i1', type: 'Lakehouse', lastUpdated: SCAN_DATE }] }),
+      ws({ name: 'Dedicated', capacityId: 'cap-1', items: [{ id: 'i1', type: 'Lakehouse', lastUpdated: SCAN_DATE }] }),
+    ],
+  }, { referenceDate: SCAN_DATE });
+
+  assert.ok(findingKeys(result, 'Shared').includes('capacityRisk'));
+  assert.ok(!findingKeys(result, 'Dedicated').includes('capacityRisk'));
+});
+
+test('over-sharing respects the configured threshold', () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ name: 'U' + i, email: 'u' + i + '@x.com', role: i === 0 ? 'Admin' : 'Viewer', type: 'User' }));
+  const workspaces = [ws({ name: 'Wide', users: many })];
+
+  const strict = insights.computeWorkspaceInsights({ workspaces }, { referenceDate: SCAN_DATE, overSharedUsers: 10 });
+  assert.ok(findingKeys(strict, 'Wide').includes('overShared'));
+
+  const lenient = insights.computeWorkspaceInsights({ workspaces }, { referenceDate: SCAN_DATE, overSharedUsers: 50 });
+  assert.ok(!findingKeys(lenient, 'Wide').includes('overShared'));
+  assert.equal(lenient.thresholds.overSharedUsers, 50);
+});
+
+test('workspaces the scan could not read are not reported as access problems', () => {
+  const result = insights.computeWorkspaceInsights({
+    workspaces: [ws({ name: 'Unreadable', users: [] })],
+  }, { referenceDate: SCAN_DATE });
+  const keys = findingKeys(result, 'Unreadable');
+  assert.ok(!keys.includes('ownerless'));
+  assert.ok(!keys.includes('singleAdmin'));
+});
+
 const dbPrivate = require('../src/services/databaseService')._private;
 
 test('analysis run insert includes sp_id so NOT NULL schemas accept it', () => {
