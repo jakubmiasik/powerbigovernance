@@ -124,6 +124,9 @@ src/
 - Startup side effects are isolated in `src/bootstrap.js`; importing `src/app.js` no longer starts the scheduler or runs migrations, which makes HTTP tests safer.
 - API calls use bounded retry behavior for transient HTTP failures (`408`, `429`, and `5xx`) and respect `Retry-After` when present.
 - Basic security headers, JSON/form body limits, and a lightweight `/api` rate limiter are enabled without adding runtime dependencies.
+- Startup migrations run statement by statement, so one failing `ALTER` no longer skips the migrations behind it, and a database that is unreachable at startup no longer prevents the capacity scheduler from starting.
+- The capacity scheduler catches up on schedules that came due while the process was restarting or idle. The look-back window is `SCHEDULER_CATCHUP_MINUTES` (default 20, `0` disables it); already-completed runs are recognised from `capacity_schedule_history`, so a catch-up never repeats an action that already ran.
+- On Azure App Service, enable **Always On** so the minute-by-minute scheduler tick keeps running when there is no incoming traffic. Without it, actions only fire when a request wakes the app and the schedule is still inside the catch-up window.
 
 ## Development Checks
 

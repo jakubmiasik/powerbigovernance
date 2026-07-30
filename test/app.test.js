@@ -79,3 +79,74 @@ test('scheduler matches weekly schedules only on the configured day', () => {
   assert.equal(scheduler._private.isDueNow(schedule, { hour: 9, minute: 45, dayOfWeek: 3 }), true);
   assert.equal(scheduler._private.isDueNow(schedule, { hour: 9, minute: 45, dayOfWeek: 4 }), false);
 });
+
+test('scheduler catches up on a due slot that was missed by a few minutes', () => {
+  const schedule = { schedule_type: 'daily', schedule_hour: 9, schedule_minute: 45 };
+  // 09:52 UTC, seven minutes after the schedule was due.
+  const now = new Date(Date.UTC(2026, 6, 29, 9, 52, 30));
+  const due = scheduler._private.findDueSlot(schedule, 'UTC', now, 20);
+  assert.ok(due, 'expected the missed slot to be picked up');
+  assert.equal(due.slotKey, '2026-07-29T09:45');
+  assert.equal(due.minutesLate, 7);
+  assert.equal(due.dueAt.toISOString(), '2026-07-29T09:45:00.000Z');
+});
+
+test('scheduler ignores a due slot older than the catch-up window', () => {
+  const schedule = { schedule_type: 'daily', schedule_hour: 9, schedule_minute: 45 };
+  const now = new Date(Date.UTC(2026, 6, 29, 10, 30, 0));
+  assert.equal(scheduler._private.findDueSlot(schedule, 'UTC', now, 20), null);
+});
+
+test('scheduler resolves due slots in the schedule timezone', () => {
+  const schedule = { schedule_type: 'daily', schedule_hour: 20, schedule_minute: 0 };
+  // 20:00 in Warsaw during summer is 18:00 UTC.
+  const due = scheduler._private.findDueSlot(schedule, 'Europe/Warsaw', new Date(Date.UTC(2026, 6, 29, 18, 0, 5)), 20);
+  assert.ok(due);
+  assert.equal(due.slotKey, '2026-07-29T20:00');
+  assert.equal(due.minutesLate, 0);
+});
+
+const dbPrivate = require('../src/services/databaseService')._private;
+
+test('analysis run insert includes sp_id so NOT NULL schemas accept it', () => {
+  const specs = [
+    { column: 'sp_name', param: { name: 'spName' } },
+    { column: 'sp_id', param: { name: 'spId' } },
+  ];
+  assert.equal(
+    dbPrivate.buildInsert('analysis_runs', specs, { output: 'INSERTED.id' }),
+    'INSERT INTO analysis_runs (sp_name, sp_id) OUTPUT INSERTED.id VALUES (@spName, @spId)'
+  );
+});
+
+test('schedule edits build a single update statement', () => {
+  const specs = [
+    { column: 'action', param: { name: 'action' } },
+    { column: 'schedule_hour_utc', param: { name: 'hourUtc' } },
+  ];
+  assert.equal(
+    dbPrivate.buildUpdate('capacity_schedules', specs, 'id=@id'),
+    'UPDATE capacity_schedules SET action=@action, schedule_hour_utc=@hourUtc WHERE id=@id'
+  );
+});
+
+test('unsupported columns are detected from missing-column and NOT NULL errors', () => {
+  assert.deepEqual(
+    dbPrivate.extractProblemColumns({ message: "Invalid column name 'schedule_hour_utc'." }),
+    ['schedule_hour_utc']
+  );
+  assert.deepEqual(
+    dbPrivate.extractProblemColumns({
+      message: "Cannot insert the value NULL into column 'sp_id', table 'pbigovernance.dbo.analysis_runs'; column does not allow nulls. INSERT fails.",
+    }),
+    ['sp_id']
+  );
+  assert.deepEqual(
+    dbPrivate.extractProblemColumns({
+      message: 'Update failed',
+      precedingErrors: [{ message: "Invalid column name 'timezone'." }],
+    }),
+    ['timezone']
+  );
+  assert.deepEqual(dbPrivate.extractProblemColumns({ message: 'Timeout expired' }), []);
+});

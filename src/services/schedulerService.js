@@ -3,9 +3,16 @@ const db = require('./databaseService');
 const { executeCapacityActionWithSp } = require('./capacityActionService');
 const { normalizeTimezone, getTimeInTimezone } = require('./scheduleTimeService');
 
+// How far back a tick looks for a schedule that came due. Without this, a single
+// missed minute (restart, idle worker, slow tick) silently skipped the action until
+// the next day.
+const CATCHUP_WINDOW_MINUTES = Math.max(0, parseInt(process.env.SCHEDULER_CATCHUP_MINUTES || '20', 10) || 0);
+const MAX_SLOT_ATTEMPTS = 3;
+
 let schedulerStarted = false;
 let schedulerTickInProgress = false;
 let lastKickMs = 0;
+// scheduleId -> { slotKey, attempts }
 const triggeredSlots = new Map();
 
 function getDateKey(parts) {
@@ -44,6 +51,26 @@ function getScheduleSlotKey(schedule, nowLocal) {
   const minute = String(nowLocal.minute).padStart(2, '0');
   if (schedule.schedule_type === 'hourly') return `${dateKey}T${hour}:${minute}`;
   return `${dateKey}T${hour}:${minute}`;
+}
+
+function truncateToMinute(date) {
+  return new Date(Math.floor(date.getTime() / 60000) * 60000);
+}
+
+/**
+ * Most recent minute within the catch-up window at which `schedule` was due,
+ * or null if it was not due at all. Walking back minute by minute (rather than
+ * computing the slot arithmetically) keeps DST transitions correct, because each
+ * candidate instant is re-resolved in the schedule's own timezone.
+ */
+function findDueSlot(schedule, timezone, now, windowMinutes) {
+  for (let minutesBack = 0; minutesBack <= windowMinutes; minutesBack += 1) {
+    const candidate = truncateToMinute(new Date(now.getTime() - minutesBack * 60000));
+    const local = getTimeInTimezone(timezone, candidate);
+    const slotKey = getScheduleSlotKey(schedule, local);
+    if (slotKey) return { slotKey, dueAt: candidate, minutesLate: minutesBack };
+  }
+  return null;
 }
 
 async function getServicePrincipalForSchedule(schedule) {
@@ -85,28 +112,54 @@ async function runSchedulerTick(source) {
   schedulerTickInProgress = true;
   try {
     const schedules = await db.getCapacitySchedules();
+    if (!schedules.length) return;
+
+    // Completed runs recorded in the database, so a restart mid-window does not
+    // replay an action that already happened.
+    const lastExecutions = new Map();
+    for (const row of await db.getLastScheduleExecutions()) {
+      const id = parseInt(row.schedule_id, 10);
+      const executedAt = row.last_executed_at ? new Date(row.last_executed_at) : null;
+      if (Number.isFinite(id) && executedAt && !Number.isNaN(executedAt.getTime())) {
+        lastExecutions.set(id, executedAt);
+      }
+    }
+
+    const now = new Date();
     for (const schedule of schedules) {
       if (!schedule.enabled) continue;
-      const timezone = normalizeTimezone(schedule.timezone || 'UTC');
-      const nowLocal = getTimeInTimezone(timezone, new Date());
-      const slotKey = getScheduleSlotKey(schedule, nowLocal);
-      if (!slotKey) continue;
-
       const scheduleId = parseInt(schedule.id, 10);
       if (!Number.isFinite(scheduleId)) continue;
-      const memoryKey = `${scheduleId}:${slotKey}`;
-      if (triggeredSlots.get(scheduleId) === memoryKey) continue;
-      triggeredSlots.set(scheduleId, memoryKey);
 
+      const timezone = normalizeTimezone(schedule.timezone || 'UTC');
+      const due = findDueSlot(schedule, timezone, now, CATCHUP_WINDOW_MINUTES);
+      if (!due) continue;
+
+      const attemptState = triggeredSlots.get(scheduleId);
+      const attempts = attemptState && attemptState.slotKey === due.slotKey ? attemptState.attempts : 0;
+      if (attempts >= MAX_SLOT_ATTEMPTS) continue;
+
+      const lastExecutedAt = lastExecutions.get(scheduleId);
+      if (lastExecutedAt && lastExecutedAt.getTime() >= due.dueAt.getTime()) {
+        triggeredSlots.set(scheduleId, { slotKey: due.slotKey, attempts: MAX_SLOT_ATTEMPTS });
+        continue;
+      }
+      triggeredSlots.set(scheduleId, { slotKey: due.slotKey, attempts: attempts + 1 });
+
+      const lateNote = due.minutesLate > 0 ? ` (catch-up, ${due.minutesLate} min late)` : '';
       await db.logScheduleExecution(
         schedule.id,
         schedule.capacity_name,
         schedule.action,
         'triggered',
-        `Scheduler matched ${schedule.schedule_type} schedule at ${slotKey} ${timezone} via ${source || 'tick'}`
+        `Scheduler matched ${schedule.schedule_type} schedule at ${due.slotKey} ${timezone} via ${source || 'tick'}${lateNote}`
       );
       const result = await executeSchedule(schedule);
-      if (result.status === 'error') triggeredSlots.delete(scheduleId);
+      // Successful and skipped runs are recorded in history, so the database check
+      // above blocks a repeat; failures stay retryable until MAX_SLOT_ATTEMPTS.
+      if (result.status !== 'error') {
+        triggeredSlots.set(scheduleId, { slotKey: due.slotKey, attempts: MAX_SLOT_ATTEMPTS });
+      }
     }
   } catch (err) {
     console.error('[Scheduler] Error checking schedules:', err.message);
@@ -134,5 +187,5 @@ function kickScheduler() {
 module.exports = {
   startScheduler,
   kickScheduler,
-  _private: { getScheduleSlotKey, isDueNow, executeSchedule },
+  _private: { getScheduleSlotKey, isDueNow, executeSchedule, findDueSlot },
 };
