@@ -363,7 +363,7 @@ async function getComparableRuns(tenantId) {
 async function getItemDetailsCache(workspaceId, itemId) {
   const conn = await getConnection();
   try {
-    const rows = await execSql(conn, 'SELECT payload, fetched_at FROM item_details_cache WHERE workspace_id=@ws AND item_id=@item', [
+    const rows = await execSql(conn, 'SELECT payload, fetched_at, run_id FROM item_details_cache WHERE workspace_id=@ws AND item_id=@item', [
       { name: 'ws', type: TYPES.NVarChar, value: workspaceId },
       { name: 'item', type: TYPES.NVarChar, value: itemId },
     ]);
@@ -376,21 +376,27 @@ async function getItemDetailsCache(workspaceId, itemId) {
   }
 }
 
-async function saveItemDetailsCache({ workspaceId, itemId, itemType, itemName, payload }) {
+async function saveItemDetailsCache({ workspaceId, itemId, itemType, itemName, payload, runId }) {
   const conn = await getConnection();
   try {
     await execSql(conn, 'DELETE FROM item_details_cache WHERE workspace_id=@ws AND item_id=@item', [
       { name: 'ws', type: TYPES.NVarChar, value: workspaceId },
       { name: 'item', type: TYPES.NVarChar, value: itemId },
     ]);
-    await execSql(conn, `INSERT INTO item_details_cache (workspace_id, item_id, item_type, item_name, payload, fetched_at)
-      VALUES (@ws, @item, @type, @name, @payload, SYSUTCDATETIME())`, [
-      { name: 'ws', type: TYPES.NVarChar, value: workspaceId },
-      { name: 'item', type: TYPES.NVarChar, value: itemId },
-      { name: 'type', type: TYPES.NVarChar, value: itemType || null },
-      { name: 'name', type: TYPES.NVarChar, value: itemName || null },
-      { name: 'payload', type: TYPES.NVarChar, value: payload },
-    ]);
+    const parsedRunId = Number.parseInt(runId, 10);
+    await execWithColumnFallback(conn, {
+      required: [
+        { column: 'workspace_id', param: { name: 'ws', type: TYPES.NVarChar, value: workspaceId } },
+        { column: 'item_id', param: { name: 'item', type: TYPES.NVarChar, value: itemId } },
+        { column: 'payload', param: { name: 'payload', type: TYPES.NVarChar, value: payload } },
+      ],
+      optional: [
+        { column: 'item_type', param: { name: 'type', type: TYPES.NVarChar, value: itemType || null } },
+        { column: 'item_name', param: { name: 'name', type: TYPES.NVarChar, value: itemName || null } },
+        { column: 'run_id', param: { name: 'runId', type: TYPES.Int, value: Number.isFinite(parsedRunId) ? parsedRunId : null } },
+      ],
+      build: specs => buildInsert('item_details_cache', specs),
+    });
   } catch (err) {
     // A missing cache table must never stop the details from being shown.
     console.warn('[DB] Could not cache item details:', err.message);
@@ -666,11 +672,14 @@ async function runMigrations() {
           item_type NVARCHAR(100) NULL,
           item_name NVARCHAR(400) NULL,
           payload NVARCHAR(MAX) NOT NULL,
+          run_id INT NULL,
           fetched_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
         );
         CREATE UNIQUE INDEX UX_item_details_cache_item ON item_details_cache (workspace_id, item_id);
       END
     `);
+
+    await runStatement(conn, 'add item_details_cache.run_id', `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'item_details_cache') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'item_details_cache') AND name = N'run_id') ALTER TABLE item_details_cache ADD run_id INT NULL`);
 
     // Create capacity schedules table if missing
     await runStatement(conn, 'create capacity_schedules', `
