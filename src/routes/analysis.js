@@ -5,12 +5,20 @@ const { createPowerBIService, runWithApiReporter } = require('../services/powerb
 const {
   METRIC_DEFS, computeRunTotals, diffTotals, diffRunDetails,
 } = require('../services/runMetricsService');
+const { buildItemDetails } = require('../services/itemDetailsService');
 
 const activeAnalyses = new Map();
 
 const MAX_PROGRESS_EVENTS = 25;
 // How long without a progress update before the UI calls the run stalled.
 const STALL_SECONDS = Number.parseInt(process.env.ANALYSIS_STALL_SECONDS || '90', 10);
+
+// Artifact details are collected during the run so the UI never has to call the
+// APIs when an artifact is opened. This is the second-longest phase of a run, so
+// it is bounded and can be turned off.
+const COLLECT_DETAILS = process.env.ANALYSIS_COLLECT_DETAILS !== 'false';
+const DETAIL_CONCURRENCY = Math.max(1, Number.parseInt(process.env.ANALYSIS_DETAIL_CONCURRENCY || '4', 10) || 4);
+const DETAIL_MAX_ITEMS = Math.max(0, Number.parseInt(process.env.ANALYSIS_DETAIL_MAX_ITEMS || '2000', 10) || 0);
 
 // Every progress write goes through here so `updatedAt` is always accurate — it is
 // what tells the UI the difference between "slow" and "hung".
@@ -634,6 +642,81 @@ async function runAnalysis(runId, sp) {
       } else {
         summary.workspacesOnSharedCapacity += 1;
       }
+    }
+
+    // ── Artifact details ──
+    // Collected here so opening an artifact later is a database read rather than a
+    // burst of API calls. This is the second-longest phase, so it is bounded and
+    // can be switched off.
+    if (COLLECT_DETAILS) {
+      setProgress(progress, { phase: 'Artifact details', message: 'Collecting artifact details...', detail: '' });
+
+      const nameIndex = new Map();
+      for (const wsDetail of workspaceDetails) {
+        for (const detailItem of wsDetail.items || []) {
+          if (detailItem.id) nameIndex.set(detailItem.id, detailItem.name || null);
+        }
+      }
+
+      const targets = [];
+      for (const wsDetail of workspaceDetails) {
+        for (const detailItem of wsDetail.items || []) {
+          if (!detailItem.id) continue;
+          targets.push({ workspace: wsDetail, item: detailItem });
+        }
+      }
+      const limited = DETAIL_MAX_ITEMS > 0 && targets.length > DETAIL_MAX_ITEMS;
+      const scoped = limited ? targets.slice(0, DETAIL_MAX_ITEMS) : targets;
+      if (limited) {
+        addProgressEvent(progress, 'warning',
+          'Collecting details for the first ' + DETAIL_MAX_ITEMS + ' of ' + targets.length + ' items (ANALYSIS_DETAIL_MAX_ITEMS). The rest load on first view.');
+      }
+      addProgressEvent(progress, 'info', 'Collecting details for ' + scoped.length + ' artifact(s)');
+
+      let detailsCollected = 0;
+      let detailsFailed = 0;
+      for (let i = 0; i < scoped.length; i += DETAIL_CONCURRENCY) {
+        ensureNotCancelled(progress);
+        const batch = scoped.slice(i, i + DETAIL_CONCURRENCY);
+        setProgress(progress, {
+          detail: batch[0].workspace.name + ' → ' + (batch[0].item.name || batch[0].item.type) +
+            ' (' + (i + 1) + ' of ' + scoped.length + ')',
+        });
+
+        await Promise.all(batch.map(async ({ workspace: wsDetail, item: detailItem }) => {
+          try {
+            const details = await buildItemDetails(pbi, {
+              workspaceId: wsDetail.id,
+              itemId: detailItem.id,
+              itemType: detailItem.type || '',
+              itemName: detailItem.name || 'Item',
+              workspaceName: wsDetail.name || null,
+              resolveName: id => nameIndex.get(id) || null,
+              // OneLake sizes are already gathered by the storage phase; repeating
+              // the listing here would roughly double the run for no new data.
+              includeOneLake: false,
+            });
+            await db.saveItemDetailsCache({
+              workspaceId: wsDetail.id,
+              itemId: detailItem.id,
+              itemType: details.item.type,
+              itemName: details.item.name,
+              payload: JSON.stringify(details),
+              runId,
+            });
+            detailsCollected += 1;
+          } catch (detailErr) {
+            detailsFailed += 1;
+            if (detailErr.isCancelled) throw detailErr;
+          }
+        }));
+
+        setProgress(progress, {
+          message: 'Collecting artifact details: ' + Math.min(i + DETAIL_CONCURRENCY, scoped.length) + ' / ' + scoped.length + '...',
+        });
+      }
+      addProgressEvent(progress, detailsFailed ? 'warning' : 'info',
+        'Stored details for ' + detailsCollected + ' artifact(s)' + (detailsFailed ? ', ' + detailsFailed + ' could not be read' : ''));
     }
 
     // Snapshot tenant settings with the run so they can be compared over time.

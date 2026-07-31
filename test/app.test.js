@@ -346,6 +346,92 @@ test('a request that exhausts its retries reports a failure event', async () => 
   assert.equal(events.filter(e => e.type === 'retry').length, 2, 'two retries before giving up');
 });
 
+const itemDetails = require('../src/services/itemDetailsService');
+
+function stubPbi(overrides) {
+  return Object.assign({
+    getItemDetail: async () => ({ id: 'i1', displayName: 'Sales LH', type: 'Lakehouse', description: 'Curated sales', workspaceId: 'w1' }),
+    getLakehouseTables: async () => [{ name: 'dim_date', type: 'Managed', format: 'Delta', location: 'Tables/dim_date' }],
+    getSqlEndpointInfo: async () => ({ connectionString: 'abc.datawarehouse.fabric.microsoft.com', database: 'Sales LH', provisioningStatus: 'Success' }),
+    getSqlEndpointSchema: async () => ([
+      { schema: 'dbo', name: 'dim_date', type: 'BASE TABLE', columns: [{ name: 'DateKey', dataType: 'int', nullable: false }] },
+    ]),
+    getOneLakeBreakdown: async () => ({ totalFiles: 3, totalSize: 900, folders: [{ folder: 'Tables/dim_date', area: 'Tables', files: 3, size: 900 }] }),
+    getDatasetDatasources: async () => [],
+    getDatasetParameters: async () => [],
+    getDatasetRefreshHistory: async () => [],
+    getDashboardTiles: async () => [],
+  }, overrides);
+}
+
+test('lakehouse details include tables, sql endpoint schema and onelake content', async () => {
+  const result = await itemDetails.buildItemDetails(stubPbi(), {
+    workspaceId: 'w1', itemId: 'i1', itemType: 'Lakehouse', itemName: 'Sales LH', workspaceName: 'Finance',
+  });
+
+  const keys = result.sections.map(s => s.key);
+  assert.deepEqual(keys, ['metadata', 'tables', 'sqlendpoint', 'onelake']);
+  assert.equal(result.warnings.length, 0);
+  assert.equal(result.item.name, 'Sales LH');
+
+  const sql = result.sections.find(s => s.key === 'sqlendpoint');
+  assert.deepEqual(sql.rows[0], ['dbo.dim_date', 'Table', 'DateKey', 'int', 'No']);
+
+  // Metadata leads with the name and workspace, not the ids.
+  const metadata = result.sections.find(s => s.key === 'metadata');
+  assert.deepEqual(metadata.rows[0], { label: 'Name', value: 'Sales LH' });
+  assert.equal(metadata.rows[2].value, 'Finance');
+});
+
+test('a failing section is reported without losing the others', async () => {
+  const result = await itemDetails.buildItemDetails(stubPbi({
+    getLakehouseTables: async () => { throw new Error('403 Forbidden'); },
+  }), { workspaceId: 'w1', itemId: 'i1', itemType: 'Lakehouse', itemName: 'Sales LH' });
+
+  assert.ok(!result.sections.some(s => s.key === 'tables'), 'the failing section is omitted');
+  assert.ok(result.sections.some(s => s.key === 'sqlendpoint'), 'later sections still run');
+  assert.match(result.warnings[0], /Tables: 403 Forbidden/);
+});
+
+test('an unprovisioned sql endpoint is reported as not ready, not queried', async () => {
+  let queried = false;
+  const result = await itemDetails.buildItemDetails(stubPbi({
+    getSqlEndpointInfo: async () => ({ connectionString: 'x', database: 'y', provisioningStatus: 'InProgress' }),
+    getSqlEndpointSchema: async () => { queried = true; return []; },
+  }), { workspaceId: 'w1', itemId: 'i1', itemType: 'Lakehouse', itemName: 'Sales LH' });
+
+  const sql = result.sections.find(s => s.key === 'sqlendpoint');
+  assert.equal(sql.kind, 'note');
+  assert.match(sql.note, /not ready yet/);
+  assert.equal(queried, false, 'an endpoint still provisioning must not be queried');
+});
+
+test('dashboard tiles resolve report and model ids to names', async () => {
+  const names = new Map([['rep-1', 'Exec Report'], ['ds-1', 'Sales Model']]);
+  const result = await itemDetails.buildItemDetails(stubPbi({
+    getItemDetail: async () => ({ id: 'd1', displayName: 'Exec Dashboard', type: 'Dashboard' }),
+    getDashboardTiles: async () => [{ title: 'Revenue', reportId: 'rep-1', datasetId: 'ds-1' }, { title: 'Orphan', reportId: 'rep-missing' }],
+  }), {
+    workspaceId: 'w1', itemId: 'd1', itemType: 'Dashboard', itemName: 'Exec Dashboard',
+    resolveName: id => names.get(id) || null,
+  });
+
+  const tiles = result.sections.find(s => s.key === 'tiles');
+  assert.deepEqual(tiles.rows[0], ['Revenue', 'Exec Report', 'Sales Model']);
+  // Unknown ids fall back to the id rather than showing nothing.
+  assert.deepEqual(tiles.rows[1], ['Orphan', 'rep-missing', '-']);
+});
+
+test('onelake content can be skipped when the run already measured it', async () => {
+  let called = false;
+  const result = await itemDetails.buildItemDetails(stubPbi({
+    getOneLakeBreakdown: async () => { called = true; return { totalFiles: 0, folders: [] }; },
+  }), { workspaceId: 'w1', itemId: 'i1', itemType: 'Lakehouse', itemName: 'Sales LH', includeOneLake: false });
+
+  assert.equal(called, false);
+  assert.ok(!result.sections.some(s => s.key === 'onelake'));
+});
+
 test('sql endpoint failures are classified rather than passed through raw', () => {
   // Mirrors describeSqlEndpointError in the workspaces route.
   const endpoint = { database: 'Sales LH', connectionString: 'abc.datawarehouse.fabric.microsoft.com' };

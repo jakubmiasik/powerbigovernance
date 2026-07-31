@@ -18,7 +18,7 @@
       <div class="modal-body">
         <div id="itemDetailsLoading" class="text-center py-4">
           <div class="spinner-border text-primary"></div>
-          <p class="mt-2 text-muted mb-0">Reading item details from the API...</p>
+          <p class="mt-2 text-muted mb-0">Loading item details...</p>
         </div>
         <div id="itemDetailsError" class="alert alert-warning small d-none"></div>
         <div id="itemDetailsWarnings" class="alert alert-info small d-none"></div>
@@ -129,8 +129,9 @@ async function showItemDetails(workspaceId, itemId, itemName, itemType, force) {
     var cacheInfo = document.getElementById('itemDetailsCacheInfo');
     if (data.cachedAt) {
       var when = new Date(data.cachedAt).toLocaleString();
+      var collected = data.collectedByRunId ? ' during run #' + data.collectedByRunId : '';
       cacheInfo.innerHTML = data.fromCache
-        ? '<i class="bi bi-database me-1"></i>Stored ' + when
+        ? '<i class="bi bi-database me-1"></i>Stored ' + when + collected
         : '<i class="bi bi-cloud-download me-1"></i>Read from API ' + when;
     }
 
