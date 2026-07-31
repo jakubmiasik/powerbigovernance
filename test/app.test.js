@@ -374,8 +374,16 @@ test('lakehouse details include tables, sql endpoint schema and onelake content'
   assert.equal(result.warnings.length, 0);
   assert.equal(result.item.name, 'Sales LH');
 
+  // The schema is a hierarchy: one collapsible group per table, columns beneath.
   const sql = result.sections.find(s => s.key === 'sqlendpoint');
-  assert.deepEqual(sql.rows[0], ['dbo.dim_date', 'Table', 'DateKey', 'int', 'No']);
+  assert.equal(sql.kind, 'tree');
+  assert.deepEqual(sql.columns, ['Column', 'Data type', 'Nullable']);
+  assert.equal(sql.groups.length, 1);
+  assert.equal(sql.groups[0].label, 'dbo.dim_date');
+  assert.equal(sql.groups[0].meta, '1 column');
+  assert.deepEqual(sql.groups[0].rows, [['DateKey', 'int', 'No']]);
+  // The table name is not repeated on every column row.
+  assert.ok(!sql.groups[0].rows.some(row => row.includes('dbo.dim_date')));
 
   // Metadata leads with the name and workspace, not the ids.
   const metadata = result.sections.find(s => s.key === 'metadata');
@@ -668,4 +676,41 @@ test('unsupported columns are detected from missing-column and NOT NULL errors',
     ['timezone']
   );
   assert.deepEqual(dbPrivate.extractProblemColumns({ message: 'Timeout expired' }), []);
+});
+
+test('sql schema groups tables and views separately by kind', async () => {
+  const result = await itemDetails.buildItemDetails(stubPbi({
+    getSqlEndpointSchema: async () => ([
+      { schema: 'dbo', name: 'fact_sales', type: 'BASE TABLE', columns: [{ name: 'Amount', dataType: 'decimal(18,2)', nullable: true }] },
+      { schema: 'dbo', name: 'v_summary', type: 'VIEW', columns: [] },
+    ]),
+  }), { workspaceId: 'w1', itemId: 'i1', itemType: 'Warehouse', itemName: 'DW' });
+
+  const sql = result.sections.find(s => s.key === 'sqlendpoint');
+  assert.deepEqual(sql.groups.map(g => [g.label, g.badges[0].text]), [
+    ['dbo.fact_sales', 'Table'],
+    ['dbo.v_summary', 'View'],
+  ]);
+  // A view with no columns still gets a group, with its own empty message.
+  assert.deepEqual(sql.groups[1].rows, []);
+  assert.ok(sql.groups[1].emptyText);
+  assert.match(sql.summary, /2 table\(s\), 1 column\(s\)/);
+});
+
+test('onelake content is grouped by area with folders underneath', async () => {
+  const result = await itemDetails.buildItemDetails(stubPbi({
+    getOneLakeBreakdown: async () => ({
+      totalFiles: 5, totalSize: 1500,
+      folders: [
+        { folder: 'Tables/dim_date', area: 'Tables', files: 3, size: 900 },
+        { folder: 'Files/raw', area: 'Files', files: 2, size: 600 },
+      ],
+    }),
+  }), { workspaceId: 'w1', itemId: 'i1', itemType: 'Lakehouse', itemName: 'Sales LH' });
+
+  const onelake = result.sections.find(s => s.key === 'onelake');
+  assert.equal(onelake.kind, 'tree');
+  assert.deepEqual(onelake.groups.map(g => g.label), ['Files', 'Tables']);
+  assert.equal(onelake.groups[1].sizeBytes, 900);
+  assert.deepEqual(onelake.groups[1].rows, [['Tables/dim_date', 3, 900]]);
 });

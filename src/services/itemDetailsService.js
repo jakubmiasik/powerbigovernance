@@ -128,21 +128,26 @@ async function buildItemDetails(pbi, {
         schemaError = describeSqlEndpointError(err.message, endpoint);
       }
 
-      const rows = [];
-      for (const table of schema) {
-        for (const column of table.columns) {
-          rows.push([table.schema + '.' + table.name, table.type === 'VIEW' ? 'View' : 'Table', column.name, column.dataType, column.nullable ? 'Yes' : 'No']);
-        }
-        if (!table.columns.length) rows.push([table.schema + '.' + table.name, table.type === 'VIEW' ? 'View' : 'Table', '-', '-', '-']);
-      }
+      // One collapsible group per table, columns underneath, rather than repeating
+      // the table name on every column row.
+      const groups = schema.map(table => ({
+        key: table.schema + '.' + table.name,
+        label: table.schema + '.' + table.name,
+        badges: [{ text: table.type === 'VIEW' ? 'View' : 'Table', color: table.type === 'VIEW' ? 'info' : 'secondary' }],
+        meta: table.columns.length + ' column' + (table.columns.length === 1 ? '' : 's'),
+        rows: table.columns.map(column => [column.name, column.dataType, column.nullable ? 'Yes' : 'No']),
+        emptyText: 'No columns reported for this table.',
+      }));
 
       if (schemaError) warnings.push('SQL endpoint schema: ' + schemaError);
 
+      const columnCount = groups.reduce((sum, group) => sum + group.rows.length, 0);
       return {
-        kind: 'table',
-        summary: endpoint.connectionString + (schema.length ? ' · ' + schema.length + ' table(s)' : ''),
-        columns: ['Table', 'Kind', 'Column', 'Data type', 'Nullable'],
-        rows,
+        kind: 'tree',
+        summary: endpoint.connectionString +
+          (schema.length ? ' · ' + schema.length + ' table(s), ' + columnCount + ' column(s)' : ''),
+        columns: ['Column', 'Data type', 'Nullable'],
+        groups,
         emptyText: schemaError
           ? 'The endpoint is available but its schema could not be read.'
           : 'The SQL endpoint reports no tables.',
@@ -208,11 +213,35 @@ async function buildItemDetails(pbi, {
       if (!breakdown.totalFiles && !breakdown.folders.length) {
         return { kind: 'note', note: 'No OneLake content is stored for this item.' };
       }
+      // Grouped by top-level area (Tables/, Files/) with folders underneath.
+      const byArea = new Map();
+      for (const folder of breakdown.folders) {
+        const area = folder.area || 'Other';
+        if (!byArea.has(area)) byArea.set(area, []);
+        byArea.get(area).push(folder);
+      }
+
+      const groups = [...byArea.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([area, folders]) => {
+          const files = folders.reduce((sum, f) => sum + f.files, 0);
+          const size = folders.reduce((sum, f) => sum + f.size, 0);
+          return {
+            key: area,
+            label: area,
+            badges: [{ text: folders.length + ' folder' + (folders.length === 1 ? '' : 's'), color: 'secondary' }],
+            meta: files + ' file(s)',
+            sizeBytes: size,
+            rows: folders.map(f => [f.folder, f.files, f.size]),
+            emptyText: 'No folders under this area.',
+          };
+        });
+
       return {
-        kind: 'table',
+        kind: 'tree',
         summary: breakdown.totalFiles + ' file(s)',
-        columns: ['Folder', 'Area', 'Files', 'Size (bytes)'],
-        rows: breakdown.folders.map(f => [f.folder, f.area, f.files, f.size]),
+        columns: ['Folder', 'Files', 'Size (bytes)'],
+        groups,
         emptyText: 'No OneLake folders found.',
       };
     });
