@@ -87,6 +87,29 @@ function formatItemBytes(bytes) {
 var itemDetailsModalInstance = null;
 var itemDetailsCurrent = null;
 
+// Rotate the chevron with the collapse state, and drive expand/collapse all.
+function wireTreeToggles() {
+  document.querySelectorAll('#itemDetailsBody .collapse').forEach(function(el) {
+    el.addEventListener('show.bs.collapse', function() {
+      var btn = document.querySelector('[data-bs-target="#' + el.id + '"] .tree-chevron');
+      if (btn) btn.className = 'bi bi-chevron-down me-2 tree-chevron';
+    });
+    el.addEventListener('hide.bs.collapse', function() {
+      var btn = document.querySelector('[data-bs-target="#' + el.id + '"] .tree-chevron');
+      if (btn) btn.className = 'bi bi-chevron-right me-2 tree-chevron';
+    });
+  });
+}
+
+function toggleAllTreeGroups(sectionKey, expand) {
+  document.querySelectorAll('.tree-toggle[data-tree-section="' + sectionKey + '"]').forEach(function(btn) {
+    var target = document.querySelector(btn.getAttribute('data-bs-target'));
+    if (!target) return;
+    var instance = bootstrap.Collapse.getOrCreateInstance(target, { toggle: false });
+    if (expand) instance.show(); else instance.hide();
+  });
+}
+
 function refreshItemDetails() {
   if (!itemDetailsCurrent) return;
   showItemDetails(itemDetailsCurrent.workspaceId, itemDetailsCurrent.itemId, itemDetailsCurrent.itemName, itemDetailsCurrent.itemType, true);
@@ -166,6 +189,53 @@ async function showItemDetails(workspaceId, itemId, itemName, itemType, force) {
             return '<tr><td class="text-muted" style="width:180px;">' + escapeItemHtml(row.label) + '</td><td>' +
               (row.mono ? '<code class="small">' + escapeItemHtml(row.value) + '</code>' : escapeItemHtml(row.value)) + '</td></tr>';
           }).join('') + '</tbody></table></div>';
+      } else if (section.kind === 'tree') {
+        // Hierarchy: each group is a collapsible header with its rows underneath.
+        if (!(section.groups || []).length) {
+          html += '<div class="card-body py-2 small text-muted">' + escapeItemHtml(section.emptyText || 'Nothing to show.') + '</div>';
+        } else {
+          html += '<div class="card-body py-2">' +
+            '<div class="d-flex gap-2 mb-2">' +
+            '<button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="toggleAllTreeGroups(\'' + section.key + '\', true)">Expand all</button>' +
+            '<button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="toggleAllTreeGroups(\'' + section.key + '\', false)">Collapse all</button>' +
+            '</div>';
+
+          section.groups.forEach(function(group, gi) {
+            var groupId = 'tree-' + section.key + '-' + gi;
+            var badges = (group.badges || []).map(function(b) {
+              return '<span class="badge bg-' + escapeItemHtml(b.color || 'secondary') + ' ms-2">' + escapeItemHtml(b.text) + '</span>';
+            }).join('');
+            var size = group.sizeBytes ? '<span class="text-muted small ms-2">' + formatItemBytes(group.sizeBytes) + '</span>' : '';
+
+            html += '<div class="border rounded mb-1">' +
+              '<button class="btn btn-sm w-100 text-start d-flex align-items-center py-1 px-2 tree-toggle" type="button" ' +
+              'data-bs-toggle="collapse" data-bs-target="#' + groupId + '" data-tree-section="' + escapeItemHtml(section.key) + '">' +
+                '<i class="bi bi-chevron-right me-2 tree-chevron"></i>' +
+                '<span class="fw-bold">' + escapeItemHtml(group.label) + '</span>' +
+                badges +
+                '<span class="text-muted small ms-2">' + escapeItemHtml(group.meta || '') + '</span>' +
+                size +
+              '</button>' +
+              '<div class="collapse" id="' + groupId + '">';
+
+            if (!(group.rows || []).length) {
+              html += '<div class="px-3 py-2 small text-muted">' + escapeItemHtml(group.emptyText || 'Nothing to show.') + '</div>';
+            } else {
+              html += '<div class="table-responsive" style="max-height:300px;"><table class="table table-sm mb-0"><thead><tr>' +
+                (section.columns || []).map(function(c) { return '<th>' + escapeItemHtml(c) + '</th>'; }).join('') +
+                '</tr></thead><tbody>' +
+                group.rows.map(function(row) {
+                  return '<tr>' + row.map(function(cell, idx) {
+                    var isSize = (section.columns || [])[idx] === 'Size (bytes)';
+                    return '<td class="small">' + escapeItemHtml(isSize ? formatItemBytes(cell) : cell) + '</td>';
+                  }).join('') + '</tr>';
+                }).join('') +
+                '</tbody></table></div>';
+            }
+            html += '</div></div>';
+          });
+          html += '</div>';
+        }
       } else if (section.kind === 'table') {
         if (!(section.rows || []).length) {
           html += '<div class="card-body py-2 small text-muted">' + escapeItemHtml(section.emptyText || 'Nothing to show.') + '</div>';
@@ -192,6 +262,7 @@ async function showItemDetails(workspaceId, itemId, itemName, itemType, force) {
     var body = document.getElementById('itemDetailsBody');
     body.innerHTML = html;
     body.classList.remove('d-none');
+    wireTreeToggles();
   } catch (e) {
     document.getElementById('itemDetailsLoading').classList.add('d-none');
     var errEl2 = document.getElementById('itemDetailsError');
