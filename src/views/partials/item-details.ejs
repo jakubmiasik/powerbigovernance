@@ -1,0 +1,273 @@
+<!-- Shared artifact details modal, used by workspace detail and governance artifacts. -->
+<div class="modal fade" id="itemDetailsModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title d-flex align-items-center gap-2" id="itemDetailsTitle">
+          <span id="itemDetailsIcon"></span>
+          <span id="itemDetailsName">Item details</span>
+        </h5>
+        <div class="ms-auto d-flex align-items-center gap-2">
+          <span class="small text-muted" id="itemDetailsCacheInfo"></span>
+          <button class="btn btn-sm btn-outline-secondary" id="itemDetailsRefresh" onclick="refreshItemDetails()" title="Re-read from the API">
+            <i class="bi bi-arrow-clockwise"></i>
+          </button>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div id="itemDetailsLoading" class="text-center py-4">
+          <div class="spinner-border text-primary"></div>
+          <p class="mt-2 text-muted mb-0">Loading item details...</p>
+        </div>
+        <div id="itemDetailsError" class="alert alert-warning small d-none"></div>
+        <div id="itemDetailsWarnings" class="alert alert-info small d-none"></div>
+        <div id="itemDetailsBody" class="d-none"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+var fabricIconMap = {
+  'report': '/img/icons/report_20_item.svg',
+  'paginatedreport': '/img/icons/paginated_report_20_item.svg',
+  'semanticmodel': '/img/icons/semantic_model_20_item.svg',
+  'dataset': '/img/icons/semantic_model_20_item.svg',
+  'dashboard': '/img/icons/dashboard_20_item.svg',
+  'dataflow': '/img/icons/dataflow_20_item.svg',
+  'lakehouse': '/img/icons/lakehouse_20_item.svg',
+  'notebook': '/img/icons/notebook_20_item.svg',
+  'datapipeline': '/img/icons/pipeline_20_item.svg',
+  'pipeline': '/img/icons/pipeline_20_item.svg',
+  'warehouse': '/img/icons/data_warehouse_20_item.svg',
+  'sqldatabase': '/img/icons/sql_database_20_item.svg',
+  'environment': '/img/icons/environment_20_item.svg',
+  'eventstream': '/img/icons/eventstream_20_item.svg',
+  'kqldatabase': '/img/icons/kql_database_20_item.svg',
+  'kqlqueryset': '/img/icons/kql_queryset_20_item.svg',
+  'sparkjobdefinition': '/img/icons/spark_job_direction_20_item.svg',
+  'dataflowgen2': '/img/icons/dataflow_gen2_20_item.svg',
+  'variablelibrary': '/img/icons/variable_library_item.svg',
+  'mlexperiment': '/img/icons/experimentsitem.svg',
+  'mlmodel': '/img/icons/modelitem.svg',
+  'copyjob': '/img/icons/copyjobitem.svg',
+  'eventhouse': '/img/icons/event_houseitem.svg',
+  'kqldashboard': '/img/icons/dashboard_20_item.svg',
+  'sqlendpoint': '/img/icons/endpointregular.svg',
+  'activator': '/img/icons/activator_20_item.svg',
+  'reflex': '/img/icons/activator_20_item.svg',
+  'dataagent': '/img/icons/data_agent_item.svg',
+};
+
+function getFabricIcon(type) {
+  return fabricIconMap[(type || '').toLowerCase()] || null;
+}
+
+function fabricIconImg(type, size) {
+  var url = getFabricIcon(type);
+  var px = size || 18;
+  if (!url) return '<i class="bi bi-box" style="font-size:' + px + 'px;"></i>';
+  return '<img src="' + url + '" width="' + px + '" height="' + px + '" alt="' + escapeItemHtml(type || '') + '">';
+}
+
+function escapeItemHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function formatItemBytes(bytes) {
+  var n = Number(bytes) || 0;
+  if (n <= 0) return '0 B';
+  var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var i = Math.floor(Math.log(n) / Math.log(1024));
+  return (n / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+var itemDetailsModalInstance = null;
+var itemDetailsCurrent = null;
+
+// Rotate the chevron with the collapse state, and drive expand/collapse all.
+function wireTreeToggles() {
+  document.querySelectorAll('#itemDetailsBody .collapse').forEach(function(el) {
+    el.addEventListener('show.bs.collapse', function() {
+      var btn = document.querySelector('[data-bs-target="#' + el.id + '"] .tree-chevron');
+      if (btn) btn.className = 'bi bi-chevron-down me-2 tree-chevron';
+    });
+    el.addEventListener('hide.bs.collapse', function() {
+      var btn = document.querySelector('[data-bs-target="#' + el.id + '"] .tree-chevron');
+      if (btn) btn.className = 'bi bi-chevron-right me-2 tree-chevron';
+    });
+  });
+}
+
+function toggleAllTreeGroups(sectionKey, expand) {
+  document.querySelectorAll('.tree-toggle[data-tree-section="' + sectionKey + '"]').forEach(function(btn) {
+    var target = document.querySelector(btn.getAttribute('data-bs-target'));
+    if (!target) return;
+    var instance = bootstrap.Collapse.getOrCreateInstance(target, { toggle: false });
+    if (expand) instance.show(); else instance.hide();
+  });
+}
+
+function refreshItemDetails() {
+  if (!itemDetailsCurrent) return;
+  showItemDetails(itemDetailsCurrent.workspaceId, itemDetailsCurrent.itemId, itemDetailsCurrent.itemName, itemDetailsCurrent.itemType, true);
+}
+
+// Details are served from the database cache; `force` re-reads the APIs and
+// replaces the stored copy.
+async function showItemDetails(workspaceId, itemId, itemName, itemType, force) {
+  itemDetailsCurrent = { workspaceId: workspaceId, itemId: itemId, itemName: itemName, itemType: itemType };
+  if (!itemDetailsModalInstance) {
+    itemDetailsModalInstance = new bootstrap.Modal(document.getElementById('itemDetailsModal'));
+  }
+  document.getElementById('itemDetailsName').textContent = itemName || 'Item details';
+  document.getElementById('itemDetailsIcon').innerHTML = fabricIconImg(itemType, 22);
+  document.getElementById('itemDetailsLoading').classList.remove('d-none');
+  document.getElementById('itemDetailsError').classList.add('d-none');
+  document.getElementById('itemDetailsWarnings').classList.add('d-none');
+  document.getElementById('itemDetailsBody').classList.add('d-none');
+  document.getElementById('itemDetailsBody').innerHTML = '';
+  document.getElementById('itemDetailsCacheInfo').textContent = '';
+  itemDetailsModalInstance.show();
+
+  try {
+    var url = '/workspaces/' + encodeURIComponent(workspaceId) + '/items/' + encodeURIComponent(itemId) +
+      '/details?type=' + encodeURIComponent(itemType || '') + '&name=' + encodeURIComponent(itemName || '') +
+      (force ? '&refresh=1' : '');
+    var resp = await fetch(url);
+    var data = await resp.json();
+    document.getElementById('itemDetailsLoading').classList.add('d-none');
+
+    if (!data.success) {
+      var errEl = document.getElementById('itemDetailsError');
+      errEl.classList.remove('d-none');
+      errEl.innerHTML = '<i class="bi bi-exclamation-triangle me-1"></i>' + escapeItemHtml(data.message || 'Could not load item details.');
+      return;
+    }
+
+    if (data.item && data.item.name) document.getElementById('itemDetailsName').textContent = data.item.name;
+
+    var cacheInfo = document.getElementById('itemDetailsCacheInfo');
+    if (data.cachedAt) {
+      var when = new Date(data.cachedAt).toLocaleString();
+      var collected = data.collectedByRunId ? ' during run #' + data.collectedByRunId : '';
+      cacheInfo.innerHTML = data.fromCache
+        ? '<i class="bi bi-database me-1"></i>Stored ' + when + collected
+        : '<i class="bi bi-cloud-download me-1"></i>Read from API ' + when;
+    }
+
+    // Sections that could not be read are listed rather than silently missing, so a
+    // permission gap is visible instead of looking like "this item has no tables".
+    if (data.warnings && data.warnings.length) {
+      var warnEl = document.getElementById('itemDetailsWarnings');
+      warnEl.classList.remove('d-none');
+      warnEl.innerHTML = '<i class="bi bi-info-circle me-1"></i><strong>Some details could not be read:</strong><ul class="mb-0 mt-1">' +
+        data.warnings.map(function(w) { return '<li>' + escapeItemHtml(w) + '</li>'; }).join('') + '</ul>';
+    }
+
+    var html = '';
+    if (data.item) {
+      html += '<div class="mb-3 small text-muted">' +
+        (data.item.workspaceName ? '<span class="me-3"><i class="bi bi-folder2-open me-1"></i>' + escapeItemHtml(data.item.workspaceName) + '</span>' : '') +
+        (data.item.type ? '<span class="badge bg-secondary me-2">' + escapeItemHtml(data.item.type) + '</span>' : '') +
+        '<code>' + escapeItemHtml(data.item.id) + '</code></div>';
+    }
+
+    (data.sections || []).forEach(function(section) {
+      html += '<div class="card mb-3"><div class="card-header py-2">' +
+        '<i class="bi bi-' + escapeItemHtml(section.icon || 'card-list') + ' me-2"></i>' + escapeItemHtml(section.title);
+      if (section.summary) html += '<span class="text-muted small ms-2">' + escapeItemHtml(section.summary) + '</span>';
+      html += '</div>';
+
+      if (section.kind === 'note') {
+        html += '<div class="card-body py-2 small text-muted">' + escapeItemHtml(section.note) + '</div>';
+      } else if (section.kind === 'keyvalue') {
+        html += '<div class="table-responsive"><table class="table table-sm mb-0"><tbody>' +
+          (section.rows || []).map(function(row) {
+            return '<tr><td class="text-muted" style="width:180px;">' + escapeItemHtml(row.label) + '</td><td>' +
+              (row.mono ? '<code class="small">' + escapeItemHtml(row.value) + '</code>' : escapeItemHtml(row.value)) + '</td></tr>';
+          }).join('') + '</tbody></table></div>';
+      } else if (section.kind === 'tree') {
+        // Hierarchy: each group is a collapsible header with its rows underneath.
+        if (!(section.groups || []).length) {
+          html += '<div class="card-body py-2 small text-muted">' + escapeItemHtml(section.emptyText || 'Nothing to show.') + '</div>';
+        } else {
+          html += '<div class="card-body py-2">' +
+            '<div class="d-flex gap-2 mb-2">' +
+            '<button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="toggleAllTreeGroups(\'' + section.key + '\', true)">Expand all</button>' +
+            '<button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="toggleAllTreeGroups(\'' + section.key + '\', false)">Collapse all</button>' +
+            '</div>';
+
+          section.groups.forEach(function(group, gi) {
+            var groupId = 'tree-' + section.key + '-' + gi;
+            var badges = (group.badges || []).map(function(b) {
+              return '<span class="badge bg-' + escapeItemHtml(b.color || 'secondary') + ' ms-2">' + escapeItemHtml(b.text) + '</span>';
+            }).join('');
+            var size = group.sizeBytes ? '<span class="text-muted small ms-2">' + formatItemBytes(group.sizeBytes) + '</span>' : '';
+
+            html += '<div class="border rounded mb-1">' +
+              '<button class="btn btn-sm w-100 text-start d-flex align-items-center py-1 px-2 tree-toggle" type="button" ' +
+              'data-bs-toggle="collapse" data-bs-target="#' + groupId + '" data-tree-section="' + escapeItemHtml(section.key) + '">' +
+                '<i class="bi bi-chevron-right me-2 tree-chevron"></i>' +
+                '<span class="fw-bold">' + escapeItemHtml(group.label) + '</span>' +
+                badges +
+                '<span class="text-muted small ms-2">' + escapeItemHtml(group.meta || '') + '</span>' +
+                size +
+              '</button>' +
+              '<div class="collapse" id="' + groupId + '">';
+
+            if (!(group.rows || []).length) {
+              html += '<div class="px-3 py-2 small text-muted">' + escapeItemHtml(group.emptyText || 'Nothing to show.') + '</div>';
+            } else {
+              html += '<div class="table-responsive" style="max-height:300px;"><table class="table table-sm mb-0"><thead><tr>' +
+                (section.columns || []).map(function(c) { return '<th>' + escapeItemHtml(c) + '</th>'; }).join('') +
+                '</tr></thead><tbody>' +
+                group.rows.map(function(row) {
+                  return '<tr>' + row.map(function(cell, idx) {
+                    var isSize = (section.columns || [])[idx] === 'Size (bytes)';
+                    return '<td class="small">' + escapeItemHtml(isSize ? formatItemBytes(cell) : cell) + '</td>';
+                  }).join('') + '</tr>';
+                }).join('') +
+                '</tbody></table></div>';
+            }
+            html += '</div></div>';
+          });
+          html += '</div>';
+        }
+      } else if (section.kind === 'table') {
+        if (!(section.rows || []).length) {
+          html += '<div class="card-body py-2 small text-muted">' + escapeItemHtml(section.emptyText || 'Nothing to show.') + '</div>';
+        } else {
+          html += '<div class="table-responsive" style="max-height:320px;"><table class="table table-sm table-hover mb-0"><thead><tr>' +
+            (section.columns || []).map(function(c) { return '<th>' + escapeItemHtml(c) + '</th>'; }).join('') +
+            '</tr></thead><tbody>' +
+            section.rows.map(function(row) {
+              return '<tr>' + row.map(function(cell, idx) {
+                // The OneLake breakdown reports raw bytes; render the size column readably.
+                var isSize = (section.columns || [])[idx] === 'Size (bytes)';
+                return '<td class="small">' + escapeItemHtml(isSize ? formatItemBytes(cell) : cell) + '</td>';
+              }).join('') + '</tr>';
+            }).join('') + '</tbody></table></div>';
+        }
+      }
+      html += '</div>';
+    });
+
+    if (!(data.sections || []).length) {
+      html += '<p class="text-muted mb-0">No additional details are available for this item type.</p>';
+    }
+
+    var body = document.getElementById('itemDetailsBody');
+    body.innerHTML = html;
+    body.classList.remove('d-none');
+    wireTreeToggles();
+  } catch (e) {
+    document.getElementById('itemDetailsLoading').classList.add('d-none');
+    var errEl2 = document.getElementById('itemDetailsError');
+    errEl2.classList.remove('d-none');
+    errEl2.textContent = e.message;
+  }
+}
+</script>

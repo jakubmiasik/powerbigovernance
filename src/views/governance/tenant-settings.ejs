@@ -1,0 +1,309 @@
+<%- include('../partials/header') %>
+<%
+  var stats = summary || { total: 0, enabled: 0, disabled: 0, delegated: 0, securityGroupScoped: 0, groups: [] };
+  var cards = [
+    { label: 'Total Settings', count: stats.total, color: 'primary', icon: 'sliders' },
+    { label: 'Enabled', count: stats.enabled, color: 'success', icon: 'toggle-on' },
+    { label: 'Disabled', count: stats.disabled, color: 'secondary', icon: 'toggle-off' },
+    { label: 'Scoped to Groups', count: stats.securityGroupScoped, color: 'info', icon: 'people' },
+    { label: 'Delegated', count: stats.delegated, color: 'warning', icon: 'diagram-3' },
+    { label: 'Groups', count: (stats.groups || []).length, color: 'dark', icon: 'collection' }
+  ];
+%>
+
+<div class="mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <div>
+    <h2><i class="bi bi-sliders me-2"></i>Tenant Settings</h2>
+    <p class="text-muted mb-0">Live from the Fabric Admin API — not part of a saved analysis run.</p>
+  </div>
+  <a href="/governance" class="btn btn-outline-secondary btn-sm" onclick="goBackOr('/governance'); return false;"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<% if (error) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    <strong>Could not read tenant settings.</strong><br>
+    <span class="small"><%= error %></span>
+    <hr class="my-2">
+    <div class="small mb-0">
+      The service principal needs <code>Tenant.Read.All</code> (Application permission, admin consented) and must be
+      in the security group enabled under <strong>Power BI Admin Portal → Tenant settings → Developer settings →
+      Service principals can use Fabric APIs</strong>.
+    </div>
+  </div>
+<% } else { %>
+  <div class="row g-3 mb-4">
+    <% cards.forEach(function(card) { %>
+      <div class="col-sm-6 col-md-4 col-xl-2">
+        <div class="card text-center h-100 stat-card">
+          <div class="card-body py-3">
+            <div class="text-<%= card.color %> mb-2"><i class="bi bi-<%= card.icon %>"></i></div>
+            <div class="fs-3 fw-bold text-<%= card.color %>"><%= card.count %></div>
+            <div class="small"><%= card.label %></div>
+          </div>
+        </div>
+      </div>
+    <% }) %>
+  </div>
+
+  <% if ((stats.groups || []).length) { %>
+    <%
+      // Each group row carries the searchable text of the settings it contains, so a
+      // search for "API" surfaces the group even when the term only appears in the
+      // settings underneath it.
+      var settingTextByGroup = {};
+      settings.forEach(function(s) {
+        var key = s.tenantSettingGroup || 'Ungrouped';
+        var text = [s.title || '', s.settingName || ''].join(' ').toLowerCase();
+        settingTextByGroup[key] = (settingTextByGroup[key] || '') + ' ' + text;
+      });
+    %>
+    <div class="card mb-4" id="tenant-groups-card">
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+          <span><i class="bi bi-collection me-2"></i>Settings by Group</span>
+          <span class="badge bg-light text-dark border ms-2" id="tenantGroupsFilterLabel">Showing all groups</span>
+        </div>
+        <input type="text" class="form-control form-control-sm" style="max-width:320px;" placeholder="Search groups and settings..." id="tenantGroupSearch" oninput="onTenantSearch(this.value)">
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0" id="tenant-groups-table">
+          <thead><tr><th>Group</th><th>Total</th><th>Enabled</th><th>Disabled</th><th class="tenant-match-col d-none">Matching</th><th style="width:180px;">Enabled %</th></tr></thead>
+          <tbody>
+            <% stats.groups.forEach(function(group) { var pct = group.total ? Math.round((group.enabled / group.total) * 100) : 0; %>
+              <tr data-group="<%= (group.name || '').toLowerCase() %>"
+                  data-settings="<%= (settingTextByGroup[group.name] || '').trim() %>">
+                <td><a href="#tenant-settings-card" onclick="filterByGroup('<%= (group.name || '').replace(/'/g, "\\'") %>'); return false;"><%= group.name %></a></td>
+                <td><strong><%= group.total %></strong></td>
+                <td><%= group.enabled %></td>
+                <td><%= group.total - group.enabled %></td>
+                <td class="tenant-match-col d-none"><span class="badge bg-primary group-match-count">0</span></td>
+                <td>
+                  <div class="progress" style="height:18px;">
+                    <div class="progress-bar bg-success" style="width:<%= pct %>%"><%= pct %>%</div>
+                  </div>
+                </td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  <% } %>
+
+  <div class="card mb-4" id="tenant-settings-card">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <div>
+        <span><i class="bi bi-list-check me-2"></i>All Settings (<%= settings.length %>)</span>
+        <span class="badge bg-light text-dark border ms-2" id="tenantSettingsFilterLabel">Showing all settings</span>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary d-none" id="tenantClearFilter" onclick="clearTenantFilters()"><i class="bi bi-x-lg me-1"></i>Clear</button>
+        <select class="form-select form-select-sm" style="max-width:160px;" id="tenantStateFilter" onchange="filterTenantSettings()">
+          <option value="">All states</option>
+          <option value="enabled">Enabled only</option>
+          <option value="disabled">Disabled only</option>
+        </select>
+        <input type="text" class="form-control form-control-sm" style="max-width:320px;" placeholder="Search settings..." id="tenantSettingsFilter" oninput="onTenantSearch(this.value)">
+      </div>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-hover table-sm mb-0" id="tenant-settings-table">
+        <thead>
+          <tr>
+            <th>Setting</th>
+            <th>Group</th>
+            <th>State</th>
+            <th>Applies To</th>
+            <th>Delegation</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <% settings.forEach(function(setting, idx) {
+            var name = setting.title || setting.settingName || 'Unnamed';
+            var group = setting.tenantSettingGroup || 'Ungrouped';
+            var included = setting.enabledSecurityGroups || [];
+            var excluded = setting.excludedSecurityGroups || [];
+            var appliesTo = 'Entire organization';
+            if (included.length) appliesTo = included.length + ' security group' + (included.length === 1 ? '' : 's');
+            if (excluded.length) appliesTo += (included.length ? ', ' : '') + 'except ' + excluded.length;
+            var delegation = [];
+            if (setting.delegateToWorkspace) delegation.push('Workspace');
+            if (setting.delegateToCapacity) delegation.push('Capacity');
+            if (setting.delegateToDomain) delegation.push('Domain');
+          %>
+            <tr data-filter="<%= [name, setting.settingName || '', group, setting.enabled ? 'enabled' : 'disabled'].join(' ').toLowerCase() %>"
+                data-group="<%= group.toLowerCase() %>"
+                data-state="<%= setting.enabled ? 'enabled' : 'disabled' %>">
+              <td>
+                <strong><%= name %></strong>
+                <% if (setting.settingName && setting.settingName !== name) { %>
+                  <div class="text-muted" style="font-size:0.7rem;"><code><%= setting.settingName %></code></div>
+                <% } %>
+              </td>
+              <td><span class="badge bg-secondary"><%= group %></span></td>
+              <td><span class="badge bg-<%= setting.enabled ? 'success' : 'secondary' %>"><%= setting.enabled ? 'Enabled' : 'Disabled' %></span></td>
+              <td class="small"><%= appliesTo %></td>
+              <td class="small"><%= delegation.length ? delegation.join(', ') : '-' %></td>
+              <td>
+                <button class="btn btn-sm btn-outline-primary p-0 px-1" onclick="showTenantSetting(<%= idx %>)" title="Details"><i class="bi bi-info-circle"></i></button>
+              </td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+<% } %>
+
+<!-- Setting detail modal -->
+<div class="modal fade" id="tenantSettingModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title" id="tenantSettingTitle">Setting</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="tenantSettingBody"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+var tenantSettings = <%- JSON.stringify(settings || []) %>;
+var tenantGroupFilter = '';
+var tenantSettingModal;
+
+document.addEventListener('DOMContentLoaded', function() {
+  tenantSettingModal = new bootstrap.Modal(document.getElementById('tenantSettingModal'));
+});
+
+function filterByGroup(group) {
+  tenantGroupFilter = (group || '').toLowerCase();
+  filterTenantSettings();
+}
+
+// Both search boxes drive the same term, so typing in either keeps the group
+// breakdown and the settings list describing the same query.
+function onTenantSearch(value) {
+  ['tenantSettingsFilter', 'tenantGroupSearch'].forEach(function(id) {
+    var input = document.getElementById(id);
+    if (input && input.value !== value) input.value = value;
+  });
+  filterTenantSettings();
+}
+
+function clearTenantFilters() {
+  tenantGroupFilter = '';
+  var state = document.getElementById('tenantStateFilter');
+  if (state) state.value = '';
+  onTenantSearch('');
+}
+
+function filterTenantSettings() {
+  var searchInput = document.getElementById('tenantSettingsFilter') || document.getElementById('tenantGroupSearch');
+  var textFilter = ((searchInput && searchInput.value) || '').toLowerCase().trim();
+  var stateEl = document.getElementById('tenantStateFilter');
+  var stateFilter = stateEl ? stateEl.value : '';
+
+  // Pass 1: the settings list, tallying how many settings each group contributes so
+  // the group table can show match counts for the same term.
+  var shown = 0;
+  var matchesByGroup = {};
+  document.querySelectorAll('#tenant-settings-table tbody tr').forEach(function(row) {
+    var group = row.getAttribute('data-group') || '';
+    var matchesText = !textFilter || (row.getAttribute('data-filter') || '').includes(textFilter);
+    var matchesState = !stateFilter || row.getAttribute('data-state') === stateFilter;
+    if (matchesText && matchesState) matchesByGroup[group] = (matchesByGroup[group] || 0) + 1;
+
+    var visible = matchesText && matchesState && (!tenantGroupFilter || group === tenantGroupFilter);
+    row.style.display = visible ? '' : 'none';
+    if (visible) shown++;
+  });
+
+  // Pass 2: a group stays visible when its own name matches or when it holds a
+  // matching setting — searching "API" finds both the group and the settings in it.
+  var groupsShown = 0;
+  var showMatchColumn = !!textFilter || !!stateFilter;
+  document.querySelectorAll('#tenant-groups-table tbody tr').forEach(function(row) {
+    var group = row.getAttribute('data-group') || '';
+    var nameMatches = !textFilter || group.includes(textFilter);
+    var settingsMatch = !textFilter || (row.getAttribute('data-settings') || '').includes(textFilter);
+    var count = matchesByGroup[group] || 0;
+    var visible = (nameMatches || settingsMatch) && (!stateFilter || count > 0) && (!tenantGroupFilter || group === tenantGroupFilter);
+    row.style.display = visible ? '' : 'none';
+    if (visible) groupsShown++;
+
+    var badge = row.querySelector('.group-match-count');
+    if (badge) {
+      badge.textContent = count;
+      badge.className = 'badge group-match-count ' + (count ? 'bg-primary' : 'bg-secondary');
+    }
+  });
+  document.querySelectorAll('.tenant-match-col').forEach(function(cell) {
+    cell.classList.toggle('d-none', !showMatchColumn);
+  });
+
+  var parts = [];
+  if (textFilter) parts.push('"' + textFilter + '"');
+  if (tenantGroupFilter) parts.push('group "' + tenantGroupFilter + '"');
+  if (stateFilter) parts.push(stateFilter);
+
+  var settingsLabel = document.getElementById('tenantSettingsFilterLabel');
+  if (settingsLabel) {
+    settingsLabel.textContent = parts.length ? 'Showing ' + shown + ' — ' + parts.join(', ') : 'Showing all settings';
+  }
+  var groupsLabel = document.getElementById('tenantGroupsFilterLabel');
+  if (groupsLabel) {
+    groupsLabel.textContent = parts.length ? 'Showing ' + groupsShown + ' matching group' + (groupsShown === 1 ? '' : 's') : 'Showing all groups';
+  }
+  var clearBtn = document.getElementById('tenantClearFilter');
+  if (clearBtn) clearBtn.classList.toggle('d-none', !parts.length);
+}
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderGroupList(label, groups) {
+  if (!groups || !groups.length) return '';
+  var items = groups.map(function(g) {
+    return '<li>' + escapeHtml(g.name || g.graphId || g) + '</li>';
+  }).join('');
+  return '<div class="mb-3"><div class="text-muted small mb-1">' + label + '</div><ul class="mb-0 small">' + items + '</ul></div>';
+}
+
+function showTenantSetting(index) {
+  var s = tenantSettings[index];
+  if (!s) return;
+  document.getElementById('tenantSettingTitle').textContent = s.title || s.settingName || 'Setting';
+
+  var html = '<table class="table table-sm"><tbody>';
+  html += '<tr><td class="text-muted" style="width:200px;">API name</td><td><code>' + escapeHtml(s.settingName) + '</code></td></tr>';
+  html += '<tr><td class="text-muted">Group</td><td>' + escapeHtml(s.tenantSettingGroup || 'Ungrouped') + '</td></tr>';
+  html += '<tr><td class="text-muted">State</td><td><span class="badge bg-' + (s.enabled ? 'success' : 'secondary') + '">' + (s.enabled ? 'Enabled' : 'Disabled') + '</span></td></tr>';
+  html += '<tr><td class="text-muted">Can scope to groups</td><td>' + (s.canSpecifySecurityGroups ? 'Yes' : 'No') + '</td></tr>';
+  if (s.tenantSettingGroupId) html += '<tr><td class="text-muted">Group ID</td><td><code class="small">' + escapeHtml(s.tenantSettingGroupId) + '</code></td></tr>';
+  html += '<tr><td class="text-muted">Delegate to workspace</td><td>' + (s.delegateToWorkspace ? 'Yes' : 'No') + '</td></tr>';
+  html += '<tr><td class="text-muted">Delegate to capacity</td><td>' + (s.delegateToCapacity ? 'Yes' : 'No') + '</td></tr>';
+  html += '<tr><td class="text-muted">Delegate to domain</td><td>' + (s.delegateToDomain ? 'Yes' : 'No') + '</td></tr>';
+  html += '</tbody></table>';
+
+  html += renderGroupList('Enabled for security groups', s.enabledSecurityGroups);
+  html += renderGroupList('Excluded security groups', s.excludedSecurityGroups);
+
+  if (s.properties && s.properties.length) {
+    var rows = s.properties.map(function(p) {
+      return '<tr><td class="small">' + escapeHtml(p.name) + '</td><td class="small"><code>' + escapeHtml(p.value) + '</code></td><td class="small text-muted">' + escapeHtml(p.type || '') + '</td></tr>';
+    }).join('');
+    html += '<div class="text-muted small mb-1">Properties</div><table class="table table-sm"><thead><tr><th>Name</th><th>Value</th><th>Type</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+
+  document.getElementById('tenantSettingBody').innerHTML = html;
+  tenantSettingModal.show();
+}
+</script>
+
+<%- include('../partials/footer') %>

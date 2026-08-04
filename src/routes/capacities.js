@@ -2,7 +2,50 @@ const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
+const { executeCapacityActionWithService } = require('../services/capacityActionService');
 const { normalizeTimezone, convertScheduleToUtc } = require('../services/scheduleTimeService');
+const { kickScheduler } = require('../services/schedulerService');
+
+function formatUtcScheduleLabel(scheduleType, utcSchedule) {
+  if (!utcSchedule || utcSchedule.scheduleMinuteUtc == null) return null;
+  const minute = String(utcSchedule.scheduleMinuteUtc).padStart(2, '0');
+  if (scheduleType === 'hourly') return `Every hour at minute ${minute} UTC`;
+  if (utcSchedule.scheduleHourUtc == null) return null;
+  const time = `${String(utcSchedule.scheduleHourUtc).padStart(2, '0')}:${minute} UTC`;
+  return utcSchedule.scheduleDayUtc ? `${time} (${utcSchedule.scheduleDayUtc})` : time;
+}
+
+
+function ensureScheduleUtcFields(schedule) {
+  if (!schedule) return schedule;
+  const needsMinute = schedule.schedule_minute_utc == null;
+  const needsHour = schedule.schedule_type !== 'hourly' && schedule.schedule_hour_utc == null;
+  const needsDay = schedule.schedule_day_utc == null;
+  const normalizedTimezone = normalizeTimezone(schedule.timezone || 'UTC');
+
+  if (!needsMinute && !needsHour && !needsDay && schedule.timezone === normalizedTimezone) {
+    return schedule;
+  }
+
+  try {
+    const utc = convertScheduleToUtc({
+      scheduleType: schedule.schedule_type,
+      hour: schedule.schedule_hour,
+      minute: schedule.schedule_minute,
+      day: schedule.schedule_day,
+      timezone: normalizedTimezone,
+    });
+    return {
+      ...schedule,
+      timezone: normalizedTimezone,
+      schedule_hour_utc: schedule.schedule_hour_utc != null ? schedule.schedule_hour_utc : utc.scheduleHourUtc,
+      schedule_minute_utc: schedule.schedule_minute_utc != null ? schedule.schedule_minute_utc : utc.scheduleMinuteUtc,
+      schedule_day_utc: schedule.schedule_day_utc != null ? schedule.schedule_day_utc : utc.scheduleDayUtc,
+    };
+  } catch {
+    return { ...schedule, timezone: normalizedTimezone };
+  }
+}
 
 function getDetailedErrorMessage(err) {
   if (!err) return 'Unknown error';
@@ -120,9 +163,9 @@ router.get('/:id', async (req, res) => {
 
     // Get schedules for this capacity
     const allSchedules = await db.getCapacitySchedules();
-    const schedules = allSchedules.filter(s =>
-      (s.capacity_name || '').toLowerCase() === (capacity.displayName || '').toLowerCase()
-    );
+    const schedules = allSchedules
+      .filter(s => (s.capacity_name || '').toLowerCase() === (capacity.displayName || '').toLowerCase())
+      .map(ensureScheduleUtcFields);
 
     // Get execution history
     const history = await db.getScheduleHistory(capacity.displayName || '', 5);
@@ -169,6 +212,14 @@ router.post('/:name/suspend', async (req, res) => {
 
     await pbi.suspendCapacity(subscriptionId, resourceGroup, req.params.name);
     res.json({ success: true, message: 'Capacity suspend initiated.' });
+    const pbi = await getPbiService(res);
+    const result = await executeCapacityActionWithService(pbi, {
+      subscriptionId,
+      resourceGroup,
+      capacityName: req.params.name,
+      action: 'suspend',
+    });
+    res.json({ success: result.status === 'success', message: result.message });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
@@ -201,6 +252,14 @@ router.post('/:name/resume', async (req, res) => {
 
     await pbi.resumeCapacity(subscriptionId, resourceGroup, req.params.name);
     res.json({ success: true, message: 'Capacity resume initiated.' });
+    const pbi = await getPbiService(res);
+    const result = await executeCapacityActionWithService(pbi, {
+      subscriptionId,
+      resourceGroup,
+      capacityName: req.params.name,
+      action: 'resume',
+    });
+    res.json({ success: result.status === 'success', message: result.message });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
@@ -240,7 +299,7 @@ router.post('/:name/schedule', async (req, res) => {
       };
     }
 
-    await db.saveCapacitySchedule({
+    const scheduleId = await db.saveCapacitySchedule({
       capacityName: req.params.name,
       subscriptionId,
       resourceGroup,
@@ -256,7 +315,14 @@ router.post('/:name/schedule', async (req, res) => {
       spId: parseInt(effectiveSp.id, 10),
       enabled: true,
     });
-    res.json({ success: true });
+    kickScheduler();
+    const utcLabel = formatUtcScheduleLabel(scheduleType, utcSchedule);
+    res.json({ success: true, id: scheduleId, utcSchedule: {
+      hour: utcSchedule.scheduleHourUtc,
+      minute: utcSchedule.scheduleMinuteUtc,
+      day: utcSchedule.scheduleDayUtc,
+      label: utcLabel,
+    } });
   } catch (err) {
     const details = getDetailedErrorMessage(err);
     console.error('[Capacities] Add schedule failed:', details);
@@ -278,11 +344,10 @@ router.delete('/schedule/:id', async (req, res) => {
 router.put('/schedule/:id', async (req, res) => {
   try {
     const { action, scheduleType, hour, minute, day, timezone } = req.body;
-    const allSps = await db.getServicePrincipals();
-    const preferredSpId = res.locals.globalRun && res.locals.globalRun.sp_id ? parseInt(res.locals.globalRun.sp_id, 10) : null;
-    const selectedSp = Number.isFinite(preferredSpId) ? allSps.find(s => parseInt(s.id, 10) === preferredSpId) : null;
-    const effectiveSp = selectedSp || allSps[0] || null;
-    const normalizedTimezone = timezone !== undefined ? normalizeTimezone(timezone) : undefined;
+    if (!action || !scheduleType) {
+      return res.json({ success: false, message: 'Action and schedule type are required.' });
+    }
+    const normalizedTimezone = normalizeTimezone(timezone || 'UTC');
     let utcSchedule;
     try {
       utcSchedule = convertScheduleToUtc({
@@ -290,7 +355,7 @@ router.put('/schedule/:id', async (req, res) => {
         hour,
         minute,
         day: day || null,
-        timezone: normalizedTimezone || 'UTC',
+        timezone: normalizedTimezone,
       });
     } catch {
       const parsedHour = Number.isFinite(parseInt(hour, 10)) ? parseInt(hour, 10) : 0;
@@ -304,16 +369,22 @@ router.put('/schedule/:id', async (req, res) => {
     await db.updateCapacitySchedule(parseInt(req.params.id), {
       action,
       scheduleType,
-      hour: hour != null ? parseInt(hour) : undefined,
-      minute: minute != null ? parseInt(minute) : undefined,
-      day: day || undefined,
+      hour: scheduleType === 'hourly' ? null : (hour != null ? parseInt(hour, 10) : undefined),
+      minute: minute != null ? parseInt(minute, 10) : undefined,
+      day: scheduleType === 'weekly' ? (day || null) : null,
       timezone: normalizedTimezone,
       hourUtc: utcSchedule.scheduleHourUtc,
       minuteUtc: utcSchedule.scheduleMinuteUtc,
       dayUtc: utcSchedule.scheduleDayUtc,
-      spId: effectiveSp ? parseInt(effectiveSp.id, 10) : undefined,
     });
-    res.json({ success: true });
+    kickScheduler();
+    const utcLabel = formatUtcScheduleLabel(scheduleType, utcSchedule);
+    res.json({ success: true, utcSchedule: {
+      hour: utcSchedule.scheduleHourUtc,
+      minute: utcSchedule.scheduleMinuteUtc,
+      day: utcSchedule.scheduleDayUtc,
+      label: utcLabel,
+    } });
   } catch (err) {
     const details = getDetailedErrorMessage(err);
     console.error('[Capacities] Update schedule failed:', details);

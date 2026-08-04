@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
+const { computeWorkspaceInsights, FINDING_DEFS } = require('../services/workspaceInsightsService');
+const { buildItemDetails } = require('../services/itemDetailsService');
 
 function categorizeItems(items) {
   const reports = [], datasets = [], dashboards = [], dataflows = [];
@@ -41,43 +43,68 @@ async function getPbiService(req, res) {
   });
 }
 
-// Load workspace list from saved analysis (global run)
-async function loadWorkspacesFromRun(res) {
+// Resolve which run a page should read from. An explicit ?runId= wins over the
+// globally selected scan, so drilling into a workspace from one run's results
+// always shows that run's data rather than whatever scan is selected globally.
+async function resolveRun(req, res) {
+  const requestedId = Number.parseInt(req.query.runId, 10);
+  if (Number.isInteger(requestedId)) {
+    const requested = await db.getAnalysisRunById(requestedId);
+    if (requested) return { run: requested, explicit: true };
+  }
   const globalRun = res.locals.globalRun;
-  if (!globalRun) return null;
+  if (!globalRun) return { run: null, explicit: false };
+  return { run: await db.getAnalysisRunById(globalRun.id), explicit: false };
+}
 
-  const fullRun = await db.getAnalysisRunById(globalRun.id);
+function parseRunWorkspaces(run) {
+  if (!run || !run.results_json) return null;
   try {
-    const results = JSON.parse(fullRun.results_json);
+    const results = JSON.parse(run.results_json);
     return results.workspaces || [];
   } catch { return null; }
 }
 
+// Load workspace list from saved analysis
+async function loadWorkspacesFromRun(res, req) {
+  const { run } = req ? await resolveRun(req, res) : { run: null };
+  if (run) return parseRunWorkspaces(run);
+
+  const globalRun = res.locals.globalRun;
+  if (!globalRun) return null;
+  return parseRunWorkspaces(await db.getAnalysisRunById(globalRun.id));
+}
+
+// Workspace triage: rank workspaces by what needs attention rather than listing
+// them alphabetically, which Governance Overview already does.
 router.get('/', async (req, res) => {
   try {
-    const savedWorkspaces = await loadWorkspacesFromRun(res);
+    const { run } = await resolveRun(req, res);
+    const savedWorkspaces = parseRunWorkspaces(run);
 
-    if (savedWorkspaces) {
-      // Use saved data
-      const workspaces = savedWorkspaces.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-      const stats = { total: workspaces.length, byState: {}, byLicense: {}, bySku: {} };
-      for (const ws of workspaces) {
-        const state = ws.state || 'Active';
-        const license = ws.licenseType || 'Pro';
-        const sku = ws.capacitySku || 'Shared (Pro)';
-        stats.byState[state] = (stats.byState[state] || 0) + 1;
-        stats.byLicense[license] = (stats.byLicense[license] || 0) + 1;
-        stats.bySku[sku] = (stats.bySku[sku] || 0) + 1;
-      }
+    const staleDays = Number.parseInt(req.query.staleDays, 10);
+    const overSharedUsers = Number.parseInt(req.query.overSharedUsers, 10);
+
+    if (!savedWorkspaces) {
       return res.render('workspaces/list', {
-        title: 'Workspaces', user: req.user, workspaces, stats, fromSavedData: true,
+        title: 'Workspaces', user: req.user, fromSavedData: false, run: null,
+        insights: computeWorkspaceInsights(null, {}),
+        findingDefs: FINDING_DEFS,
       });
     }
 
-    // No saved data — show message
+    const insights = computeWorkspaceInsights({ workspaces: savedWorkspaces }, {
+      staleDays: Number.isFinite(staleDays) ? staleDays : Number.parseInt(process.env.WORKSPACE_STALE_DAYS, 10),
+      overSharedUsers: Number.isFinite(overSharedUsers) ? overSharedUsers : Number.parseInt(process.env.WORKSPACE_OVERSHARED_USERS, 10),
+      // Staleness is measured against when the scan ran, not today, so an old run
+      // keeps reporting what it reported at the time.
+      referenceDate: run ? (run.completed_at || run.started_at) : null,
+    });
+
     res.render('workspaces/list', {
-      title: 'Workspaces', user: req.user, workspaces: [],
-      stats: { total: 0, byState: {}, byLicense: {}, bySku: {} }, fromSavedData: false,
+      title: 'Workspaces', user: req.user, fromSavedData: true, run,
+      insights,
+      findingDefs: FINDING_DEFS,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -88,8 +115,9 @@ router.get('/:id', async (req, res) => {
   try {
     const workspaceId = req.params.id;
 
-    // Use saved analysis data from global run
-    const savedWorkspaces = await loadWorkspacesFromRun(res);
+    // Use saved analysis data — from the run named in ?runId= when there is one
+    const { run: sourceRun, explicit } = await resolveRun(req, res);
+    const savedWorkspaces = parseRunWorkspaces(sourceRun);
     if (savedWorkspaces) {
       const savedWs = savedWorkspaces.find(w => w.id === workspaceId);
       if (savedWs) {
@@ -98,6 +126,9 @@ router.get('/:id', async (req, res) => {
           title: savedWs.name || 'Workspace', user: req.user,
           workspace: savedWs, items: savedWs.items || [], ...categorized,
           users: savedWs.users || [],
+          sourceRun,
+          lockRunSelector: explicit,
+          lockedRun: explicit ? sourceRun : null,
         });
       }
     }
@@ -149,14 +180,120 @@ router.get('/:workspaceId/dashboards/:dashboardId', async (req, res) => {
 
 // ── Lineage: get item connections for graph visualization ──
 // Uses PBI Scanner API with lineage=true to get full workspace lineage, then filters for the item
+// Index every item in the selected run so lineage endpoints outside the scanned
+// workspace can still be shown by name rather than as a bare GUID.
+async function buildRunItemIndex(req, res) {
+  const index = new Map();
+  try {
+    const { run } = await resolveRun(req, res);
+    for (const workspace of parseRunWorkspaces(run) || []) {
+      for (const item of workspace.items || []) {
+        if (item.id) {
+          index.set(item.id, { name: item.name || null, type: item.type || null, workspaceName: workspace.name || null, workspaceId: workspace.id || null });
+        }
+      }
+    }
+  } catch {
+    // A missing run just means fewer names resolved.
+  }
+  return index;
+}
+
 router.get('/:workspaceId/lineage/:itemId', async (req, res) => {
   try {
     const pbi = await getPbiService(req, res);
     const { workspaceId, itemId } = req.params;
     const allLinks = await pbi.getWorkspaceLineage(workspaceId);
     // Filter connections related to this item (as source or target)
-    const connections = allLinks.filter(l => l.sourceItemId === itemId || l.targetItemId === itemId);
+    const related = allLinks.filter(l => l.sourceItemId === itemId || l.targetItemId === itemId);
+
+    const runIndex = await buildRunItemIndex(req, res);
+    const enrich = (endpoint, fallbackId) => {
+      const base = endpoint || { id: fallbackId, name: null, type: null, workspaceId: null, workspaceName: null };
+      const known = runIndex.get(base.id);
+      return {
+        id: base.id,
+        name: base.name || (known && known.name) || base.id,
+        type: base.type || (known && known.type) || '',
+        workspaceId: base.workspaceId || (known && known.workspaceId) || null,
+        workspaceName: base.workspaceName || (known && known.workspaceName) || null,
+        resolved: !!(base.name || (known && known.name)),
+      };
+    };
+
+    const connections = related.map(link => {
+      const source = enrich(link.source, link.sourceItemId);
+      const target = enrich(link.target, link.targetItemId);
+      return {
+        ...link,
+        source,
+        target,
+        sourceItemDisplayName: source.name,
+        targetItemDisplayName: target.name,
+        sourceItemType: source.type,
+        targetItemType: target.type,
+      };
+    });
+
     res.json({ success: true, connections });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ── Item details ──
+// Served from the database: the analysis run collects details for every artifact,
+// and anything it did not capture (older runs, newly created items) is built on
+// first view and stored. ?refresh=1 forces a fresh read.
+router.get('/:workspaceId/items/:itemId/details', async (req, res) => {
+  const { workspaceId, itemId } = req.params;
+  const requestedType = (req.query.type || '').toString();
+  const forceRefresh = req.query.refresh === '1';
+
+  try {
+    if (!forceRefresh) {
+      const cached = await db.getItemDetailsCache(workspaceId, itemId);
+      if (cached && cached.payload) {
+        try {
+          const payload = JSON.parse(cached.payload);
+          return res.json({
+            ...payload,
+            success: true,
+            fromCache: true,
+            cachedAt: cached.fetched_at,
+            collectedByRunId: cached.run_id || null,
+          });
+        } catch {
+          // Unreadable cache row: fall through and rebuild it.
+        }
+      }
+    }
+
+    const pbi = await getPbiService(res);
+    const runIndex = await buildRunItemIndex(req, res);
+    const known = runIndex.get(itemId) || {};
+
+    const payload = await buildItemDetails(pbi, {
+      workspaceId,
+      itemId,
+      itemType: requestedType || known.type || '',
+      itemName: (req.query.name || known.name || 'Item').toString(),
+      workspaceName: known.workspaceName || null,
+      resolveName: id => {
+        const entry = runIndex.get(id);
+        return entry && entry.name ? entry.name : null;
+      },
+    });
+
+    await db.saveItemDetailsCache({
+      workspaceId,
+      itemId,
+      itemType: payload.item.type,
+      itemName: payload.item.name,
+      payload: JSON.stringify(payload),
+    });
+
+    res.json({ ...payload, success: true, fromCache: false, cachedAt: new Date().toISOString() });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }

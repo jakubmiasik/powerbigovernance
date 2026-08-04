@@ -1,0 +1,350 @@
+<%- include('../partials/header') %>
+<%
+  // Runs are grouped by tenant: a cross-tenant diff compares two different estates
+  // and reads as change when nothing actually changed.
+  var runsByTenant = {};
+  (runs || []).forEach(function(r) {
+    var key = r.tenant_id || 'Unknown tenant';
+    if (!runsByTenant[key]) runsByTenant[key] = [];
+    runsByTenant[key].push(r);
+  });
+  var tenantKeys = Object.keys(runsByTenant).sort();
+
+  function runLabel(r) {
+    return 'Run #' + r.id + ' — ' + (r.sp_name || 'Unknown SP') + ' — ' +
+      (r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A');
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+  }
+
+  function formatValue(value, format) {
+    return format === 'bytes' ? formatBytes(value) : Number(value || 0).toLocaleString();
+  }
+
+  var changedMetrics = (metrics || []).filter(function(m) { return m.changed; });
+%>
+
+<div class="mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <div>
+    <h2><i class="bi bi-arrow-left-right me-2"></i>Compare Runs</h2>
+    <p class="text-muted mb-0">Summary totals are compared instantly; the detailed diff is loaded on demand.</p>
+  </div>
+  <a href="/analysis" class="btn btn-outline-secondary btn-sm" onclick="goBackOr('/analysis'); return false;"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-sliders me-2"></i>Select Runs</div>
+  <div class="card-body">
+    <% if (!tenantKeys.length) { %>
+      <p class="text-muted mb-0">No completed analysis runs yet. <a href="/analysis">Run an analysis</a> first.</p>
+    <% } else { %>
+      <form method="get" action="/analysis/compare" class="row g-2 align-items-end">
+        <div class="col-md-5">
+          <label class="form-label small" for="fromRunSelect">Baseline run</label>
+          <select class="form-select form-select-sm" id="fromRunSelect" name="from" onchange="syncTenant('fromRunSelect')">
+            <% tenantKeys.forEach(function(tenant) { %>
+              <optgroup label="Tenant <%= tenant %>">
+                <% runsByTenant[tenant].forEach(function(r) { %>
+                  <option value="<%= r.id %>" data-tenant="<%= tenant %>" <%= fromRun && fromRun.id === r.id ? 'selected' : '' %>><%= runLabel(r) %></option>
+                <% }) %>
+              </optgroup>
+            <% }) %>
+          </select>
+        </div>
+        <div class="col-md-5">
+          <label class="form-label small" for="toRunSelect">Compare with</label>
+          <select class="form-select form-select-sm" id="toRunSelect" name="to" onchange="syncTenant('toRunSelect')">
+            <% tenantKeys.forEach(function(tenant) { %>
+              <optgroup label="Tenant <%= tenant %>">
+                <% runsByTenant[tenant].forEach(function(r) { %>
+                  <option value="<%= r.id %>" data-tenant="<%= tenant %>" <%= toRun && toRun.id === r.id ? 'selected' : '' %>><%= runLabel(r) %></option>
+                <% }) %>
+              </optgroup>
+            <% }) %>
+          </select>
+        </div>
+        <div class="col-md-2">
+          <button type="submit" class="btn btn-primary btn-sm w-100"><i class="bi bi-arrow-left-right me-1"></i>Compare</button>
+        </div>
+      </form>
+      <div class="form-text mt-2"><i class="bi bi-info-circle me-1"></i>Runs can only be compared within the same tenant.</div>
+    <% } %>
+  </div>
+</div>
+
+<% if (error) { %>
+  <div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div>
+<% } %>
+
+<% if (fromRun && toRun && metrics.length) { %>
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span><i class="bi bi-graph-up me-2"></i>Summary Comparison</span>
+      <span class="small text-muted">
+        Run #<%= fromRun.id %> (<%= fromRun.started_at ? new Date(fromRun.started_at).toLocaleString() : '-' %>)
+        &rarr;
+        Run #<%= toRun.id %> (<%= toRun.started_at ? new Date(toRun.started_at).toLocaleString() : '-' %>)
+      </span>
+    </div>
+    <div class="card-body py-3">
+      <% if (!changedMetrics.length) { %>
+        <div class="alert alert-success small mb-3"><i class="bi bi-check-circle me-2"></i>No change in any summary total between these two runs.</div>
+      <% } %>
+      <% if (typeof tenantSettingsComparable !== 'undefined' && !tenantSettingsComparable) { %>
+        <div class="alert alert-info small mb-3">
+          <i class="bi bi-info-circle me-2"></i>Tenant settings are excluded: at least one of these runs was created before
+          tenant settings were captured with a run, so there is nothing to compare them against.
+        </div>
+      <% } %>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0" id="compare-metrics-table">
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th class="text-end">Run #<%= fromRun.id %></th>
+              <th class="text-end">Run #<%= toRun.id %></th>
+              <th class="text-end">Change</th>
+              <th class="text-end">%</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% metrics.forEach(function(metric) {
+              var color = metric.delta === 0 ? 'secondary' : metric.delta > 0 ? 'success' : 'danger';
+              var sign = metric.delta > 0 ? '+' : '';
+            %>
+              <tr class="<%= metric.changed ? '' : 'text-muted' %>">
+                <td><%= metric.label %></td>
+                <td class="text-end"><%= formatValue(metric.from, metric.format) %></td>
+                <td class="text-end fw-bold"><%= formatValue(metric.to, metric.format) %></td>
+                <td class="text-end">
+                  <% if (metric.delta === 0) { %>
+                    <span class="text-muted">—</span>
+                  <% } else { %>
+                    <span class="badge bg-<%= color %>"><%= sign %><%= metric.format === 'bytes' ? formatBytes(Math.abs(metric.delta)) : metric.delta.toLocaleString() %></span>
+                  <% } %>
+                </td>
+                <td class="text-end small">
+                  <%= metric.percent === null ? 'new' : (metric.percent === 0 ? '—' : (metric.percent > 0 ? '+' : '') + metric.percent + '%') %>
+                </td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span><i class="bi bi-search me-2"></i>Detailed Comparison</span>
+      <button class="btn btn-sm btn-outline-primary" id="detailsBtn" onclick="loadDetails()">
+        <i class="bi bi-download me-1"></i>Load detailed diff
+      </button>
+    </div>
+    <div class="card-body py-3" id="detailsPanel">
+      <p class="text-muted small mb-0">
+        The detailed diff walks every workspace, item, and access assignment in both runs.
+        It is not loaded automatically because it reads the full stored results of both runs.
+      </p>
+    </div>
+  </div>
+<% } %>
+
+<script>
+var compareFrom = <%= fromRun ? fromRun.id : 'null' %>;
+var compareTo = <%= toRun ? toRun.id : 'null' %>;
+
+// Keep both pickers on one tenant: selecting a run switches the other side to the
+// most recent run of the same tenant when it currently points somewhere else.
+function syncTenant(changedId) {
+  var changed = document.getElementById(changedId);
+  var other = document.getElementById(changedId === 'fromRunSelect' ? 'toRunSelect' : 'fromRunSelect');
+  if (!changed || !other) return;
+  var tenant = changed.options[changed.selectedIndex].getAttribute('data-tenant');
+  var current = other.options[other.selectedIndex];
+  if (current && current.getAttribute('data-tenant') === tenant) return;
+  for (var i = 0; i < other.options.length; i++) {
+    if (other.options[i].getAttribute('data-tenant') === tenant && other.options[i].value !== changed.value) {
+      other.selectedIndex = i;
+      return;
+    }
+  }
+}
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function workspaceTable(title, rows, color, icon) {
+  if (!rows.length) return '';
+  var body = rows.map(function(w) {
+    return '<tr><td>' + escapeHtml(w.name) + '</td><td>' + escapeHtml(w.state) + '</td>' +
+      '<td>' + escapeHtml(w.licenseType) + '</td><td>' + w.totalItems + '</td></tr>';
+  }).join('');
+  return '<div class="mb-4"><h6 class="mb-2"><i class="bi bi-' + icon + ' me-1 text-' + color + '"></i>' +
+    title + ' (' + rows.length + ')</h6>' +
+    '<div class="table-responsive" style="max-height:320px;"><table class="table table-sm table-hover mb-0">' +
+    '<thead><tr><th>Workspace</th><th>State</th><th>License</th><th>Items</th></tr></thead><tbody>' +
+    body + '</tbody></table></div></div>';
+}
+
+function changedTable(rows) {
+  if (!rows.length) return '';
+  var body = rows.map(function(w) {
+    var changes = w.changes.map(function(c) {
+      var delta = c.delta === null ? '' : ' (' + (c.delta > 0 ? '+' : '') + c.delta + ')';
+      return '<span class="badge bg-light text-dark border me-1 mb-1">' + escapeHtml(c.field) + ': ' +
+        escapeHtml(c.from) + ' &rarr; ' + escapeHtml(c.to) + delta + '</span>';
+    }).join('');
+    return '<tr><td>' + escapeHtml(w.name) + '</td><td>' + changes + '</td></tr>';
+  }).join('');
+  return '<div class="mb-4"><h6 class="mb-2"><i class="bi bi-pencil-square me-1 text-warning"></i>Changed Workspaces (' + rows.length + ')</h6>' +
+    '<div class="table-responsive" style="max-height:320px;"><table class="table table-sm table-hover mb-0">' +
+    '<thead><tr><th style="width:30%;">Workspace</th><th>Changes</th></tr></thead><tbody>' + body + '</tbody></table></div></div>';
+}
+
+function capacityTable(rows) {
+  if (!rows.length) return '';
+  var body = rows.map(function(m) {
+    return '<tr><td>' + escapeHtml(m.name) + '</td>' +
+      '<td><code>' + escapeHtml(m.fromSku) + '</code> &rarr; <code>' + escapeHtml(m.toSku) + '</code></td>' +
+      '<td>' + escapeHtml(m.fromLicense) + ' &rarr; ' + escapeHtml(m.toLicense) + '</td></tr>';
+  }).join('');
+  return '<div class="mb-4"><h6 class="mb-2"><i class="bi bi-lightning me-1 text-info"></i>Capacity / License Moves (' + rows.length + ')</h6>' +
+    '<div class="table-responsive" style="max-height:320px;"><table class="table table-sm table-hover mb-0">' +
+    '<thead><tr><th>Workspace</th><th>SKU</th><th>License</th></tr></thead><tbody>' + body + '</tbody></table></div></div>';
+}
+
+function accessTable(rows) {
+  if (!rows.length) return '';
+  var body = rows.map(function(w) {
+    var parts = [];
+    w.added.forEach(function(u) {
+      parts.push('<span class="badge bg-success me-1 mb-1">+ ' + escapeHtml(u.name) + ' (' + escapeHtml(u.role) + ')</span>');
+    });
+    w.removed.forEach(function(u) {
+      parts.push('<span class="badge bg-danger me-1 mb-1">− ' + escapeHtml(u.name) + ' (' + escapeHtml(u.role) + ')</span>');
+    });
+    w.roleChanged.forEach(function(u) {
+      parts.push('<span class="badge bg-warning text-dark me-1 mb-1">' + escapeHtml(u.name) + ': ' + escapeHtml(u.from) + ' &rarr; ' + escapeHtml(u.to) + '</span>');
+    });
+    return '<tr><td>' + escapeHtml(w.name) + '</td><td>' + parts.join('') + '</td></tr>';
+  }).join('');
+  return '<div class="mb-4"><h6 class="mb-2"><i class="bi bi-people me-1 text-primary"></i>Access Changes (' + rows.length + ' workspaces)</h6>' +
+    '<div class="table-responsive" style="max-height:320px;"><table class="table table-sm table-hover mb-0">' +
+    '<thead><tr><th style="width:30%;">Workspace</th><th>Users</th></tr></thead><tbody>' + body + '</tbody></table></div></div>';
+}
+
+function tenantSettingsSection(ts) {
+  if (!ts) return '';
+  if (!ts.available) {
+    return '<div class="mb-4"><h6 class="mb-2"><i class="bi bi-sliders me-1 text-secondary"></i>Tenant Settings</h6>' +
+      '<div class="alert alert-info small mb-0"><i class="bi bi-info-circle me-1"></i>' + escapeHtml(ts.reason) + '</div></div>';
+  }
+
+  var total = ts.added.length + ts.removed.length + ts.enabledChanged.length + ts.scopeChanged.length;
+  if (!total) {
+    return '<div class="mb-4"><h6 class="mb-2"><i class="bi bi-sliders me-1 text-success"></i>Tenant Settings</h6>' +
+      '<div class="alert alert-success small mb-0"><i class="bi bi-check-circle me-1"></i>No tenant setting was added, removed, toggled, or re-scoped between these runs.</div></div>';
+  }
+
+  var html = '<div class="mb-4"><h6 class="mb-2"><i class="bi bi-sliders me-1 text-warning"></i>Tenant Settings (' + total + ' change' + (total === 1 ? '' : 's') + ')</h6>';
+
+  if (ts.enabledChanged.length) {
+    var toggles = ts.enabledChanged.map(function(s) {
+      var badge = s.to
+        ? '<span class="badge bg-danger">Disabled</span> &rarr; <span class="badge bg-success">Enabled</span>'
+        : '<span class="badge bg-success">Enabled</span> &rarr; <span class="badge bg-danger">Disabled</span>';
+      return '<tr><td>' + escapeHtml(s.label) + '<div class="text-muted" style="font-size:0.7rem;"><code>' + escapeHtml(s.name) + '</code></div></td>' +
+        '<td><span class="badge bg-secondary">' + escapeHtml(s.group) + '</span></td><td>' + badge + '</td></tr>';
+    }).join('');
+    html += '<div class="text-warning small fw-bold mb-1">Toggled</div>' +
+      '<div class="table-responsive mb-3" style="max-height:300px;"><table class="table table-sm table-hover mb-0">' +
+      '<thead><tr><th>Setting</th><th>Group</th><th>Change</th></tr></thead><tbody>' + toggles + '</tbody></table></div>';
+  }
+
+  if (ts.scopeChanged.length) {
+    var scopes = ts.scopeChanged.map(function(s) {
+      return '<tr><td>' + escapeHtml(s.label) + '</td><td><span class="badge bg-secondary">' + escapeHtml(s.group) + '</span></td>' +
+        '<td class="small text-muted">' + escapeHtml(s.from) + '</td><td class="small">' + escapeHtml(s.to) + '</td></tr>';
+    }).join('');
+    html += '<div class="text-info small fw-bold mb-1">Scope or delegation changed</div>' +
+      '<div class="table-responsive mb-3" style="max-height:300px;"><table class="table table-sm table-hover mb-0">' +
+      '<thead><tr><th>Setting</th><th>Group</th><th>Before</th><th>After</th></tr></thead><tbody>' + scopes + '</tbody></table></div>';
+  }
+
+  function simpleList(rows, label, color) {
+    if (!rows.length) return '';
+    var body = rows.map(function(s) {
+      return '<tr><td>' + escapeHtml(s.label) + '</td><td><span class="badge bg-secondary">' + escapeHtml(s.group) + '</span></td>' +
+        '<td><span class="badge bg-' + (s.enabled ? 'success' : 'secondary') + '">' + (s.enabled ? 'Enabled' : 'Disabled') + '</span></td></tr>';
+    }).join('');
+    return '<div class="col-lg-6"><div class="text-' + color + ' small fw-bold mb-1">' + label + '</div>' +
+      '<div class="table-responsive" style="max-height:260px;"><table class="table table-sm mb-0">' +
+      '<thead><tr><th>Setting</th><th>Group</th><th>State</th></tr></thead><tbody>' + body + '</tbody></table></div></div>';
+  }
+  if (ts.added.length || ts.removed.length) {
+    html += '<div class="row g-3">' + simpleList(ts.added, 'New settings', 'success') + simpleList(ts.removed, 'No longer present', 'danger') + '</div>';
+  }
+
+  return html + '</div>';
+}
+
+function itemsSection(items) {
+  if (!items.addedCount && !items.removedCount) return '';
+  function list(rows, label, color) {
+    if (!rows.length) return '';
+    var body = rows.map(function(i) {
+      return '<tr><td>' + escapeHtml(i.workspace) + '</td><td>' + escapeHtml(i.name) + '</td><td><span class="badge bg-secondary">' + escapeHtml(i.type) + '</span></td></tr>';
+    }).join('');
+    return '<div class="col-lg-6"><div class="text-' + color + ' small fw-bold mb-1">' + label + '</div>' +
+      '<div class="table-responsive" style="max-height:300px;"><table class="table table-sm mb-0">' +
+      '<thead><tr><th>Workspace</th><th>Item</th><th>Type</th></tr></thead><tbody>' + body + '</tbody></table></div></div>';
+  }
+  return '<div class="mb-2"><h6 class="mb-2"><i class="bi bi-boxes me-1 text-dark"></i>Item Churn — ' +
+    items.addedCount + ' added, ' + items.removedCount + ' removed</h6>' +
+    (items.truncated ? '<div class="alert alert-info small py-1 px-2">Showing the first ' + items.added.length + ' added and ' + items.removed.length + ' removed items. Counts above are exact.</div>' : '') +
+    '<div class="row g-3">' + list(items.added, 'Added', 'success') + list(items.removed, 'Removed', 'danger') + '</div></div>';
+}
+
+async function loadDetails() {
+  var btn = document.getElementById('detailsBtn');
+  var panel = document.getElementById('detailsPanel');
+  btn.disabled = true;
+  panel.innerHTML = '<div class="text-muted small d-flex align-items-center gap-2"><span class="spinner-border spinner-border-sm"></span> Comparing full run contents...</div>';
+
+  try {
+    var resp = await fetch('/analysis/compare/details?from=' + compareFrom + '&to=' + compareTo);
+    var data = await resp.json();
+    if (!data.success) {
+      panel.innerHTML = '<div class="alert alert-warning small mb-0"><i class="bi bi-exclamation-triangle me-1"></i>' + escapeHtml(data.message) + '</div>';
+      btn.disabled = false;
+      return;
+    }
+
+    var d = data.details;
+    var html = tenantSettingsSection(d.tenantSettings) +
+      workspaceTable('Added Workspaces', d.workspaces.added, 'success', 'plus-circle') +
+      workspaceTable('Removed Workspaces', d.workspaces.removed, 'danger', 'dash-circle') +
+      changedTable(d.workspaces.changed) +
+      capacityTable(d.capacityMoves) +
+      accessTable(d.accessChanges) +
+      itemsSection(d.items);
+
+    panel.innerHTML = html || '<div class="alert alert-success small mb-0"><i class="bi bi-check-circle me-1"></i>No workspace, capacity, access, or item differences between these runs.</div>';
+    btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Reload detailed diff';
+    btn.disabled = false;
+  } catch (e) {
+    panel.innerHTML = '<div class="alert alert-danger small mb-0">' + escapeHtml(e.message) + '</div>';
+    btn.disabled = false;
+  }
+}
+</script>
+
+<%- include('../partials/footer') %>

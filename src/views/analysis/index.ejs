@@ -5,7 +5,10 @@
     <p class="text-muted">Scan your Power BI tenant and save results to the database.</p>
 
     <div class="card mb-4">
-      <div class="card-header"><i class="bi bi-rocket me-2"></i>New Analysis</div>
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span><i class="bi bi-rocket me-2"></i>New Analysis</span>
+        <a href="/analysis/compare" class="btn btn-sm btn-outline-primary text-nowrap"><i class="bi bi-arrow-left-right me-1"></i>Compare Runs</a>
+      </div>
       <div class="card-body">
         <% if (!servicePrincipals.length) { %>
           <div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle me-2"></i>No service principals configured. <a href="/settings">Add one in Settings</a> first.</div>
@@ -90,15 +93,45 @@
       <div class="modal-header">
         <h5 class="modal-title"><i class="bi bi-hourglass-split me-2"></i>Analysis in Progress</h5>
       </div>
-      <div class="modal-body text-center">
-        <div class="spinner-border text-primary mb-3" role="status" id="analysisSpinner">
-          <span class="visually-hidden">Loading...</span>
+      <div class="modal-body">
+        <div class="text-center">
+          <div class="spinner-border text-primary mb-3" role="status" id="analysisSpinner">
+            <span class="visually-hidden">Loading...</span>
+          </div>
         </div>
-        <div class="progress mb-3" style="height: 25px;">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <span class="badge bg-primary" id="progressPhase">Starting</span>
+          <span class="small text-muted" id="progressElapsed"></span>
+        </div>
+        <div class="progress mb-2" style="height: 25px;">
           <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" id="progressBar" style="width: 0%">0%</div>
         </div>
-        <p class="text-muted" id="progressMessage">Starting analysis...</p>
-        <p class="small text-muted" id="progressDetail"></p>
+        <p class="text-muted mb-1" id="progressMessage">Starting analysis...</p>
+        <p class="small text-muted mb-2" id="progressDetail"></p>
+
+        <!-- Why nothing appears to be happening -->
+        <div class="alert alert-warning py-2 px-3 small d-none" id="throttleAlert">
+          <i class="bi bi-hourglass-split me-1"></i>
+          <strong>Waiting on API rate limits.</strong>
+          <span id="throttleText"></span>
+        </div>
+        <div class="alert alert-danger py-2 px-3 small d-none" id="stallAlert">
+          <i class="bi bi-exclamation-triangle me-1"></i>
+          <strong>No progress for <span id="stallSeconds"></span>s.</strong>
+          The run may be blocked on a slow request. Check the activity log below, or cancel and retry.
+        </div>
+
+        <div class="row g-2 text-center mb-2" id="progressCounters" style="display:none;">
+          <div class="col-3"><div class="fw-bold" id="counterApiCalls">0</div><div class="text-muted" style="font-size:0.7rem;">API calls</div></div>
+          <div class="col-3"><div class="fw-bold text-warning" id="counterThrottled">0</div><div class="text-muted" style="font-size:0.7rem;">Throttled</div></div>
+          <div class="col-3"><div class="fw-bold text-warning" id="counterRetries">0</div><div class="text-muted" style="font-size:0.7rem;">Retries</div></div>
+          <div class="col-3"><div class="fw-bold text-danger" id="counterFailures">0</div><div class="text-muted" style="font-size:0.7rem;">Failures</div></div>
+        </div>
+
+        <details id="activityLogWrap" style="display:none;">
+          <summary class="small text-muted" style="cursor:pointer;">Activity log</summary>
+          <div class="mt-2" style="max-height:180px; overflow-y:auto;" id="activityLog"></div>
+        </details>
       </div>
       <div class="modal-footer justify-content-between flex-wrap gap-2">
         <button class="btn btn-outline-danger" id="cancelAnalysisBtn" style="display:none;" onclick="cancelAnalysis()"><i class="bi bi-x-circle me-1"></i>Cancel</button>
@@ -156,6 +189,30 @@ async function startAnalysis() {
   }
 }
 
+function formatDuration(totalSeconds) {
+  var s = Math.max(0, Math.floor(totalSeconds || 0));
+  if (s < 60) return s + 's';
+  var m = Math.floor(s / 60);
+  if (m < 60) return m + 'm ' + (s % 60) + 's';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}
+
+function renderActivityLog(events) {
+  var wrap = document.getElementById('activityLogWrap');
+  var log = document.getElementById('activityLog');
+  if (!events.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+
+  log.innerHTML = events.slice().reverse().map(function(evt) {
+    var color = evt.level === 'error' ? 'danger' : evt.level === 'warning' ? 'warning' : 'secondary';
+    var time = new Date(evt.at).toLocaleTimeString();
+    return '<div class="small mb-1"><span class="badge bg-' + color + ' me-1">' + time + '</span>' +
+      String(evt.message)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') +
+      '</div>';
+  }).join('');
+}
+
 async function pollProgress(runId) {
   try {
     var response = await fetch('/analysis/progress/' + runId);
@@ -164,9 +221,47 @@ async function pollProgress(runId) {
     document.getElementById('progressBar').style.width = data.progress + '%';
     document.getElementById('progressBar').textContent = data.progress + '%';
     document.getElementById('progressMessage').textContent = data.message;
-    if (data.current && data.total) {
-      document.getElementById('progressDetail').textContent = data.current + ' / ' + data.total + ' workspaces';
+
+    if (data.phase) document.getElementById('progressPhase').textContent = data.phase;
+    if (typeof data.elapsedSeconds === 'number') {
+      document.getElementById('progressElapsed').textContent = 'Elapsed ' + formatDuration(data.elapsedSeconds);
     }
+
+    // Prefer the live detail (which workspace/item is being read) over the coarse count.
+    var detailEl = document.getElementById('progressDetail');
+    if (data.detail) {
+      detailEl.textContent = data.detail;
+    } else if (data.current && data.total) {
+      detailEl.textContent = data.current + ' / ' + data.total + ' workspaces';
+    }
+
+    // Throttling and stalling are the two reasons a run looks frozen; say which.
+    var throttleAlert = document.getElementById('throttleAlert');
+    if (data.throttleRemainingSeconds > 0) {
+      throttleAlert.classList.remove('d-none');
+      document.getElementById('throttleText').textContent =
+        'The Power BI API asked us to wait — resuming in about ' + data.throttleRemainingSeconds + 's.';
+    } else {
+      throttleAlert.classList.add('d-none');
+    }
+
+    var stallAlert = document.getElementById('stallAlert');
+    if (data.stalled) {
+      stallAlert.classList.remove('d-none');
+      document.getElementById('stallSeconds').textContent = data.secondsSinceUpdate;
+    } else {
+      stallAlert.classList.add('d-none');
+    }
+
+    if (data.counters) {
+      document.getElementById('progressCounters').style.display = '';
+      document.getElementById('counterApiCalls').textContent = data.counters.apiCalls;
+      document.getElementById('counterThrottled').textContent = data.counters.throttled;
+      document.getElementById('counterRetries').textContent = data.counters.retries;
+      document.getElementById('counterFailures').textContent = data.counters.failures;
+    }
+
+    renderActivityLog(data.events || []);
 
     if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
       clearInterval(progressInterval);

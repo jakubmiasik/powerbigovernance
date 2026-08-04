@@ -1,9 +1,73 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
-const { createPowerBIService } = require('../services/powerbiService');
+const { createPowerBIService, runWithApiReporter } = require('../services/powerbiService');
+const {
+  METRIC_DEFS, computeRunTotals, diffTotals, diffRunDetails,
+} = require('../services/runMetricsService');
+const { buildItemDetails } = require('../services/itemDetailsService');
 
 const activeAnalyses = new Map();
+
+const MAX_PROGRESS_EVENTS = 25;
+// How long without a progress update before the UI calls the run stalled.
+const STALL_SECONDS = Number.parseInt(process.env.ANALYSIS_STALL_SECONDS || '90', 10);
+
+// Artifact details are collected during the run so the UI never has to call the
+// APIs when an artifact is opened. This is the second-longest phase of a run, so
+// it is bounded and can be turned off.
+const COLLECT_DETAILS = process.env.ANALYSIS_COLLECT_DETAILS !== 'false';
+const DETAIL_CONCURRENCY = Math.max(1, Number.parseInt(process.env.ANALYSIS_DETAIL_CONCURRENCY || '4', 10) || 4);
+const DETAIL_MAX_ITEMS = Math.max(0, Number.parseInt(process.env.ANALYSIS_DETAIL_MAX_ITEMS || '2000', 10) || 0);
+
+// Every progress write goes through here so `updatedAt` is always accurate — it is
+// what tells the UI the difference between "slow" and "hung".
+function setProgress(progress, patch) {
+  Object.assign(progress, patch);
+  progress.updatedAt = Date.now();
+}
+
+function addProgressEvent(progress, level, message) {
+  progress.events.push({ at: Date.now(), level, message });
+  if (progress.events.length > MAX_PROGRESS_EVENTS) progress.events.shift();
+  progress.updatedAt = Date.now();
+}
+
+// Turns raw API telemetry into counters plus a readable event log, so a run that
+// is being throttled says so instead of just sitting at the same percentage.
+function handleApiEvent(progress, event) {
+  const counters = progress.counters;
+  if (event.type === 'request') {
+    counters.apiCalls += 1;
+    // Requests are far too frequent to log individually; the counter moving is the
+    // signal that the run is alive.
+    progress.updatedAt = Date.now();
+    return;
+  }
+  if (event.type === 'throttled') {
+    counters.throttled += 1;
+    counters.waitedMs += event.delayMs || 0;
+    progress.throttledUntil = Date.now() + (event.delayMs || 0);
+    const capped = event.cappedFrom
+      ? ' (tenant asked for ' + Math.round(event.cappedFrom / 1000) + 's, capped)'
+      : '';
+    addProgressEvent(progress, 'warning',
+      'Throttled by the API on ' + event.path + ' — waiting ' + Math.round((event.delayMs || 0) / 1000) + 's' + capped);
+    return;
+  }
+  if (event.type === 'retry') {
+    counters.retries += 1;
+    counters.waitedMs += event.delayMs || 0;
+    addProgressEvent(progress, 'warning',
+      'HTTP ' + (event.status || '?') + ' on ' + event.path + ' — retry ' + event.attempt + ' in ' + Math.round((event.delayMs || 0) / 1000) + 's');
+    return;
+  }
+  if (event.type === 'failure') {
+    counters.failures += 1;
+    addProgressEvent(progress, 'error',
+      'Request failed on ' + event.path + (event.status ? ' (HTTP ' + event.status + ')' : '') + ': ' + (event.message || 'unknown error'));
+  }
+}
 
 function ensureNotCancelled(progress) {
   if (progress.cancelRequested) {
@@ -34,7 +98,8 @@ router.post('/run', async (req, res) => {
   try {
     const sps = await db.getServicePrincipals();
     if (sps.length === 0) return res.json({ success: false, message: 'No service principal configured. Go to Settings to add one.' });
-    const sp = sps[0];
+    const requestedSpId = Number.parseInt(req.body ? req.body.spId : null, 10);
+    const sp = (Number.isFinite(requestedSpId) && sps.find(s => parseInt(s.id, 10) === requestedSpId)) || sps[0];
 
     const runId = await db.createAnalysisRun({
       spId: sp.id,
@@ -42,6 +107,9 @@ router.post('/run', async (req, res) => {
       tenantId: sp.tenant_id,
       runBy: req.user ? req.user.name : 'anonymous',
     });
+    if (!runId) {
+      return res.json({ success: false, message: 'Could not create the analysis run record in the database.' });
+    }
 
     runAnalysis(runId, sp, {
       keyVaultDelegatedToken: req.session?.keyVaultDelegatedToken?.token || null,
@@ -68,8 +136,27 @@ router.post('/cancel/:runId', async (req, res) => {
 
 router.get('/progress/:runId', (req, res) => {
   const runId = parseInt(req.params.runId);
-  const progress = activeAnalyses.get(runId) || { status: 'unknown', progress: 0, message: '' };
-  res.json(progress);
+  const progress = activeAnalyses.get(runId);
+  if (!progress) {
+    return res.json({ status: 'unknown', progress: 0, message: '', events: [], counters: null });
+  }
+
+  const now = Date.now();
+  const secondsSinceUpdate = Math.floor((now - (progress.updatedAt || now)) / 1000);
+  const throttleRemaining = progress.throttledUntil && progress.throttledUntil > now
+    ? Math.ceil((progress.throttledUntil - now) / 1000)
+    : 0;
+
+  res.json({
+    ...progress,
+    elapsedSeconds: Math.floor((now - (progress.startedAt || now)) / 1000),
+    secondsSinceUpdate,
+    throttleRemainingSeconds: throttleRemaining,
+    // "Stalled" means nothing has moved, not even an API call — a run that is merely
+    // waiting out a documented throttle is reported as throttled, not stalled.
+    stalled: progress.status === 'running' && !throttleRemaining && secondsSinceUpdate >= STALL_SECONDS,
+    stallThresholdSeconds: STALL_SECONDS,
+  });
 });
 
 router.get('/results/:runId', async (req, res) => {
@@ -87,9 +174,145 @@ router.get('/results/:runId', async (req, res) => {
       user: req.user,
       run,
       results,
+      // This page is bound to one run, so the global scan selector is locked to it.
+      lockRunSelector: true,
+      lockedRun: run,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
+  }
+});
+
+function parseRunResults(run) {
+  if (!run || !run.results_json) return null;
+  try { return JSON.parse(run.results_json); } catch { return null; }
+}
+
+// Totals for a run, computing and storing them on first use. Runs created before
+// the totals table existed are backfilled here rather than in a startup migration,
+// which would have meant parsing every historic run's results_json at boot.
+async function loadRunTotals(runId) {
+  const stored = await db.getRunTotals(runId);
+  if (stored) {
+    const totals = {};
+    for (const def of METRIC_DEFS) totals[def.key] = Number(stored[def.column]) || 0;
+    return { totals, run: null, backfilled: false };
+  }
+
+  const run = await db.getAnalysisRunById(runId);
+  const results = parseRunResults(run);
+  if (!results) return { totals: null, run, backfilled: false };
+
+  const totals = computeRunTotals(results);
+  try {
+    await db.saveRunTotals(
+      runId,
+      { tenantId: run.tenant_id, spId: run.sp_id, spName: run.sp_name, startedAt: run.started_at },
+      totals
+    );
+  } catch (err) {
+    console.warn('[Analysis] Could not backfill run totals for run', runId, err.message);
+  }
+  return { totals, run, backfilled: true };
+}
+
+// ── Run comparison (same tenant only) ──
+router.get('/compare', async (req, res) => {
+  try {
+    const allRuns = await db.getAnalysisRuns();
+    const completed = allRuns.filter(r => r.status === 'completed');
+
+    const fromId = Number.parseInt(req.query.from, 10);
+    const toId = Number.parseInt(req.query.to, 10);
+    const base = {
+      title: 'Compare Runs',
+      user: req.user,
+      runs: completed,
+      fromRun: null,
+      toRun: null,
+      metrics: [],
+      error: null,
+      tenantSettingsComparable: true,
+    };
+
+    if (!Number.isInteger(fromId) || !Number.isInteger(toId)) {
+      return res.render('analysis/compare', base);
+    }
+    if (fromId === toId) {
+      return res.render('analysis/compare', { ...base, error: 'Pick two different runs to compare.' });
+    }
+
+    const [fromRun, toRun] = await Promise.all([
+      db.getAnalysisRunById(fromId),
+      db.getAnalysisRunById(toId),
+    ]);
+    if (!fromRun || !toRun) {
+      return res.render('analysis/compare', { ...base, error: 'One of the selected runs no longer exists.' });
+    }
+
+    // Comparing across tenants would produce numbers that look like change but are
+    // really two different estates, so it is refused rather than rendered.
+    if ((fromRun.tenant_id || '') !== (toRun.tenant_id || '')) {
+      return res.render('analysis/compare', {
+        ...base,
+        fromRun,
+        toRun,
+        error: 'These runs are from different tenants. Comparison is only available within a single tenant.',
+      });
+    }
+
+    const [fromTotals, toTotals] = await Promise.all([loadRunTotals(fromId), loadRunTotals(toId)]);
+    if (!fromTotals.totals || !toTotals.totals) {
+      return res.render('analysis/compare', {
+        ...base,
+        fromRun,
+        toRun,
+        error: 'One of the selected runs has no stored results to compare.',
+      });
+    }
+
+    // A run that predates tenant-settings capture stores zeroes, which would read
+    // as "every setting removed". Drop those rows and say why instead.
+    const tenantSettingsComparable = !!fromTotals.totals.tenantSettingsCaptured && !!toTotals.totals.tenantSettingsCaptured;
+    res.render('analysis/compare', {
+      ...base,
+      fromRun,
+      toRun,
+      metrics: diffTotals(fromTotals.totals, toTotals.totals, {
+        skipGroups: tenantSettingsComparable ? [] : ['tenantSettings'],
+      }),
+      tenantSettingsComparable,
+    });
+  } catch (err) {
+    res.render('error', { title: 'Error', user: req.user, message: err.message });
+  }
+});
+
+// Detailed diff, loaded on demand — this is the expensive path that parses both runs.
+router.get('/compare/details', async (req, res) => {
+  try {
+    const fromId = Number.parseInt(req.query.from, 10);
+    const toId = Number.parseInt(req.query.to, 10);
+    if (!Number.isInteger(fromId) || !Number.isInteger(toId) || fromId === toId) {
+      return res.json({ success: false, message: 'Pick two different runs to compare.' });
+    }
+
+    const [fromRun, toRun] = await Promise.all([
+      db.getAnalysisRunById(fromId),
+      db.getAnalysisRunById(toId),
+    ]);
+    if (!fromRun || !toRun) return res.json({ success: false, message: 'One of the selected runs no longer exists.' });
+    if ((fromRun.tenant_id || '') !== (toRun.tenant_id || '')) {
+      return res.json({ success: false, message: 'Comparison is only available within a single tenant.' });
+    }
+
+    const fromResults = parseRunResults(fromRun);
+    const toResults = parseRunResults(toRun);
+    if (!fromResults || !toResults) return res.json({ success: false, message: 'One of the selected runs has no stored results.' });
+
+    res.json({ success: true, details: diffRunDetails(fromResults, toResults) });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
   }
 });
 
@@ -104,24 +327,48 @@ router.post('/delete/:runId', async (req, res) => {
 
 async function runAnalysis(runId, sp, authOptions = {}) {
   const progress = { status: 'running', progress: 0, message: 'Starting analysis...', current: 0, total: 0, cancelRequested: false };
+async function runAnalysis(runId, sp) {
+  const progress = {
+    status: 'running',
+    progress: 0,
+    phase: 'Starting',
+    message: 'Starting analysis...',
+    detail: '',
+    current: 0,
+    total: 0,
+    cancelRequested: false,
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    throttledUntil: null,
+    counters: { apiCalls: 0, retries: 0, throttled: 0, failures: 0, waitedMs: 0, skippedItems: 0 },
+    events: [],
+  };
   activeAnalyses.set(runId, progress);
+  addProgressEvent(progress, 'info', 'Analysis started for ' + (sp.name || 'service principal'));
 
+  // Everything below runs inside the reporter, so retries and throttling anywhere in
+  // the Power BI client surface as run progress instead of silent delay.
+  await runWithApiReporter(event => handleApiEvent(progress, event), async () => {
   try {
     const pbi = createPowerBIService(sp, authOptions);
 
-    progress.message = 'Fetching workspaces...';
+    setProgress(progress, { phase: 'Workspaces', message: 'Fetching workspaces...' });
     const workspaces = await pbi.getWorkspaces();
     ensureNotCancelled(progress);
-    progress.total = workspaces.length;
-    progress.message = 'Found ' + workspaces.length + ' workspaces. Fetching all items...';
-    progress.progress = 10;
+    setProgress(progress, {
+      total: workspaces.length,
+      progress: 10,
+      message: 'Found ' + workspaces.length + ' workspaces. Fetching all items...',
+    });
+    addProgressEvent(progress, 'info', 'Found ' + workspaces.length + ' workspaces');
 
-    progress.message = 'Fetching all items via Fabric Admin API...';
+    setProgress(progress, { phase: 'Items', message: 'Fetching all items via Fabric Admin API...' });
     const allItems = await pbi.getAllItems();
     ensureNotCancelled(progress);
-    progress.progress = 40;
-    progress.message = 'Found ' + allItems.length + ' items. Processing...';
+    setProgress(progress, { progress: 40, message: 'Found ' + allItems.length + ' items. Processing...' });
+    addProgressEvent(progress, 'info', 'Found ' + allItems.length + ' items');
 
+    setProgress(progress, { phase: 'Capacities', message: 'Fetching capacities...' });
     const capacities = await pbi.getCapacities().catch(() => []);
     ensureNotCancelled(progress);
 
@@ -171,8 +418,7 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       }
     }
 
-    progress.message = 'Building workspace details...';
-    progress.progress = 60;
+    setProgress(progress, { phase: 'Workspace details', message: 'Building workspace details...', progress: 60 });
     ensureNotCancelled(progress);
 
     const workspaceDetails = [];
@@ -244,15 +490,17 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       });
     }
 
-    progress.progress = 80;
-    progress.message = 'Fetching workspace users...';
+    setProgress(progress, { phase: 'Workspace access', progress: 80, message: 'Fetching workspace users...' });
     const batchSize = 10;
     let usersFetched = 0;
+    let userFetchFailures = 0;
     for (let i = 0; i < workspaces.length; i += batchSize) {
       ensureNotCancelled(progress);
       const batch = workspaces.slice(i, i + batchSize);
+      setProgress(progress, { detail: 'Reading access for ' + batch.map(ws => ws.displayName || ws.name || ws.id).slice(0, 3).join(', ') + (batch.length > 3 ? ' and ' + (batch.length - 3) + ' more' : '') });
       const userResults = await Promise.allSettled(batch.map((ws) => pbi.getWorkspaceUsers(ws.id)));
       ensureNotCancelled(progress);
+      userFetchFailures += userResults.filter(r => r.status === 'rejected').length;
       for (let j = 0; j < userResults.length; j += 1) {
         if (userResults[j].status === 'fulfilled') {
           const users = userResults[j].value;
@@ -270,23 +518,37 @@ async function runAnalysis(runId, sp, authOptions = {}) {
         }
       }
       usersFetched = Math.min(i + batchSize, workspaces.length);
-      progress.current = usersFetched;
-      progress.progress = 80 + Math.round((usersFetched / Math.max(workspaces.length, 1)) * 10);
-      progress.message = 'Fetching users: ' + usersFetched + ' / ' + workspaces.length + ' workspaces...';
+      setProgress(progress, {
+        current: usersFetched,
+        progress: 80 + Math.round((usersFetched / Math.max(workspaces.length, 1)) * 10),
+        message: 'Fetching users: ' + usersFetched + ' / ' + workspaces.length + ' workspaces...',
+      });
+    }
+    if (userFetchFailures) {
+      addProgressEvent(progress, 'warning', userFetchFailures + ' workspace(s) would not return their access list — usually missing permission');
     }
 
     // ── OneLake Storage Scan ──
-    progress.progress = 90;
-    progress.message = 'Scanning OneLake storage sizes...';
+    // The longest phase by far: one call per storage item. It reports the workspace
+    // and item being read so a slow tenant looks slow rather than frozen.
+    setProgress(progress, { phase: 'OneLake storage', progress: 90, message: 'Scanning OneLake storage sizes...' });
     let totalStorageSize = 0;
     let totalStorageFiles = 0;
     let storageScannedCount = 0;
+    let storageItemsScanned = 0;
+    let storageItemsSkipped = 0;
 
     const storageTypes = new Set([
       'Lakehouse', 'Warehouse', 'SQLDatabase', 'SemanticModel', 'Dataset',
       'Dataflow', 'DataflowGen2', 'KQLDatabase', 'Notebook',
       'Environment', 'EventStream', 'DataPipeline', 'SparkJobDefinition',
     ]);
+
+    const totalStorageItems = workspaceDetails.reduce(
+      (sum, wsDetail) => sum + (wsDetail.items || []).filter(it => storageTypes.has(it.type)).length,
+      0
+    );
+    addProgressEvent(progress, 'info', 'Scanning storage for ' + totalStorageItems + ' item(s) across ' + workspaceDetails.length + ' workspaces');
 
     for (let i = 0; i < workspaceDetails.length; i++) {
       ensureNotCancelled(progress);
@@ -299,6 +561,10 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       const wsItemSizes = {};
 
       for (const item of storageItems) {
+        ensureNotCancelled(progress);
+        setProgress(progress, {
+          detail: wsDetail.name + ' → ' + (item.name || item.type || 'item') + ' (' + (storageItemsScanned + 1) + ' of ~' + totalStorageItems + ')',
+        });
         try {
           const result = await pbi.getItemStorageSize(wsDetail.id, item.id);
           if (result.success && result.totalSize > 0) {
@@ -306,7 +572,14 @@ async function runAnalysis(runId, sp, authOptions = {}) {
             wsStorageSize += result.totalSize;
             wsStorageFiles += result.fileCount;
           }
-        } catch { /* skip items that fail */ }
+        } catch {
+          // Items without OneLake storage or without permission are expected; they
+          // are counted so a scan that skips everything is visibly different from
+          // one that finds nothing.
+          storageItemsSkipped += 1;
+          progress.counters.skippedItems += 1;
+        }
+        storageItemsScanned += 1;
       }
 
       wsDetail.storageSize = wsStorageSize;
@@ -317,8 +590,13 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       totalStorageSize += wsStorageSize;
       totalStorageFiles += wsStorageFiles;
 
-      progress.progress = 90 + Math.round(((i + 1) / workspaceDetails.length) * 10);
-      progress.message = 'Scanning storage: ' + (i + 1) + ' / ' + workspaceDetails.length + ' workspaces...';
+      setProgress(progress, {
+        progress: 90 + Math.round(((i + 1) / workspaceDetails.length) * 10),
+        message: 'Scanning storage: ' + (i + 1) + ' / ' + workspaceDetails.length + ' workspaces...',
+      });
+    }
+    if (storageItemsSkipped) {
+      addProgressEvent(progress, 'info', storageItemsSkipped + ' item(s) had no readable OneLake storage and were skipped');
     }
 
     const summary = {
@@ -371,7 +649,98 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       }
     }
 
-    const resultsJson = JSON.stringify({ summary, workspaces: workspaceDetails });
+    // ── Artifact details ──
+    // Collected here so opening an artifact later is a database read rather than a
+    // burst of API calls. This is the second-longest phase, so it is bounded and
+    // can be switched off.
+    if (COLLECT_DETAILS) {
+      setProgress(progress, { phase: 'Artifact details', message: 'Collecting artifact details...', detail: '' });
+
+      const nameIndex = new Map();
+      for (const wsDetail of workspaceDetails) {
+        for (const detailItem of wsDetail.items || []) {
+          if (detailItem.id) nameIndex.set(detailItem.id, detailItem.name || null);
+        }
+      }
+
+      const targets = [];
+      for (const wsDetail of workspaceDetails) {
+        for (const detailItem of wsDetail.items || []) {
+          if (!detailItem.id) continue;
+          targets.push({ workspace: wsDetail, item: detailItem });
+        }
+      }
+      const limited = DETAIL_MAX_ITEMS > 0 && targets.length > DETAIL_MAX_ITEMS;
+      const scoped = limited ? targets.slice(0, DETAIL_MAX_ITEMS) : targets;
+      if (limited) {
+        addProgressEvent(progress, 'warning',
+          'Collecting details for the first ' + DETAIL_MAX_ITEMS + ' of ' + targets.length + ' items (ANALYSIS_DETAIL_MAX_ITEMS). The rest load on first view.');
+      }
+      addProgressEvent(progress, 'info', 'Collecting details for ' + scoped.length + ' artifact(s)');
+
+      let detailsCollected = 0;
+      let detailsFailed = 0;
+      for (let i = 0; i < scoped.length; i += DETAIL_CONCURRENCY) {
+        ensureNotCancelled(progress);
+        const batch = scoped.slice(i, i + DETAIL_CONCURRENCY);
+        setProgress(progress, {
+          detail: batch[0].workspace.name + ' → ' + (batch[0].item.name || batch[0].item.type) +
+            ' (' + (i + 1) + ' of ' + scoped.length + ')',
+        });
+
+        await Promise.all(batch.map(async ({ workspace: wsDetail, item: detailItem }) => {
+          try {
+            const details = await buildItemDetails(pbi, {
+              workspaceId: wsDetail.id,
+              itemId: detailItem.id,
+              itemType: detailItem.type || '',
+              itemName: detailItem.name || 'Item',
+              workspaceName: wsDetail.name || null,
+              resolveName: id => nameIndex.get(id) || null,
+              // OneLake sizes are already gathered by the storage phase; repeating
+              // the listing here would roughly double the run for no new data.
+              includeOneLake: false,
+            });
+            await db.saveItemDetailsCache({
+              workspaceId: wsDetail.id,
+              itemId: detailItem.id,
+              itemType: details.item.type,
+              itemName: details.item.name,
+              payload: JSON.stringify(details),
+              runId,
+            });
+            detailsCollected += 1;
+          } catch (detailErr) {
+            detailsFailed += 1;
+            if (detailErr.isCancelled) throw detailErr;
+          }
+        }));
+
+        setProgress(progress, {
+          message: 'Collecting artifact details: ' + Math.min(i + DETAIL_CONCURRENCY, scoped.length) + ' / ' + scoped.length + '...',
+        });
+      }
+      addProgressEvent(progress, detailsFailed ? 'warning' : 'info',
+        'Stored details for ' + detailsCollected + ' artifact(s)' + (detailsFailed ? ', ' + detailsFailed + ' could not be read' : ''));
+    }
+
+    // Snapshot tenant settings with the run so they can be compared over time.
+    // A service principal without Tenant.Read.All still produces a valid run; the
+    // snapshot is simply absent, and comparisons say so rather than reporting the
+    // settings as deleted.
+    setProgress(progress, { phase: 'Tenant settings', message: 'Capturing tenant settings...', detail: '' });
+    let tenantSettings = null;
+    try {
+      tenantSettings = await pbi.getTenantSettings();
+      addProgressEvent(progress, 'info', 'Captured ' + tenantSettings.length + ' tenant setting(s)');
+    } catch (tenantErr) {
+      console.warn('[Analysis] Tenant settings not captured for run', runId, tenantErr.message);
+      addProgressEvent(progress, 'warning', 'Tenant settings not captured: ' + tenantErr.message);
+    }
+
+    const analysisResults = { summary, workspaces: workspaceDetails };
+    if (tenantSettings) analysisResults.tenantSettings = tenantSettings;
+    const resultsJson = JSON.stringify(analysisResults);
 
     await db.updateAnalysisRun(runId, {
       status: 'completed',
@@ -384,13 +753,36 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       resultsJson,
     });
 
-    progress.status = 'completed';
-    progress.progress = 100;
-    progress.message = 'Analysis complete!';
+    // Materialize the Governance Overview totals for this run so comparisons do not
+    // have to parse results_json. Failing here must not fail an otherwise good run.
+    try {
+      await db.saveRunTotals(
+        runId,
+        { tenantId: sp.tenant_id, spId: sp.id, spName: sp.name, startedAt: new Date() },
+        computeRunTotals(analysisResults)
+      );
+    } catch (totalsErr) {
+      console.warn('[Analysis] Could not store run totals for run', runId, totalsErr.message);
+    }
+
+    setProgress(progress, {
+      status: 'completed',
+      progress: 100,
+      phase: 'Complete',
+      detail: '',
+      message: 'Analysis complete!',
+    });
+    addProgressEvent(progress, 'info',
+      'Finished in ' + Math.round((Date.now() - progress.startedAt) / 1000) + 's after ' + progress.counters.apiCalls + ' API call(s)');
   } catch (err) {
     const cancelled = !!err.isCancelled;
-    progress.status = cancelled ? 'cancelled' : 'failed';
-    progress.message = cancelled ? 'Analysis cancelled.' : 'Error: ' + err.message;
+    setProgress(progress, {
+      status: cancelled ? 'cancelled' : 'failed',
+      phase: cancelled ? 'Cancelled' : 'Failed',
+      message: cancelled ? 'Analysis cancelled.' : 'Error: ' + err.message,
+    });
+    addProgressEvent(progress, cancelled ? 'info' : 'error',
+      cancelled ? 'Cancelled by user' : 'Run failed: ' + err.message);
     try {
       await db.updateAnalysisRun(runId, {
         status: cancelled ? 'cancelled' : 'failed',
@@ -406,6 +798,7 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       // ignore
     }
   }
+  });
 
   setTimeout(() => activeAnalyses.delete(runId), 5 * 60 * 1000);
 }

@@ -1,4 +1,5 @@
 <%- include('../partials/header') %>
+
 <div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
   <div>
     <h2><i class="bi bi-boxes me-2"></i><%= artifactType %> Artifacts</h2>
@@ -30,7 +31,11 @@
         <% artifacts.forEach(function(artifact) { %>
           <tr data-filter="<%= [artifact.name || '', artifact.workspace || '', (artifact.creator && artifact.creator.name ? artifact.creator.name : artifact.creator || ''), artifact.type || '', artifact.description || '', artifact.state || ''].join(' ').toLowerCase() %>">
             <td>
-              <strong><%= artifact.name || 'Unnamed' %></strong>
+              <% if (artifact.id && artifact.workspaceId) { %>
+                <a href="#" onclick="showItemDetails('<%= artifact.workspaceId %>', '<%= artifact.id %>', '<%= (artifact.name || 'Unnamed').replace(/'/g, "\\'") %>', '<%= artifact.type || '' %>'); return false;"><strong><%= artifact.name || 'Unnamed' %></strong></a>
+              <% } else { %>
+                <strong><%= artifact.name || 'Unnamed' %></strong>
+              <% } %>
               <% if (artifact.type && artifactType === 'All') { %>
                 <div><span class="badge bg-secondary mt-1"><%= artifact.type %></span></div>
               <% } %>
@@ -50,4 +55,5 @@
     </table>
   </div>
 </div>
+<%- include('../partials/item-details') %>
 <%- include('../partials/footer') %>

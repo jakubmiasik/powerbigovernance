@@ -1,223 +1,265 @@
 <%- include('../partials/header') %>
+<%
+  var data = insights || { workspaces: [], byFinding: {}, thresholds: {}, flaggedCount: 0, healthyCount: 0, totalCount: 0 };
+  var rows = data.workspaces || [];
+  var thresholds = data.thresholds || {};
+  var runId = run && run.id ? run.id : null;
+
+  function formatBytesWs(bytes) {
+    if (!bytes || bytes === 0) return '-';
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+  }
+  function severityColor(severity) {
+    return severity === 'high' ? 'danger' : severity === 'medium' ? 'warning' : 'secondary';
+  }
+%>
+
 <div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
   <div>
-    <h2><i class="bi bi-collection me-2"></i>Workspaces</h2>
-    <p class="text-muted mb-0">Browse all Power BI and Fabric workspaces.</p>
+    <h2><i class="bi bi-clipboard-check me-2"></i>Workspace Triage</h2>
+    <p class="text-muted mb-0">Workspaces ranked by what needs attention. For the full inventory see <a href="/governance">Governance Overview</a>.</p>
   </div>
 </div>
 
-<% if (!workspaces.length) { %>
+<% if (!fromSavedData) { %>
   <div class="alert alert-warning">
     <i class="bi bi-exclamation-triangle me-2"></i>
     No workspace data available. Select a scan from the top bar or <a href="/analysis">run an analysis</a> first.
   </div>
 <% } else { %>
-  <%
-    var activeCount = (stats.byState || {})['Active'] || 0;
-    var otherStates = [];
-    Object.entries(stats.byState || {}).forEach(function(e) { if (e[0] !== 'Active') otherStates.push(e); });
-    var totalStorageSizeWs = workspaces.reduce(function(acc, ws) { return acc + (ws.storageSize || 0); }, 0);
-    function formatBytesListPage(bytes) {
-      if (!bytes || bytes === 0) return '0 B';
-      var units = ['B', 'KB', 'MB', 'GB', 'TB'];
-      var i = Math.floor(Math.log(bytes) / Math.log(1024));
-      return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
-    }
-  %>
+
+  <!-- Finding counts: each card filters the table below -->
   <div class="row g-3 mb-4">
-    <div class="col-sm-3 col-lg-2">
-      <div class="card text-center h-100 stat-card">
-        <div class="card-body py-3">
-          <div class="fs-3 fw-bold" style="color: var(--color-primary);"><%= stats.total %></div>
-          <div class="text-muted small">Total Workspaces</div>
-          <div style="font-size: 0.75rem; color: var(--color-text-muted); margin-top: 0.25rem;">
-            <span class="badge bg-success"><%= activeCount %> Active</span>
-            <% otherStates.forEach(function(e) { %>
-              <span class="badge bg-secondary ms-1"><%= e[1] %> <%= e[0] %></span>
-            <% }) %>
-          </div>
-        </div>
-      </div>
-    </div>
-    <% if (totalStorageSizeWs > 0) { %>
-      <div class="col-sm-3 col-lg-2">
+    <div class="col-sm-6 col-md-4 col-xl-2">
+      <a href="#triage-table-card" class="text-decoration-none text-reset" onclick="setFindingFilter(''); return false;">
         <div class="card text-center h-100 stat-card">
           <div class="card-body py-3">
-            <div class="fs-3 fw-bold" style="color: var(--color-teal);"><%= formatBytesListPage(totalStorageSizeWs) %></div>
-            <div class="text-muted small">Total Storage</div>
-            <div style="font-size: 0.75rem; color: var(--color-text-muted); margin-top: 0.25rem;">
-              <span class="badge bg-info"><%= workspaces.filter(function(w) { return w.storageSize > 0; }).length %> workspaces with data</span>
+            <div class="text-primary mb-2"><i class="bi bi-collection"></i></div>
+            <div class="fs-3 fw-bold text-primary"><%= data.flaggedCount %></div>
+            <div class="small">Need Attention</div>
+            <div class="text-muted" style="font-size:0.7rem;"><%= data.healthyCount %> of <%= data.totalCount %> clean</div>
+          </div>
+        </div>
+      </a>
+    </div>
+    <% findingDefs.forEach(function(def) { var count = (data.byFinding || {})[def.key] || 0; %>
+      <div class="col-sm-6 col-md-4 col-xl-2">
+        <a href="#triage-table-card" class="text-decoration-none text-reset" onclick="setFindingFilter('<%= def.key %>'); return false;" title="<%= def.description %>">
+          <div class="card text-center h-100 stat-card <%= count === 0 ? 'opacity-50' : '' %>">
+            <div class="card-body py-3">
+              <div class="text-<%= severityColor(def.severity) %> mb-2"><i class="bi bi-<%= def.icon %>"></i></div>
+              <div class="fs-3 fw-bold text-<%= severityColor(def.severity) %>"><%= count %></div>
+              <div class="small"><%= def.label %></div>
             </div>
           </div>
-        </div>
-      </div>
-    <% } %>
-    <% Object.entries(stats.byLicense || {}).forEach(function(entry) { var license = entry[0]; var count = entry[1]; var color = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
-      <div class="col-sm-3 col-lg-2">
-        <div class="card text-center h-100 stat-card">
-          <div class="card-body py-3">
-            <div class="fs-3 fw-bold text-<%= color %>"><%= count %></div>
-            <div class="text-muted small"><%= license %></div>
-          </div>
-        </div>
+        </a>
       </div>
     <% }) %>
   </div>
 
-  <% if (Object.keys(stats.bySku || {}).length > 0) { %>
-    <div class="row g-3 mb-4">
-      <% Object.entries(stats.bySku || {}).sort(function(a,b) { return b[1] - a[1]; }).forEach(function(entry) { var sku = entry[0]; var count = entry[1]; %>
-        <div class="col-sm-3 col-lg-2">
-          <div class="card text-center h-100 stat-card">
-            <div class="card-body py-2">
-              <div class="fs-4 fw-bold"><%= count %></div>
-              <div class="text-muted small"><code><%= sku %></code></div>
-            </div>
+  <div class="card mb-4">
+    <div class="card-header"><i class="bi bi-sliders me-2"></i>Thresholds</div>
+    <div class="card-body py-3">
+      <form method="get" action="/workspaces" class="row g-2 align-items-end">
+        <% if (runId) { %><input type="hidden" name="runId" value="<%= runId %>"><% } %>
+        <div class="col-auto">
+          <label class="form-label small" for="staleDaysInput">Stale after (days)</label>
+          <input type="number" min="1" max="3650" class="form-control form-control-sm" style="width:120px;" id="staleDaysInput" name="staleDays" value="<%= thresholds.staleDays %>">
+        </div>
+        <div class="col-auto">
+          <label class="form-label small" for="overSharedInput">Broadly shared at (principals)</label>
+          <input type="number" min="1" max="10000" class="form-control form-control-sm" style="width:160px;" id="overSharedInput" name="overSharedUsers" value="<%= thresholds.overSharedUsers %>">
+        </div>
+        <div class="col-auto">
+          <button type="submit" class="btn btn-sm btn-primary"><i class="bi bi-arrow-repeat me-1"></i>Apply</button>
+        </div>
+        <div class="col-12">
+          <div class="form-text">
+            <i class="bi bi-info-circle me-1"></i>Staleness is measured against the scan date<% if (data.referenceDate) { %> (<%= new Date(data.referenceDate).toLocaleDateString() %>)<% } %>,
+            not today, so re-opening an older scan gives the same answer it gave then.
+            <% if (!data.orphanDetectionAvailable) { %>
+              <br><i class="bi bi-exclamation-triangle me-1 text-warning"></i>Orphaned-content detection is off: this scan captured no workspace users to compare creators against.
+            <% } %>
           </div>
         </div>
-      <% }) %>
+      </form>
     </div>
-  <% } %>
+  </div>
 
-  <div class="card" id="workspace-inventory-card">
+  <div class="card mb-4" id="triage-table-card">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-      <span><i class="bi bi-table me-2"></i>Workspace Inventory (<%= stats.total %>)</span>
-      <div class="d-flex gap-2 align-items-center flex-wrap">
-        <select class="form-select form-select-sm" id="sortMetric" style="max-width: 180px;" onchange="renderWorkspaceInventory()">
-          <option value="name">Sort: Name</option>
-          <option value="state">Sort: State</option>
-          <option value="license">Sort: License</option>
-          <option value="storage">Sort: Storage</option>
-          <option value="reports">Sort: Reports</option>
-          <option value="datasets">Sort: Datasets</option>
-          <option value="items">Sort: Total Items</option>
-        </select>
-        <input type="text" class="form-control form-control-sm" style="max-width: 280px;" placeholder="Filter by workspace, state, license, or SKU..." id="inventoryFilter" oninput="renderWorkspaceInventory()">
+      <div>
+        <span><i class="bi bi-list-ol me-2"></i>Ranked Workspaces</span>
+        <span class="badge bg-light text-dark border ms-2" id="triageFilterLabel">Showing workspaces needing attention</span>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" id="showAllBtn" onclick="toggleShowClean()">Include clean workspaces</button>
+        <input type="text" class="form-control form-control-sm" style="max-width:280px;" placeholder="Filter workspaces..." id="triageSearch" oninput="applyTriageFilter()">
       </div>
     </div>
-    <div class="card-body p-0">
-      <div class="table-responsive" style="max-height: 620px;">
-        <table class="table table-hover table-sm mb-0" id="workspaceInventoryTable">
-          <thead>
-            <tr>
-              <th>Workspace</th>
-              <th>State</th>
-              <th>License</th>
-              <th>SKU</th>
-              <th>Reports</th>
-              <th>Datasets</th>
-              <th>Total Items</th>
-              <th>Storage</th>
-              <th></th>
+    <div class="table-responsive">
+      <table class="table table-hover table-sm mb-0" id="triage-table">
+        <thead>
+          <tr>
+            <th style="width:70px;">Risk</th>
+            <th>Workspace</th>
+            <th>Findings</th>
+            <th>Items</th>
+            <th>Users</th>
+            <th>Admins</th>
+            <th>Last activity</th>
+            <th>Storage</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <% rows.forEach(function(ws, idx) { %>
+            <tr data-filter="<%= (ws.name || '').toLowerCase() %>"
+                data-findings="<%= ws.findings.map(function(f) { return f.key; }).join(' ') %>"
+                data-clean="<%= ws.findings.length ? 'false' : 'true' %>">
+              <td>
+                <% if (ws.score > 0) { %>
+                  <span class="badge bg-<%= severityColor(ws.highestSeverity) %>"><%= ws.score %></span>
+                <% } else { %>
+                  <span class="badge bg-success"><i class="bi bi-check"></i></span>
+                <% } %>
+              </td>
+              <td>
+                <a href="/workspaces/<%= ws.id %><%= runId ? '?runId=' + runId : '' %>"><strong><%= ws.name %></strong></a>
+                <div class="text-muted" style="font-size:0.7rem;">
+                  <%= ws.licenseType %><% if (ws.capacitySku) { %> &middot; <code><%= ws.capacitySku %></code><% } %>
+                  <% if (ws.state && ws.state !== 'Active') { %> &middot; <span class="badge bg-warning"><%= ws.state %></span><% } %>
+                </div>
+              </td>
+              <td>
+                <% if (!ws.findings.length) { %>
+                  <span class="text-muted small">&mdash;</span>
+                <% } else { %>
+                  <% ws.findings.forEach(function(finding) { %>
+                    <span class="badge bg-<%= severityColor(finding.severity) %> me-1 mb-1" title="<%= finding.detail %>">
+                      <i class="bi bi-<%= finding.icon %> me-1"></i><%= finding.label %>
+                    </span>
+                  <% }) %>
+                <% } %>
+              </td>
+              <td><%= ws.totalItems %></td>
+              <td><%= ws.userCount %></td>
+              <td>
+                <%= ws.adminCount %>
+                <% if (ws.adminCount && ws.humanAdminCount !== ws.adminCount) { %>
+                  <span class="text-muted" style="font-size:0.7rem;">(<%= ws.humanAdminCount %> user)</span>
+                <% } %>
+              </td>
+              <td class="small">
+                <% if (ws.lastActivityDays === null) { %>
+                  <span class="text-muted">-</span>
+                <% } else { %>
+                  <%= ws.lastActivityDays %>d ago
+                <% } %>
+              </td>
+              <td class="small"><%= formatBytesWs(ws.storageSize) %></td>
+              <td>
+                <% if (ws.findings.length) { %>
+                  <button class="btn btn-sm btn-outline-primary p-0 px-1" onclick="showWorkspaceFindings(<%= idx %>)" title="Why is this flagged?"><i class="bi bi-info-circle"></i></button>
+                <% } %>
+              </td>
             </tr>
-          </thead>
-          <tbody id="workspaceInventoryBody"></tbody>
-        </table>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Findings detail modal -->
+  <div class="modal fade" id="findingsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h6 class="modal-title" id="findingsModalTitle">Findings</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body" id="findingsModalBody"></div>
+        <div class="modal-footer">
+          <a href="#" class="btn btn-sm btn-primary" id="findingsModalLink"><i class="bi bi-box-arrow-up-right me-1"></i>Open workspace</a>
+        </div>
       </div>
     </div>
   </div>
 
   <script>
-    var workspacesData = <%- JSON.stringify(workspaces) %>;
+  var triageRows = <%- JSON.stringify(rows.map(function(w) { return { id: w.id, name: w.name, findings: w.findings }; })) %>;
+  var findingLabels = <%- JSON.stringify(findingDefs.reduce(function(acc, d) { acc[d.key] = d.label; return acc; }, {})) %>;
+  var triageRunId = <%= runId ? runId : 'null' %>;
+  var activeFinding = '';
+  var showClean = false;
+  var findingsModal;
 
-    function escapeHtml(value) {
-      return String(value || '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    }
+  document.addEventListener('DOMContentLoaded', function() {
+    findingsModal = new bootstrap.Modal(document.getElementById('findingsModal'));
+    applyTriageFilter();
+  });
 
-    function formatStorage(bytes) {
-      if (!bytes || bytes <= 0) return '0 B';
-      var units = ['B', 'KB', 'MB', 'GB', 'TB'];
-      var i = Math.floor(Math.log(bytes) / Math.log(1024));
-      return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
-    }
+  function setFindingFilter(key) {
+    activeFinding = key;
+    if (key) showClean = false;
+    applyTriageFilter();
+  }
 
-    function getLicenseBadgeClass(license) {
-      if (license === 'Fabric') return 'bg-success';
-      if (license === 'Premium') return 'bg-warning';
-      if (license === 'Premium Per User') return 'bg-info';
-      return 'bg-secondary';
-    }
+  function toggleShowClean() {
+    showClean = !showClean;
+    document.getElementById('showAllBtn').textContent = showClean ? 'Hide clean workspaces' : 'Include clean workspaces';
+    applyTriageFilter();
+  }
 
-    function getStateBadgeClass(state) {
-      if (state === 'Active') return 'bg-success';
-      if (state === 'Deleted') return 'bg-danger';
-      return 'bg-secondary';
-    }
-
-    function getFilteredSortedWorkspaces() {
-      var filterText = (document.getElementById('inventoryFilter').value || '').toLowerCase();
-      var sortMetric = document.getElementById('sortMetric').value;
-
-      var filtered = workspacesData.filter(function(ws) {
-        var name = (ws.displayName || ws.name || 'Unnamed');
-        var state = ws.state || '-';
-        var license = ws.licenseType || 'Pro';
-        var sku = ws.capacitySku || '-';
-        var searchable = [name, state, license, sku].join(' ').toLowerCase();
-        return searchable.indexOf(filterText) !== -1;
-      });
-
-      filtered.sort(function(a, b) {
-        var aName = a.displayName || a.name || '';
-        var bName = b.displayName || b.name || '';
-        if (sortMetric === 'name') return aName.localeCompare(bName);
-        if (sortMetric === 'state') return (a.state || '').localeCompare(b.state || '');
-        if (sortMetric === 'license') return (a.licenseType || '').localeCompare(b.licenseType || '');
-        if (sortMetric === 'storage') return (b.storageSize || 0) - (a.storageSize || 0);
-        if (sortMetric === 'reports') return (b.reportCount || 0) - (a.reportCount || 0);
-        if (sortMetric === 'datasets') return (b.datasetCount || 0) - (a.datasetCount || 0);
-        if (sortMetric === 'items') return (b.totalItems || 0) - (a.totalItems || 0);
-        return 0;
-      });
-
-      return filtered;
-    }
-
-    function renderWorkspaceInventory() {
-      var rows = getFilteredSortedWorkspaces();
-      var tbody = document.getElementById('workspaceInventoryBody');
-
-      if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">No workspaces match the current filter.</td></tr>';
-        return;
-      }
-
-      var html = rows.map(function(ws) {
-        var name = ws.displayName || ws.name || 'Unnamed';
-        var state = ws.state || 'Unknown';
-        var license = ws.licenseType || 'Pro';
-        var sku = ws.capacitySku || '-';
-        var reports = ws.reportCount || 0;
-        var datasets = ws.datasetCount || 0;
-        var items = ws.totalItems || 0;
-        var storage = ws.storageSize || 0;
-        var stateBadge = getStateBadgeClass(state);
-        var licenseBadge = getLicenseBadgeClass(license);
-        return ''
-          + '<tr>'
-          + '<td><strong>' + escapeHtml(name) + '</strong></td>'
-          + '<td><span class="badge ' + stateBadge + '">' + escapeHtml(state) + '</span></td>'
-          + '<td><span class="badge ' + licenseBadge + '">' + escapeHtml(license) + '</span></td>'
-          + '<td><code>' + escapeHtml(sku) + '</code></td>'
-          + '<td>' + reports + '</td>'
-          + '<td>' + datasets + '</td>'
-          + '<td>' + items + '</td>'
-          + '<td class="fw-semibold">' + formatStorage(storage) + '</td>'
-          + '<td><a href="/workspaces/' + encodeURIComponent(ws.id) + '" class="btn btn-sm btn-outline-primary">Details</a></td>'
-          + '</tr>';
-      }).join('');
-
-      tbody.innerHTML = html;
-    }
-
-    document.addEventListener('DOMContentLoaded', function() {
-      renderWorkspaceInventory();
+  function applyTriageFilter() {
+    var term = (document.getElementById('triageSearch').value || '').toLowerCase().trim();
+    var shown = 0;
+    document.querySelectorAll('#triage-table tbody tr').forEach(function(row) {
+      var isClean = row.getAttribute('data-clean') === 'true';
+      var matchesText = !term || (row.getAttribute('data-filter') || '').includes(term);
+      var matchesFinding = !activeFinding || (row.getAttribute('data-findings') || '').split(' ').indexOf(activeFinding) !== -1;
+      var matchesClean = showClean || !isClean;
+      var visible = matchesText && matchesFinding && matchesClean;
+      row.style.display = visible ? '' : 'none';
+      if (visible) shown++;
     });
+
+    var label = 'Showing ' + shown + ' workspace' + (shown === 1 ? '' : 's');
+    if (activeFinding) {
+      label += ' — ' + (findingLabels[activeFinding] || activeFinding);
+    } else if (!showClean) {
+      label += ' needing attention';
+    }
+    document.getElementById('triageFilterLabel').textContent = label;
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function showWorkspaceFindings(index) {
+    var ws = triageRows[index];
+    if (!ws) return;
+    document.getElementById('findingsModalTitle').textContent = ws.name;
+    document.getElementById('findingsModalLink').href = '/workspaces/' + ws.id + (triageRunId ? '?runId=' + triageRunId : '');
+
+    var html = ws.findings.map(function(f) {
+      var color = f.severity === 'high' ? 'danger' : f.severity === 'medium' ? 'warning' : 'secondary';
+      return '<div class="mb-3">' +
+        '<div class="d-flex align-items-center gap-2 mb-1">' +
+        '<span class="badge bg-' + color + '"><i class="bi bi-' + f.icon + ' me-1"></i>' + escapeHtml(f.label) + '</span>' +
+        '<span class="text-muted small">' + escapeHtml(f.severity) + '</span></div>' +
+        '<div class="small mb-1">' + escapeHtml(f.detail) + '</div>' +
+        '<div class="text-muted" style="font-size:0.75rem;">' + escapeHtml(f.description) + '</div>' +
+        '</div>';
+    }).join('');
+    document.getElementById('findingsModalBody').innerHTML = html || '<p class="text-muted mb-0">No findings.</p>';
+    findingsModal.show();
+  }
   </script>
 <% } %>
+
 <%- include('../partials/footer') %>

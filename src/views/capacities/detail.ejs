@@ -252,7 +252,7 @@
 
     <% if (schedules.length) { %>
       <table class="table table-sm table-hover mb-0">
-        <thead><tr><th>Action</th><th>Frequency</th><th>Time (Local)</th><th>Time (UTC)</th><th>Timezone</th><th>Days</th><th>Enabled</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Action</th><th>Frequency</th><th>Time (Local)</th><th>Timezone</th><th>Time (UTC)</th><th>Days</th><th>Enabled</th><th>Actions</th></tr></thead>
         <tbody>
           <% schedules.forEach(function(s) {
             var dayLabel = '-';
@@ -264,9 +264,9 @@
             <tr>
               <td><span class="badge bg-<%= s.action === 'resume' ? 'success' : 'warning' %>"><%= s.action === 'resume' ? 'Resume' : 'Pause' %></span></td>
               <td><%= s.schedule_type %></td>
-              <td><%= s.schedule_hour != null ? String(s.schedule_hour).padStart(2, '0') + ':' + String(s.schedule_minute || 0).padStart(2, '0') : '-' %></td>
-              <td><%= s.schedule_hour_utc != null ? String(s.schedule_hour_utc).padStart(2, '0') + ':' + String(s.schedule_minute_utc || 0).padStart(2, '0') : '-' %></td>
+              <td><%= s.schedule_type === 'hourly' ? 'Every hour at :' + String(s.schedule_minute || 0).padStart(2, '0') : (s.schedule_hour != null ? String(s.schedule_hour).padStart(2, '0') + ':' + String(s.schedule_minute || 0).padStart(2, '0') : '-') %></td>
               <td><span class="badge bg-light text-dark"><%= s.timezone || 'UTC' %></span></td>
+              <td><%= s.schedule_minute_utc != null ? (s.schedule_type === 'hourly' ? 'Every hour at :' + String(s.schedule_minute_utc || 0).padStart(2, '0') : (s.schedule_hour_utc != null ? String(s.schedule_hour_utc).padStart(2, '0') + ':' + String(s.schedule_minute_utc || 0).padStart(2, '0') : '-')) : '-' %></td>
               <td><%= dayLabel %></td>
               <td><div class="form-check form-switch"><input class="form-check-input" type="checkbox" <%= s.enabled ? 'checked' : '' %> onchange="toggleSchedule(<%= s.id %>, this.checked)"></div></td>
               <td>
@@ -521,7 +521,8 @@ async function addSchedule() {
     });
     var data = await resp.json();
     if (data.success) {
-      showModal('Schedule Added', '<i class="bi bi-check-circle text-success fs-1"></i><p class="mt-2">Schedule created successfully.</p><p class="text-muted small">' + body.action + ' — ' + body.scheduleType + ' at ' + String(body.hour).padStart(2,'0') + ':' + String(body.minute).padStart(2,'0') + ' ' + body.timezone + '</p>');
+      var utcLabel = data.utcSchedule && data.utcSchedule.label ? data.utcSchedule.label : 'UTC time will be shown after reload';
+      showModal('Schedule Added', '<i class="bi bi-check-circle text-success fs-1"></i><p class="mt-2">Schedule created successfully.</p><p class="text-muted small mb-1">Local: ' + body.action + ' — ' + body.scheduleType + ' at ' + String(body.hour).padStart(2,'0') + ':' + String(body.minute).padStart(2,'0') + ' ' + body.timezone + '</p><p class="text-muted small">Scheduler UTC: <strong>' + utcLabel + '</strong></p>');
       reloadPageWithMessage('Schedule created. Reloading...', 1500);
     } else {
       showModal('Error', '<i class="bi bi-x-circle text-danger fs-2"></i><p class="mt-2">' + data.message + '</p>');
@@ -562,6 +563,7 @@ async function saveEditSchedule() {
       reloadPageWithMessage('Schedule updated. Reloading...', 800);
     } else {
       showToast(data.message || 'Update failed', 'error');
+      showModal('Update failed', '<i class="bi bi-x-circle text-danger fs-2"></i><p class="mt-2">' + (data.message || 'Update failed') + '</p>');
     }
   } catch (e) { showToast(e.message, 'error'); }
 }

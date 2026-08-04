@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
+const { buildUser360, summarizeTenantSettings } = require('../services/runMetricsService');
 
 function normalizeArtifactType(type) {
   return (type || 'all').trim().toLowerCase();
@@ -53,41 +54,20 @@ async function loadGlobalResults(res) {
   return { run: fullRun, results };
 }
 
-function buildUser360(workspaces) {
-  const userMap = new Map();
-
-  function ensureUser(key, name, upn) {
-    if (!userMap.has(key)) {
-      userMap.set(key, { name: name || upn || 'Unknown', upn: upn || '', items: [], workspaces: [], workspaceKeys: new Set() });
-    }
-    return userMap.get(key);
+// Tenant settings come from the live Fabric Admin API, not from a saved run, so
+// they use the service principal behind the selected run when there is one.
+async function getPbiServiceForTenant(res) {
+  const globalRun = res ? res.locals.globalRun : null;
+  let sp;
+  if (globalRun && globalRun.sp_id) {
+    sp = await db.getServicePrincipalById(globalRun.sp_id);
   }
-
-  for (const workspace of workspaces) {
-    const workspaceName = workspace.name || 'Unnamed Workspace';
-    for (const workspaceUser of workspace.users || []) {
-      const userKey = (workspaceUser.email || workspaceUser.name || workspaceName).toLowerCase();
-      const user = ensureUser(userKey, workspaceUser.name, workspaceUser.email);
-      const workspaceKey = workspaceName + '::' + (workspaceUser.role || '');
-      if (!user.workspaceKeys.has(workspaceKey)) {
-        user.workspaceKeys.add(workspaceKey);
-        user.workspaces.push({ name: workspaceName, role: workspaceUser.role || 'Unknown' });
-      }
-    }
-
-    for (const item of workspace.items || []) {
-      const creatorName = item.creator?.name || item.creator?.upn;
-      const creatorUpn = item.creator?.upn || '';
-      if (!creatorName && !creatorUpn) continue;
-      const userKey = (creatorUpn || creatorName).toLowerCase();
-      const user = ensureUser(userKey, creatorName, creatorUpn);
-      user.items.push({ name: item.name || 'Unnamed', type: item.type || '-', workspace: workspaceName });
-    }
+  if (!sp) {
+    const sps = await db.getServicePrincipals();
+    if (!sps.length) throw new Error('No service principal configured. Go to Settings to add one.');
+    sp = sps[0];
   }
-
-  return Array.from(userMap.values())
-    .map(user => { delete user.workspaceKeys; return user; })
-    .sort((a, b) => (a.name || a.upn || '').localeCompare(b.name || b.upn || ''));
+  return createPowerBIService(sp);
 }
 
 router.get('/', async (req, res) => {
@@ -145,6 +125,8 @@ router.get('/artifacts', async (req, res) => {
       for (const item of workspace.items || []) {
         if (!matchesArtifactType(item, requestedType)) continue;
         artifacts.push({
+          id: item.id || null,
+          workspaceId: workspace.id || null,
           type: item.type || '-', name: item.name || 'Unnamed',
           workspace: workspace.name || 'Unnamed Workspace',
           creator: item.creator?.upn || item.creator?.name || '-',
@@ -161,6 +143,46 @@ router.get('/artifacts', async (req, res) => {
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
+  }
+});
+
+// Tenant settings summary for the Governance Overview cards. Loaded over AJAX so a
+// slow or unauthorized admin API call never delays the rest of the page.
+router.get('/tenant-settings/data', async (req, res) => {
+  try {
+    const pbi = await getPbiServiceForTenant(res);
+    const settings = await pbi.getTenantSettings();
+    res.json({ success: true, ...summarizeTenantSettings(settings) });
+  } catch (err) {
+    const detail = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+    res.json({ success: false, message: detail });
+  }
+});
+
+router.get('/tenant-settings', async (req, res) => {
+  try {
+    const pbi = await getPbiServiceForTenant(res);
+    const settings = await pbi.getTenantSettings();
+    const sorted = [...settings].sort((a, b) =>
+      (a.tenantSettingGroup || 'Ungrouped').localeCompare(b.tenantSettingGroup || 'Ungrouped')
+      || (a.title || a.settingName || '').localeCompare(b.title || b.settingName || '')
+    );
+    res.render('governance/tenant-settings', {
+      title: 'Tenant Settings',
+      user: req.user,
+      settings: sorted,
+      summary: summarizeTenantSettings(settings),
+      error: null,
+    });
+  } catch (err) {
+    const detail = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+    res.render('governance/tenant-settings', {
+      title: 'Tenant Settings',
+      user: req.user,
+      settings: [],
+      summary: summarizeTenantSettings([]),
+      error: detail,
+    });
   }
 });
 

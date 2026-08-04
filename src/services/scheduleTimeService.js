@@ -129,4 +129,5 @@ function convertScheduleToUtc({ scheduleType, hour, minute, day, timezone }) {
 module.exports = {
   normalizeTimezone,
   convertScheduleToUtc,
+  getTimeInTimezone,
 };
