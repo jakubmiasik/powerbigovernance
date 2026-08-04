@@ -6,6 +6,8 @@ const { SecretClient } = require('@azure/keyvault-secrets');
 const kvClientCache = new Map(); // kvName → SecretClient
 const kvSecretCache = new Map(); // `kvName|secretName` → { value, expiresAt }
 const KV_SECRET_TTL = 60 * 60 * 1000; // re-fetch secret every hour
+const PBI_DELEGATED_SCOPES = ['https://analysis.windows.net/powerbi/api/Tenant.ReadWrite.All'];
+const KV_DELEGATED_SCOPES = ['https://vault.azure.net/user_impersonation'];
 
 function getKvClient(keyVaultName) {
   if (!kvClientCache.has(keyVaultName)) {
@@ -15,27 +17,84 @@ function getKvClient(keyVaultName) {
   return kvClientCache.get(keyVaultName);
 }
 
-async function getSecretFromKeyVault(keyVaultName, secretName) {
+function createDelegatedTokenCredential(accessToken) {
+  return {
+    async getToken() {
+      return {
+        token: accessToken,
+        expiresOnTimestamp: Date.now() + (50 * 60 * 1000),
+      };
+    },
+  };
+}
+
+function isKeyVaultAuthorizationError(err) {
+  const status = err?.statusCode || err?.status || err?.code;
+  if (status === 401 || status === 403) return true;
+  const message = (err?.message || '').toLowerCase();
+  return message.includes('forbidden') || message.includes('unauthorized') || message.includes('permission');
+}
+
+function createKeyVaultAuthRequiredError(keyVaultName, authUrl) {
+  const message = authUrl
+    ? `Managed identity cannot access Key Vault '${keyVaultName}'. Authenticate as a user with Key Vault access: ${authUrl}`
+    : `Managed identity cannot access Key Vault '${keyVaultName}'. Authenticate as a user with Key Vault access in Settings.`;
+  const err = new Error(message);
+  err.code = 'KEYVAULT_USER_AUTH_REQUIRED';
+  if (authUrl) err.keyVaultAuthUrl = authUrl;
+  return err;
+}
+
+async function getSecretFromKeyVault(keyVaultName, secretName, options = {}) {
   const cacheKey = `${keyVaultName}|${secretName}`;
   const cached = kvSecretCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.value;
   }
-  const client = getKvClient(keyVaultName);
-  const secret = await client.getSecret(secretName);
-  if (!secret || !secret.value) {
-    throw new Error(`Secret '${secretName}' not found in Key Vault '${keyVaultName}'.`);
+
+  try {
+    const client = getKvClient(keyVaultName);
+    const secret = await client.getSecret(secretName);
+    if (!secret || !secret.value) {
+      throw new Error(`Secret '${secretName}' not found in Key Vault '${keyVaultName}'.`);
+    }
+    kvSecretCache.set(cacheKey, { value: secret.value, expiresAt: Date.now() + KV_SECRET_TTL });
+    return secret.value;
+  } catch (miError) {
+    if (!isKeyVaultAuthorizationError(miError)) {
+      throw miError;
+    }
+
+    if (options.keyVaultDelegatedToken) {
+      try {
+        const delegatedClient = new SecretClient(
+          `https://${keyVaultName}.vault.azure.net`,
+          createDelegatedTokenCredential(options.keyVaultDelegatedToken)
+        );
+        const secret = await delegatedClient.getSecret(secretName);
+        if (!secret || !secret.value) {
+          throw new Error(`Secret '${secretName}' not found in Key Vault '${keyVaultName}'.`);
+        }
+        kvSecretCache.set(cacheKey, { value: secret.value, expiresAt: Date.now() + KV_SECRET_TTL });
+        return secret.value;
+      } catch (delegatedError) {
+        if (isKeyVaultAuthorizationError(delegatedError)) {
+          throw createKeyVaultAuthRequiredError(keyVaultName, options.keyVaultAuthUrl);
+        }
+        throw delegatedError;
+      }
+    }
+
+    throw createKeyVaultAuthRequiredError(keyVaultName, options.keyVaultAuthUrl);
   }
-  kvSecretCache.set(cacheKey, { value: secret.value, expiresAt: Date.now() + KV_SECRET_TTL });
-  return secret.value;
 }
 
 // Resolve the client secret for a SP config — ALWAYS from Key Vault
-async function resolveClientSecret(spConfig) {
+async function resolveClientSecret(spConfig, options = {}) {
   if (!spConfig.key_vault_name || !spConfig.key_vault_secret_name) {
     throw new Error('Service principal must have Key Vault configured. Open Settings and set the Key Vault Name and Secret Name.');
   }
-  return getSecretFromKeyVault(spConfig.key_vault_name, spConfig.key_vault_secret_name);
+  return getSecretFromKeyVault(spConfig.key_vault_name, spConfig.key_vault_secret_name, options);
 }
 
 // ── Cache MSAL apps by config hash to support multiple SPs ──
@@ -45,12 +104,12 @@ function getConfigHash(cfg) {
   return `${cfg.clientId}|${cfg.clientSecret}|${cfg.tenantId}`;
 }
 
-async function getConfidentialClient(spConfig) {
+async function getConfidentialClient(spConfig, options = {}) {
   if (!spConfig || !spConfig.client_id || !spConfig.tenant_id) {
     throw new Error('Service principal is not configured. Go to Settings to add one.');
   }
 
-  const clientSecret = await resolveClientSecret(spConfig);
+  const clientSecret = await resolveClientSecret(spConfig, options);
   const hash = getConfigHash({ clientId: spConfig.client_id, clientSecret, tenantId: spConfig.tenant_id });
 
   if (appCache.has(hash)) {
@@ -68,8 +127,8 @@ async function getConfidentialClient(spConfig) {
   return app;
 }
 
-async function getAccessTokenForSP(spConfig) {
-  const app = await getConfidentialClient(spConfig);
+async function getAccessTokenForSP(spConfig, options = {}) {
+  const app = await getConfidentialClient(spConfig, options);
   const result = await app.acquireTokenByClientCredential({
     scopes: ['https://analysis.windows.net/powerbi/api/.default'],
   });
@@ -77,8 +136,8 @@ async function getAccessTokenForSP(spConfig) {
   return result.accessToken;
 }
 
-async function getFabricTokenForSP(spConfig) {
-  const app = await getConfidentialClient(spConfig);
+async function getFabricTokenForSP(spConfig, options = {}) {
+  const app = await getConfidentialClient(spConfig, options);
   const result = await app.acquireTokenByClientCredential({
     scopes: ['https://api.fabric.microsoft.com/.default'],
   });
@@ -86,8 +145,8 @@ async function getFabricTokenForSP(spConfig) {
   return result.accessToken;
 }
 
-async function getGraphTokenForSP(spConfig) {
-  const app = await getConfidentialClient(spConfig);
+async function getGraphTokenForSP(spConfig, options = {}) {
+  const app = await getConfidentialClient(spConfig, options);
   const result = await app.acquireTokenByClientCredential({
     scopes: ['https://graph.microsoft.com/.default'],
   });
@@ -95,8 +154,8 @@ async function getGraphTokenForSP(spConfig) {
   return result.accessToken;
 }
 
-async function getOneLakeTokenForSP(spConfig) {
-  const app = await getConfidentialClient(spConfig);
+async function getOneLakeTokenForSP(spConfig, options = {}) {
+  const app = await getConfidentialClient(spConfig, options);
   const result = await app.acquireTokenByClientCredential({
     scopes: ['https://storage.azure.com/.default'],
   });
@@ -104,8 +163,8 @@ async function getOneLakeTokenForSP(spConfig) {
   return result.accessToken;
 }
 
-async function getAzureManagementTokenForSP(spConfig) {
-  const app = await getConfidentialClient(spConfig);
+async function getAzureManagementTokenForSP(spConfig, options = {}) {
+  const app = await getConfidentialClient(spConfig, options);
   const result = await app.acquireTokenByClientCredential({
     scopes: ['https://management.azure.com/.default'],
   });
@@ -137,7 +196,7 @@ function getDelegatedClient() {
 function getDelegatedAuthUrl(redirectUri, state) {
   const app = getDelegatedClient();
   return app.getAuthCodeUrl({
-    scopes: ['https://analysis.windows.net/powerbi/api/Tenant.ReadWrite.All'],
+    scopes: PBI_DELEGATED_SCOPES,
     redirectUri, state, prompt: 'consent',
   });
 }
@@ -146,16 +205,41 @@ async function acquireDelegatedToken(code, redirectUri) {
   const app = getDelegatedClient();
   const result = await app.acquireTokenByCode({
     code,
-    scopes: ['https://analysis.windows.net/powerbi/api/Tenant.ReadWrite.All'],
+    scopes: PBI_DELEGATED_SCOPES,
     redirectUri,
   });
   if (!result || !result.accessToken) throw new Error('Failed to acquire delegated Power BI token');
   return result.accessToken;
 }
 
+function getKeyVaultDelegatedAuthUrl(redirectUri, state) {
+  const app = getDelegatedClient();
+  return app.getAuthCodeUrl({
+    scopes: KV_DELEGATED_SCOPES,
+    redirectUri,
+    state,
+    prompt: 'select_account',
+  });
+}
+
+async function acquireKeyVaultDelegatedToken(code, redirectUri) {
+  const app = getDelegatedClient();
+  const result = await app.acquireTokenByCode({
+    code,
+    scopes: KV_DELEGATED_SCOPES,
+    redirectUri,
+  });
+  if (!result || !result.accessToken) throw new Error('Failed to acquire delegated Key Vault token');
+  return {
+    accessToken: result.accessToken,
+    expiresOn: result.expiresOn ? result.expiresOn.toISOString() : null,
+  };
+}
+
 module.exports = {
   getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP,
   getGraphTokenForSP, getOneLakeTokenForSP, resetAuthCache,
   getDelegatedAuthUrl, acquireDelegatedToken,
+  getKeyVaultDelegatedAuthUrl, acquireKeyVaultDelegatedToken,
   getSecretFromKeyVault,
 };

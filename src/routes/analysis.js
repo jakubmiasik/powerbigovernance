@@ -43,7 +43,10 @@ router.post('/run', async (req, res) => {
       runBy: req.user ? req.user.name : 'anonymous',
     });
 
-    runAnalysis(runId, sp);
+    runAnalysis(runId, sp, {
+      keyVaultDelegatedToken: req.session?.keyVaultDelegatedToken?.token || null,
+      keyVaultAuthUrl: `/settings/kv/auth?spId=${encodeURIComponent(String(sp.id))}&returnTo=${encodeURIComponent('/analysis')}`,
+    });
     res.json({ success: true, runId });
   } catch (err) {
     res.json({ success: false, message: err.message });
@@ -99,12 +102,12 @@ router.post('/delete/:runId', async (req, res) => {
   }
 });
 
-async function runAnalysis(runId, sp) {
+async function runAnalysis(runId, sp, authOptions = {}) {
   const progress = { status: 'running', progress: 0, message: 'Starting analysis...', current: 0, total: 0, cancelRequested: false };
   activeAnalyses.set(runId, progress);
 
   try {
-    const pbi = createPowerBIService(sp);
+    const pbi = createPowerBIService(sp, authOptions);
 
     progress.message = 'Fetching workspaces...';
     const workspaces = await pbi.getWorkspaces();
@@ -433,5 +436,4 @@ router.get('/workspaces-for-grant', async (req, res) => {
 });
 
 module.exports = router;
-
 
