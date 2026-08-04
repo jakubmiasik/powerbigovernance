@@ -178,6 +178,7 @@ async function fetchAllPaged(token, url, params = {}) {
   return allItems;
 }
 
+function createPowerBIService(spConfig, authOptions = {}) {
 
 // Runs one read-only query against a Fabric SQL analytics endpoint over TDS.
 // tedious is already a dependency (Azure SQL), so this adds no new package.
@@ -230,7 +231,7 @@ function createPowerBIService(spConfig) {
 
   async function getToken() {
     if (!tokenPromise) {
-      tokenPromise = getAccessTokenForSP(spConfig).catch(err => {
+      tokenPromise = getAccessTokenForSP(spConfig, authOptions).catch(err => {
         tokenPromise = null;
         throw err;
       });
@@ -242,7 +243,7 @@ function createPowerBIService(spConfig) {
   // Separate token for Fabric Core API write operations (migration)
   async function getFabricToken() {
     if (!fabricTokenPromise) {
-      fabricTokenPromise = getFabricTokenForSP(spConfig).catch(err => {
+      fabricTokenPromise = getFabricTokenForSP(spConfig, authOptions).catch(err => {
         fabricTokenPromise = null;
         throw err;
       });
@@ -689,7 +690,7 @@ function createPowerBIService(spConfig) {
 
   // ── Azure Management API: Capacity operations (pause/resume/details) ──
   async function getArmToken() {
-    return getAzureManagementTokenForSP(spConfig);
+    return getAzureManagementTokenForSP(spConfig, authOptions);
   }
 
   // List all Fabric capacities in the subscription via ARM
@@ -756,7 +757,7 @@ function createPowerBIService(spConfig) {
   let graphTokenPromise = null;
   async function getGraphToken() {
     if (!graphTokenPromise) {
-      graphTokenPromise = getGraphTokenForSP(spConfig).catch(err => {
+      graphTokenPromise = getGraphTokenForSP(spConfig, authOptions).catch(err => {
         graphTokenPromise = null;
         throw err;
       });
@@ -804,7 +805,7 @@ function createPowerBIService(spConfig) {
 
   async function getOneLakeToken() {
     if (!onelakeTokenPromise) {
-      onelakeTokenPromise = getOneLakeTokenForSP(spConfig).catch(err => {
+      onelakeTokenPromise = getOneLakeTokenForSP(spConfig, authOptions).catch(err => {
         onelakeTokenPromise = null;
         throw err;
       });

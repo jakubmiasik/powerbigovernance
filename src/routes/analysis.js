@@ -111,7 +111,10 @@ router.post('/run', async (req, res) => {
       return res.json({ success: false, message: 'Could not create the analysis run record in the database.' });
     }
 
-    runAnalysis(runId, sp);
+    runAnalysis(runId, sp, {
+      keyVaultDelegatedToken: req.session?.keyVaultDelegatedToken?.token || null,
+      keyVaultAuthUrl: `/settings/kv/auth?spId=${encodeURIComponent(String(sp.id))}&returnTo=${encodeURIComponent('/analysis')}`,
+    });
     res.json({ success: true, runId });
   } catch (err) {
     res.json({ success: false, message: err.message });
@@ -322,6 +325,8 @@ router.post('/delete/:runId', async (req, res) => {
   }
 });
 
+async function runAnalysis(runId, sp, authOptions = {}) {
+  const progress = { status: 'running', progress: 0, message: 'Starting analysis...', current: 0, total: 0, cancelRequested: false };
 async function runAnalysis(runId, sp) {
   const progress = {
     status: 'running',
@@ -345,7 +350,7 @@ async function runAnalysis(runId, sp) {
   // the Power BI client surface as run progress instead of silent delay.
   await runWithApiReporter(event => handleApiEvent(progress, event), async () => {
   try {
-    const pbi = createPowerBIService(sp);
+    const pbi = createPowerBIService(sp, authOptions);
 
     setProgress(progress, { phase: 'Workspaces', message: 'Fetching workspaces...' });
     const workspaces = await pbi.getWorkspaces();
@@ -824,5 +829,4 @@ router.get('/workspaces-for-grant', async (req, res) => {
 });
 
 module.exports = router;
-
 

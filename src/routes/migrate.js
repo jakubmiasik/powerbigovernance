@@ -54,7 +54,11 @@ router.get('/refresh', async (req, res) => {
     }
 
     const { createPowerBIService } = require('../services/powerbiService');
-    const pbi = createPowerBIService(sp);
+    const keyVaultAuthUrl = `/settings/kv/auth?spId=${encodeURIComponent(String(sp.id))}&returnTo=${encodeURIComponent('/migrate')}`;
+    const pbi = createPowerBIService(sp, {
+      keyVaultDelegatedToken: req.session?.keyVaultDelegatedToken?.token || null,
+      keyVaultAuthUrl,
+    });
 
     // Fetch live workspaces from Fabric Admin API
     const workspaces = await pbi.getWorkspaces();

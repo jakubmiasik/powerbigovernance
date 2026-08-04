@@ -25,7 +25,7 @@ function categorizeItems(items) {
 }
 
 // Get PBI service using first configured SP
-async function getPbiService(res) {
+async function getPbiService(req, res) {
   const globalRun = res ? res.locals.globalRun : null;
   let sp;
   if (globalRun && globalRun.sp_id) {
@@ -36,7 +36,11 @@ async function getPbiService(res) {
     if (sps.length === 0) throw new Error('No service principal configured. Go to Settings to add one.');
     sp = sps[0];
   }
-  return createPowerBIService(sp);
+  const keyVaultAuthUrl = `/settings/kv/auth?spId=${encodeURIComponent(String(sp.id))}&returnTo=${encodeURIComponent(req.originalUrl || '/workspaces')}`;
+  return createPowerBIService(sp, {
+    keyVaultDelegatedToken: req.session?.keyVaultDelegatedToken?.token || null,
+    keyVaultAuthUrl,
+  });
 }
 
 // Resolve which run a page should read from. An explicit ?runId= wins over the
@@ -130,7 +134,7 @@ router.get('/:id', async (req, res) => {
     }
 
     // Fallback to live API
-    const pbi = await getPbiService(res);
+    const pbi = await getPbiService(req, res);
     const [workspace, items, users] = await Promise.all([
       pbi.getWorkspaceById(workspaceId),
       pbi.getItemsByWorkspace(workspaceId),
@@ -150,7 +154,7 @@ router.get('/:id', async (req, res) => {
 
 router.get('/:workspaceId/datasets/:datasetId', async (req, res) => {
   try {
-    const pbi = await getPbiService(res);
+    const pbi = await getPbiService(req, res);
     const { workspaceId, datasetId } = req.params;
     const [refreshHistory, datasources, parameters] = await Promise.all([
       pbi.getDatasetRefreshHistory(workspaceId, datasetId),
@@ -165,7 +169,7 @@ router.get('/:workspaceId/datasets/:datasetId', async (req, res) => {
 
 router.get('/:workspaceId/dashboards/:dashboardId', async (req, res) => {
   try {
-    const pbi = await getPbiService(res);
+    const pbi = await getPbiService(req, res);
     const { workspaceId, dashboardId } = req.params;
     const tiles = await pbi.getDashboardTiles(workspaceId, dashboardId);
     res.render('workspaces/dashboard-detail', { title: 'Dashboard Tiles', user: req.user, workspaceId, dashboardId, tiles });
@@ -197,7 +201,7 @@ async function buildRunItemIndex(req, res) {
 
 router.get('/:workspaceId/lineage/:itemId', async (req, res) => {
   try {
-    const pbi = await getPbiService(res);
+    const pbi = await getPbiService(req, res);
     const { workspaceId, itemId } = req.params;
     const allLinks = await pbi.getWorkspaceLineage(workspaceId);
     // Filter connections related to this item (as source or target)
@@ -300,7 +304,7 @@ router.get('/:workspaceId/items/:itemId/details', async (req, res) => {
 // Get storage breakdown for a workspace
 router.get('/:workspaceId/storage', async (req, res) => {
   try {
-    const pbi = await getPbiService(res);
+    const pbi = await getPbiService(req, res);
     const globalRun = res.locals.globalRun;
 
     // Get items for this workspace (from saved data or live API)
@@ -377,7 +381,7 @@ router.get('/:workspaceId/storage', async (req, res) => {
 // Get storage for a specific item
 router.get('/:workspaceId/storage/:itemId', async (req, res) => {
   try {
-    const pbi = await getPbiService(res);
+    const pbi = await getPbiService(req, res);
     const result = await pbi.getItemStorageSize(req.params.workspaceId, req.params.itemId);
     res.json({ success: true, ...result });
   } catch (err) {
@@ -390,7 +394,7 @@ router.get('/:workspaceId/storage/:itemId', async (req, res) => {
 // GET role assignments for a workspace
 router.get('/:workspaceId/roles', async (req, res) => {
   try {
-    const pbi = await getPbiService(res);
+    const pbi = await getPbiService(req, res);
     const roles = await pbi.getRoleAssignments(req.params.workspaceId);
     res.json({ success: true, roles });
   } catch (err) {
@@ -405,7 +409,7 @@ router.post('/:workspaceId/roles', async (req, res) => {
     if (!principalId || !principalType || !role) {
       return res.json({ success: false, message: 'Missing principalId, principalType, or role.' });
     }
-    const pbi = await getPbiService(res);
+    const pbi = await getPbiService(req, res);
     const result = await pbi.addRoleAssignment(req.params.workspaceId, principalId, principalType, role);
     res.json({ success: true, result });
   } catch (err) {
@@ -418,7 +422,7 @@ router.patch('/:workspaceId/roles/:roleAssignmentId', async (req, res) => {
   try {
     const { role } = req.body;
     if (!role) return res.json({ success: false, message: 'Missing role.' });
-    const pbi = await getPbiService(res);
+    const pbi = await getPbiService(req, res);
     const result = await pbi.updateRoleAssignment(req.params.workspaceId, req.params.roleAssignmentId, role);
     res.json({ success: true, result });
   } catch (err) {
@@ -429,7 +433,7 @@ router.patch('/:workspaceId/roles/:roleAssignmentId', async (req, res) => {
 // DELETE role assignment
 router.delete('/:workspaceId/roles/:roleAssignmentId', async (req, res) => {
   try {
-    const pbi = await getPbiService(res);
+    const pbi = await getPbiService(req, res);
     await pbi.deleteRoleAssignment(req.params.workspaceId, req.params.roleAssignmentId);
     res.json({ success: true });
   } catch (err) {
@@ -443,7 +447,7 @@ router.get('/:workspaceId/entra/search', async (req, res) => {
   try {
     const { q, type } = req.query;
     if (!q || q.length < 2) return res.json({ success: true, results: [] });
-    const pbi = await getPbiService(res);
+    const pbi = await getPbiService(req, res);
 
     let results = [];
     if (type === 'ServicePrincipal') {
@@ -464,6 +468,5 @@ router.get('/:workspaceId/entra/search', async (req, res) => {
 });
 
 module.exports = router;
-
 
 
