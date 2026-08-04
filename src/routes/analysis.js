@@ -326,8 +326,6 @@ router.post('/delete/:runId', async (req, res) => {
 });
 
 async function runAnalysis(runId, sp, authOptions = {}) {
-  const progress = { status: 'running', progress: 0, message: 'Starting analysis...', current: 0, total: 0, cancelRequested: false };
-async function runAnalysis(runId, sp) {
   const progress = {
     status: 'running',
     progress: 0,
@@ -829,4 +827,3 @@ router.get('/workspaces-for-grant', async (req, res) => {
 });
 
 module.exports = router;
-

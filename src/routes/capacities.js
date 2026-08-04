@@ -212,14 +212,6 @@ router.post('/:name/suspend', async (req, res) => {
 
     await pbi.suspendCapacity(subscriptionId, resourceGroup, req.params.name);
     res.json({ success: true, message: 'Capacity suspend initiated.' });
-    const pbi = await getPbiService(res);
-    const result = await executeCapacityActionWithService(pbi, {
-      subscriptionId,
-      resourceGroup,
-      capacityName: req.params.name,
-      action: 'suspend',
-    });
-    res.json({ success: result.status === 'success', message: result.message });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
@@ -252,14 +244,6 @@ router.post('/:name/resume', async (req, res) => {
 
     await pbi.resumeCapacity(subscriptionId, resourceGroup, req.params.name);
     res.json({ success: true, message: 'Capacity resume initiated.' });
-    const pbi = await getPbiService(res);
-    const result = await executeCapacityActionWithService(pbi, {
-      subscriptionId,
-      resourceGroup,
-      capacityName: req.params.name,
-      action: 'resume',
-    });
-    res.json({ success: result.status === 'success', message: result.message });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }

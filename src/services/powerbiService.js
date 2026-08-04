@@ -178,8 +178,6 @@ async function fetchAllPaged(token, url, params = {}) {
   return allItems;
 }
 
-function createPowerBIService(spConfig, authOptions = {}) {
-
 // Runs one read-only query against a Fabric SQL analytics endpoint over TDS.
 // tedious is already a dependency (Azure SQL), so this adds no new package.
 function querySqlEndpoint(server, database, token, sql) {
@@ -224,7 +222,7 @@ function querySqlEndpoint(server, database, token, sql) {
   });
 }
 
-function createPowerBIService(spConfig) {
+function createPowerBIService(spConfig, authOptions = {}) {
   let tokenPromise = null;
   let fabricTokenPromise = null;
   let fabricApiAvailable = null; // null = unknown, true/false = tested
