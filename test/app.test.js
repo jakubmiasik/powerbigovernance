@@ -106,6 +106,25 @@ test('scheduler resolves due slots in the schedule timezone', () => {
   assert.equal(due.minutesLate, 0);
 });
 
+test('scheduler catches up on a slot missed by hours while the worker was idle', () => {
+  const schedule = { schedule_type: 'daily', schedule_hour: 16, schedule_minute: 21 };
+  // 19:00 UTC, 159 minutes after the schedule was due — previously dropped entirely.
+  const now = new Date(Date.UTC(2026, 6, 29, 19, 0, 0));
+  const due = scheduler._private.findDueSlot(schedule, 'UTC', now, 240);
+  assert.ok(due, 'expected the long-missed slot to be picked up');
+  assert.equal(due.slotKey, '2026-07-29T16:21');
+  assert.equal(due.minutesLate, 159);
+});
+
+test('scheduler exposes a status snapshot for diagnostics', () => {
+  const status = scheduler.getSchedulerStatus();
+  assert.equal(typeof status.tickCount, 'number');
+  assert.equal(typeof status.started, 'boolean');
+  // Default catch-up must survive a recycled/idle App Service worker.
+  assert.ok(status.catchUpWindowMinutes >= 240, 'catch-up window should be at least 4 hours');
+  assert.equal(status.tickIntervalMs, 60000);
+});
+
 const runMetrics = require('../src/services/runMetricsService');
 
 function sampleRun(overrides) {

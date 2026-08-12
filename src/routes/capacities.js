@@ -4,7 +4,7 @@ const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
 const { executeCapacityActionWithService } = require('../services/capacityActionService');
 const { normalizeTimezone, convertScheduleToUtc } = require('../services/scheduleTimeService');
-const { kickScheduler } = require('../services/schedulerService');
+const { kickScheduler, getSchedulerStatus, runSchedulerNow } = require('../services/schedulerService');
 
 function formatUtcScheduleLabel(scheduleType, utcSchedule) {
   if (!utcSchedule || utcSchedule.scheduleMinuteUtc == null) return null;
@@ -124,6 +124,20 @@ router.get('/refresh', async (req, res) => {
   }
 });
 
+// ── Scheduler diagnostics (must stay above /:id) ──
+router.get('/scheduler/status', (req, res) => {
+  res.json({ success: true, status: getSchedulerStatus() });
+});
+
+router.post('/scheduler/run', async (req, res) => {
+  try {
+    const status = await runSchedulerNow();
+    res.json({ success: true, status });
+  } catch (err) {
+    res.json({ success: false, message: getDetailedErrorMessage(err) });
+  }
+});
+
 // ── Capacity detail page ──
 router.get('/:id', async (req, res) => {
   try {
@@ -167,8 +181,11 @@ router.get('/:id', async (req, res) => {
       .filter(s => (s.capacity_name || '').toLowerCase() === (capacity.displayName || '').toLowerCase())
       .map(ensureScheduleUtcFields);
 
-    // Get execution history
-    const history = await db.getScheduleHistory(capacity.displayName || '', 5);
+    // Get execution history. 30 days, so a schedule that stopped firing a week
+    // ago is still visible on the page instead of looking like it never existed.
+    const history = await db.getScheduleHistory(capacity.displayName || '', 30);
+
+    const schedulerStatus = getSchedulerStatus();
 
     res.render('capacities/detail', {
       title: 'Capacity: ' + (capacity.displayName || 'Unknown'),
@@ -177,6 +194,7 @@ router.get('/:id', async (req, res) => {
       armDetail,
       schedules,
       history,
+      schedulerStatus,
       subscriptionId: subscriptionId || '',
       breadcrumb: [{ label: 'Capacities', href: '/capacities' }, { label: capacity.displayName || 'Detail', href: '#' }],
     });
@@ -389,7 +407,7 @@ router.post('/schedule/:id/toggle', async (req, res) => {
 // ── Schedule history ──
 router.get('/history/:capacityName', async (req, res) => {
   try {
-    const history = await db.getScheduleHistory(req.params.capacityName, 5);
+    const history = await db.getScheduleHistory(req.params.capacityName, 30);
     res.json({ success: true, history });
   } catch (err) {
     res.json({ success: false, message: err.message, history: [] });
