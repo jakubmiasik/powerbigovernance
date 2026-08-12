@@ -283,9 +283,40 @@
   </div>
 </div>
 
-<!-- Execution History (last 5 days) -->
+<!-- Scheduler health -->
+<% var sched = typeof schedulerStatus !== 'undefined' && schedulerStatus ? schedulerStatus : null; %>
 <div class="card mb-4">
-  <div class="card-header"><i class="bi bi-clock-history me-2"></i>Schedule Execution History (Last 5 Days)</div>
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span><i class="bi bi-activity me-2"></i>Scheduler Health</span>
+    <button class="btn btn-sm btn-outline-secondary rounded-pill" onclick="runSchedulerNow()">
+      <i class="bi bi-play-circle me-1"></i>Run scheduler now
+    </button>
+  </div>
+  <div class="card-body small" id="schedulerHealthBody">
+    <% if (!sched || !sched.started) { %>
+      <span class="badge bg-danger">Not running</span>
+      <span class="text-muted ms-2">The background scheduler is not active on this instance.</span>
+    <% } else { %>
+      <span class="badge bg-success">Running</span>
+      <span class="text-muted ms-2">
+        Last tick: <%= sched.lastTickAt || 'never' %> (<%= sched.lastTickSource || '-' %>) ·
+        Ticks: <%= sched.tickCount %> ·
+        Enabled schedules: <%= sched.enabledSchedules %>/<%= sched.schedulesLoaded %> ·
+        Catch-up window: <%= sched.catchUpWindowMinutes %> min
+      </span>
+      <% if (sched.lastActionSummary) { %>
+        <div class="mt-2">Last action: <%= sched.lastActionAt %> — <%= sched.lastActionSummary %></div>
+      <% } %>
+      <% if (sched.lastError) { %>
+        <div class="mt-2 text-danger">Last error (<%= sched.lastErrorAt %>): <%= sched.lastError %></div>
+      <% } %>
+    <% } %>
+  </div>
+</div>
+
+<!-- Execution History (last 30 days) -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-clock-history me-2"></i>Schedule Execution History (Last 30 Days)</div>
   <% var hist = typeof history !== 'undefined' ? history : []; %>
   <% if (hist.length) { %>
     <div class="card-body p-0">
@@ -294,10 +325,11 @@
           <thead><tr><th>Time (UTC)</th><th>Action</th><th>Status</th><th>Message</th></tr></thead>
           <tbody>
             <% hist.forEach(function(h) { %>
+              <% var statusClass = h.status === 'success' ? 'success' : (h.status === 'error' ? 'danger' : 'secondary'); %>
               <tr>
                 <td class="small"><%= h.executed_at ? new Date(h.executed_at).toLocaleString() : '-' %></td>
                 <td><span class="badge bg-<%= h.action === 'resume' ? 'success' : 'warning' %>"><%= h.action === 'resume' ? 'Resume' : 'Pause' %></span></td>
-                <td><span class="badge bg-<%= h.status === 'success' ? 'success' : 'danger' %>"><%= h.status %></span></td>
+                <td><span class="badge bg-<%= statusClass %>"><%= h.status %></span></td>
                 <td class="small"><%= h.message || '-' %></td>
               </tr>
             <% }) %>
@@ -595,6 +627,18 @@ async function toggleSchedule(id, enabled) {
       body: JSON.stringify({ enabled: enabled })
     });
     showToast('Schedule ' + (enabled ? 'enabled' : 'disabled'), 'success');
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function runSchedulerNow() {
+  try {
+    const res = await fetch('/capacities/scheduler/run', { method: 'POST' });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Scheduler run failed');
+    const s = data.status || {};
+    showToast('Scheduler ran. Enabled schedules: ' + (s.enabledSchedules || 0) +
+      (s.lastActionSummary ? ' · ' + s.lastActionSummary : ' · nothing due right now'), 'success');
+    setTimeout(function () { window.location.reload(); }, 1500);
   } catch (e) { showToast(e.message, 'error'); }
 }
 </script>

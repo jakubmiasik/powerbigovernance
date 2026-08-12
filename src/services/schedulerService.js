@@ -1,19 +1,41 @@
-const cron = require('node-cron');
 const db = require('./databaseService');
 const { executeCapacityActionWithSp } = require('./capacityActionService');
 const { normalizeTimezone, getTimeInTimezone } = require('./scheduleTimeService');
 
-// How far back a tick looks for a schedule that came due. Without this, a single
-// missed minute (restart, idle worker, slow tick) silently skipped the action until
-// the next day.
-const CATCHUP_WINDOW_MINUTES = Math.max(0, parseInt(process.env.SCHEDULER_CATCHUP_MINUTES || '20', 10) || 0);
+// How far back a tick looks for a schedule that came due. On App Service the worker
+// can be recycled or idled out for long stretches, so a 20 minute window silently
+// dropped the whole day's action. Four hours keeps a missed pause useful (it still
+// saves capacity cost) without replaying something from the previous day.
+const CATCHUP_WINDOW_MINUTES = Math.max(0, parseInt(process.env.SCHEDULER_CATCHUP_MINUTES || '240', 10) || 0);
+const TICK_INTERVAL_MS = Math.max(15000, parseInt(process.env.SCHEDULER_TICK_MS || '60000', 10) || 60000);
+const KICK_THROTTLE_MS = Math.max(5000, parseInt(process.env.SCHEDULER_KICK_THROTTLE_MS || '15000', 10) || 15000);
 const MAX_SLOT_ATTEMPTS = 3;
 
 let schedulerStarted = false;
 let schedulerTickInProgress = false;
+let tickTimer = null;
 let lastKickMs = 0;
 // scheduleId -> { slotKey, attempts }
 const triggeredSlots = new Map();
+
+// Observability, so "nothing ran and there is no log to prove it" is diagnosable.
+const status = {
+  started: false,
+  startedAt: null,
+  tickIntervalMs: TICK_INTERVAL_MS,
+  catchUpWindowMinutes: CATCHUP_WINDOW_MINUTES,
+  tickCount: 0,
+  lastTickAt: null,
+  lastTickSource: null,
+  lastTickDurationMs: null,
+  schedulesLoaded: 0,
+  enabledSchedules: 0,
+  lastDueAt: null,
+  lastActionAt: null,
+  lastActionSummary: null,
+  lastError: null,
+  lastErrorAt: null,
+};
 
 function getDateKey(parts) {
   return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
@@ -49,7 +71,6 @@ function getScheduleSlotKey(schedule, nowLocal) {
   const dateKey = getDateKey(nowLocal);
   const hour = String(nowLocal.hour).padStart(2, '0');
   const minute = String(nowLocal.minute).padStart(2, '0');
-  if (schedule.schedule_type === 'hourly') return `${dateKey}T${hour}:${minute}`;
   return `${dateKey}T${hour}:${minute}`;
 }
 
@@ -110,8 +131,14 @@ async function executeSchedule(schedule) {
 async function runSchedulerTick(source) {
   if (schedulerTickInProgress) return;
   schedulerTickInProgress = true;
+  const tickStartedAt = Date.now();
+  status.tickCount += 1;
+  status.lastTickAt = new Date().toISOString();
+  status.lastTickSource = source || 'tick';
   try {
     const schedules = await db.getCapacitySchedules();
+    status.schedulesLoaded = schedules.length;
+    status.enabledSchedules = schedules.filter(s => s.enabled).length;
     if (!schedules.length) return;
 
     // Completed runs recorded in the database, so a restart mid-window does not
@@ -135,6 +162,8 @@ async function runSchedulerTick(source) {
       const due = findDueSlot(schedule, timezone, now, CATCHUP_WINDOW_MINUTES);
       if (!due) continue;
 
+      status.lastDueAt = new Date().toISOString();
+
       const attemptState = triggeredSlots.get(scheduleId);
       const attempts = attemptState && attemptState.slotKey === due.slotKey ? attemptState.attempts : 0;
       if (attempts >= MAX_SLOT_ATTEMPTS) continue;
@@ -147,6 +176,7 @@ async function runSchedulerTick(source) {
       triggeredSlots.set(scheduleId, { slotKey: due.slotKey, attempts: attempts + 1 });
 
       const lateNote = due.minutesLate > 0 ? ` (catch-up, ${due.minutesLate} min late)` : '';
+      console.log(`[Scheduler] Schedule ${schedule.id} (${schedule.action} ${schedule.capacity_name}) due at ${due.slotKey} ${timezone}${lateNote}`);
       await db.logScheduleExecution(
         schedule.id,
         schedule.capacity_name,
@@ -155,6 +185,8 @@ async function runSchedulerTick(source) {
         `Scheduler matched ${schedule.schedule_type} schedule at ${due.slotKey} ${timezone} via ${source || 'tick'}${lateNote}`
       );
       const result = await executeSchedule(schedule);
+      status.lastActionAt = new Date().toISOString();
+      status.lastActionSummary = `${schedule.action} ${schedule.capacity_name}: ${result.status} — ${result.message}`;
       // Successful and skipped runs are recorded in history, so the database check
       // above blocks a repeat; failures stay retryable until MAX_SLOT_ATTEMPTS.
       if (result.status !== 'error') {
@@ -162,8 +194,11 @@ async function runSchedulerTick(source) {
       }
     }
   } catch (err) {
+    status.lastError = err.message;
+    status.lastErrorAt = new Date().toISOString();
     console.error('[Scheduler] Error checking schedules:', err.message);
   } finally {
+    status.lastTickDurationMs = Date.now() - tickStartedAt;
     schedulerTickInProgress = false;
   }
 }
@@ -171,21 +206,46 @@ async function runSchedulerTick(source) {
 function startScheduler() {
   if (schedulerStarted) return;
   schedulerStarted = true;
-  console.log('[Scheduler] Capacity scheduler started');
-  cron.schedule('* * * * *', () => runSchedulerTick('cron'));
+  status.started = true;
+  status.startedAt = new Date().toISOString();
+  console.log(`[Scheduler] Capacity scheduler started (tick ${TICK_INTERVAL_MS}ms, catch-up ${CATCHUP_WINDOW_MINUTES} min)`);
+  // A plain interval rather than a cron expression: the tick is "every minute"
+  // either way, and this keeps the cron parser out of the critical path.
+  tickTimer = setInterval(() => runSchedulerTick('timer'), TICK_INTERVAL_MS);
   runSchedulerTick('startup');
+}
+
+function stopScheduler() {
+  if (tickTimer) clearInterval(tickTimer);
+  tickTimer = null;
+  schedulerStarted = false;
+  status.started = false;
 }
 
 function kickScheduler() {
   if (!schedulerStarted) return;
   const nowMs = Date.now();
-  if (nowMs - lastKickMs < 15000) return;
+  if (nowMs - lastKickMs < KICK_THROTTLE_MS) return;
   lastKickMs = nowMs;
   runSchedulerTick('request');
 }
 
+// Manual run behind the "Run scheduler now" diagnostic action; bypasses the kick
+// throttle so an operator gets an immediate answer.
+async function runSchedulerNow() {
+  await runSchedulerTick('manual');
+  return getSchedulerStatus();
+}
+
+function getSchedulerStatus() {
+  return { ...status, tickInProgress: schedulerTickInProgress };
+}
+
 module.exports = {
   startScheduler,
+  stopScheduler,
   kickScheduler,
-  _private: { getScheduleSlotKey, isDueNow, executeSchedule, findDueSlot },
+  runSchedulerNow,
+  getSchedulerStatus,
+  _private: { getScheduleSlotKey, isDueNow, executeSchedule, findDueSlot, runSchedulerTick },
 };

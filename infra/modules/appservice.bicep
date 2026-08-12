@@ -37,6 +37,9 @@ resource webApp 'Microsoft.Web/sites@2023-12-01' = {
       linuxFxVersion: 'NODE|20-lts'
       healthCheckPath: '/health'
       appCommandLine: 'npm start'
+      // Required: the capacity pause/resume scheduler runs in-process. Without
+      // Always On the worker is unloaded when idle and the timer never fires.
+      alwaysOn: true
       appSettings: [
         {
           name: 'NODE_ENV'

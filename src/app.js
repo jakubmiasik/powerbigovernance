@@ -78,6 +78,15 @@ app.use((req, res, next) => {
   next();
 });
 
+// Opportunistic scheduler catch-up tick on incoming traffic (throttled internally).
+// Registered BEFORE /health on purpose: the App Service health check is the only
+// guaranteed periodic traffic, so it must be able to drive the catch-up tick.
+const { kickScheduler } = require('./services/schedulerService');
+app.use((req, res, next) => {
+  kickScheduler();
+  next();
+});
+
 // Health check BEFORE DB middleware so it always responds instantly
 app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
@@ -85,13 +94,6 @@ app.get('/health', (_req, res) => {
 
 // Global context: selected run + available runs, cached to avoid DB work on every request
 app.use(loadRuns);
-
-// Opportunistic scheduler catch-up tick on incoming traffic (throttled internally)
-const { kickScheduler } = require('./services/schedulerService');
-app.use((req, res, next) => {
-  kickScheduler();
-  next();
-});
 
 // API to switch selected run
 app.post('/api/select-run', (req, res) => {
