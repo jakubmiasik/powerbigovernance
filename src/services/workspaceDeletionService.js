@@ -1,4 +1,22 @@
 const db = require('./databaseService');
+const { explainError } = require('./httpErrorService');
+
+// Every failure reported to the UI carries an explanation of the status code, so a
+// bare "API error (403)" is never the only thing an operator sees.
+function failure(id, name, message, err) {
+  const info = explainError(err || message);
+  return {
+    id,
+    name: name || null,
+    success: false,
+    message,
+    permissionDenied: isPermissionError(err || { message }),
+    status: info ? info.status : null,
+    statusTitle: info ? info.title : null,
+    explanation: info ? info.explanation : null,
+    hint: info ? info.hint : null,
+  };
+}
 
 /**
  * Fabric's delete endpoint requires the *workspace* Admin role. Being a tenant
@@ -30,25 +48,21 @@ async function deleteWorkspace(pbi, { id, name, runId, deletedBy, elevate }) {
     await pbi.deleteWorkspace(id);
   } catch (err) {
     if (!elevate || !isPermissionError(err)) {
-      return { id, name: name || null, success: false, message: err.message, permissionDenied: isPermissionError(err) };
+      return failure(id, name, err.message, err);
     }
     // Self-elevate to workspace Admin, then try exactly once more.
     try {
       await elevate(id);
       elevated = true;
     } catch (grantErr) {
-      return {
-        id,
-        name: name || null,
-        success: false,
-        permissionDenied: true,
-        message: `Access denied and the workspace Admin role could not be granted: ${grantErr.message}`,
-      };
+      const result = failure(id, name, `Access denied and the workspace Admin role could not be granted: ${grantErr.message}`, grantErr);
+      result.permissionDenied = true;
+      return result;
     }
     try {
       await pbi.deleteWorkspace(id);
     } catch (retryErr) {
-      return { id, name: name || null, success: false, message: retryErr.message, permissionDenied: isPermissionError(retryErr) };
+      return failure(id, name, retryErr.message, retryErr);
     }
   }
 

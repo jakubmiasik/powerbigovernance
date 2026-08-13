@@ -94,7 +94,13 @@
         <span><i class="bi bi-list-ol me-2"></i>Ranked Workspaces</span>
         <span class="badge bg-light text-dark border ms-2" id="triageFilterLabel">Showing workspaces needing attention</span>
       </div>
-      <div class="d-flex gap-2 flex-wrap">
+      <div class="d-flex gap-2 flex-wrap align-items-center">
+        <span class="badge bg-secondary" id="statusCheckBadge" title="Deletion is disabled until the live workspace status is confirmed">
+          <i class="bi bi-shield-question me-1"></i>Status not verified
+        </span>
+        <button class="btn btn-sm btn-outline-primary" id="checkStatusBtn" onclick="checkWorkspaceStatus()">
+          <i class="bi bi-arrow-repeat me-1"></i>Check workspace status
+        </button>
         <button class="btn btn-sm btn-danger" id="deleteSelectedBtn" onclick="confirmDeleteSelected()" disabled>
           <i class="bi bi-trash me-1"></i>Delete selected (<span id="selectedCount">0</span>)
         </button>
@@ -148,7 +154,7 @@
                   <%= ws.licenseType %><% if (ws.capacitySku) { %> &middot; <code><%= ws.capacitySku %></code><% } %>
                 </div>
               </td>
-              <td>
+              <td class="ws-status-cell" data-ws-id="<%= ws.id %>">
                 <% if (isDeleted) { %>
                   <span class="badge bg-danger"><i class="bi bi-trash me-1"></i>Deleted</span>
                   <% if (ws.deletedAt) { %>
@@ -192,7 +198,7 @@
                   <button class="btn btn-sm btn-outline-primary p-0 px-1" onclick="showWorkspaceFindings(<%= idx %>)" title="Why is this flagged?"><i class="bi bi-info-circle"></i></button>
                 <% } %>
                 <% if (!isDeleted) { %>
-                  <button class="btn btn-sm btn-outline-danger p-0 px-1" title="Delete workspace"
+                  <button class="btn btn-sm btn-outline-danger p-0 px-1 ws-delete-btn" title="Check workspace status before deleting" disabled
                           onclick="confirmDeleteOne('<%= ws.id %>', '<%= (ws.name || '').replace(/'/g, "\\'") %>')">
                     <i class="bi bi-trash"></i>
                   </button>
@@ -246,6 +252,22 @@
     </div>
   </div>
 
+  <!-- Failure details, with an explanation of the status code -->
+  <div class="modal fade" id="errorDetailsModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h6 class="modal-title"><i class="bi bi-exclamation-octagon text-danger me-2"></i>Deletion errors</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body" id="errorDetailsBody"></div>
+        <div class="modal-footer">
+          <button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Fabric administrator authorization prompt -->
   <div class="modal fade" id="adminAuthModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
@@ -281,6 +303,97 @@
   var deleteWsModal;
   var adminAuthModal;
   var pendingDeletions = [];
+  // Deletion stays locked until the live Fabric status has been confirmed.
+  var statusVerified = false;
+
+  // ── Live status check ──
+  function setRowStatus(id, html, opts) {
+    var cell = document.querySelector('.ws-status-cell[data-ws-id="' + id + '"]');
+    if (cell) cell.innerHTML = html;
+
+    var row = cell ? cell.closest('tr') : null;
+    if (!row) return;
+    var deletable = !!(opts && opts.deletable);
+    row.setAttribute('data-deleted', deletable ? 'false' : 'true');
+
+    var box = row.querySelector('.ws-select');
+    if (box && !deletable) { box.checked = false; box.disabled = true; }
+    else if (box) box.disabled = false;
+
+    var btn = row.querySelector('.ws-delete-btn');
+    if (btn) {
+      btn.disabled = !deletable;
+      btn.title = deletable ? 'Delete workspace' : ((opts && opts.reason) || 'This workspace cannot be deleted');
+    }
+  }
+
+  async function checkWorkspaceStatus() {
+    var btn = document.getElementById('checkStatusBtn');
+    var badge = document.getElementById('statusCheckBadge');
+    var ids = triageRows.map(function(r) { return r.id; });
+    if (!ids.length) return;
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Checking ' + ids.length + '...';
+    badge.className = 'badge bg-secondary';
+    badge.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Checking status...';
+
+    try {
+      var res = await fetch('/workspaces/status-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ids })
+      });
+      var data = await res.json();
+      if (!data.success) throw new Error(describeFailure(data));
+
+      data.statuses.forEach(function(s) {
+        if (s.exists === true) {
+          var active = !s.state || s.state === 'Active';
+          setRowStatus(s.id, '<span class="badge bg-' + (active ? 'success' : 'warning') + '">' +
+            escapeHtml(s.state || 'Active') + '</span>', { deletable: true });
+        } else if (s.exists === false) {
+          setRowStatus(s.id, '<span class="badge bg-danger"><i class="bi bi-trash me-1"></i>Deleted</span>' +
+            '<div class="text-muted" style="font-size:0.7rem;">no longer in the tenant</div>',
+            { deletable: false, reason: 'This workspace no longer exists' });
+        } else {
+          setRowStatus(s.id, '<span class="badge bg-secondary" title="' + escapeHtml(s.error || '') + '">Unknown</span>' +
+            '<div class="text-muted" style="font-size:0.7rem;">' + escapeHtml(s.hint ? 'permission issue' : 'not readable') + '</div>',
+            { deletable: false, reason: s.error || 'Current status could not be read' });
+        }
+      });
+
+      statusVerified = true;
+      badge.className = 'badge bg-success';
+      badge.innerHTML = '<i class="bi bi-shield-check me-1"></i>Verified ' + new Date(data.checkedAt).toLocaleTimeString() +
+        ' &middot; ' + data.activeCount + ' active, ' + data.deletedCount + ' deleted' +
+        (data.unknownCount ? ', ' + data.unknownCount + ' unknown' : '');
+      updateSelectionState();
+      if (data.unknownCount) {
+        showToast(data.unknownCount + ' workspace(s) could not be read — deletion stays disabled for those.', 'error');
+      }
+    } catch (e) {
+      statusVerified = false;
+      badge.className = 'badge bg-danger';
+      badge.innerHTML = '<i class="bi bi-exclamation-triangle me-1"></i>Status check failed';
+      showToast(e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-arrow-repeat me-1"></i>Re-check workspace status';
+      updateSelectionState();
+    }
+  }
+
+  // Turn an API failure into something that explains itself.
+  function describeFailure(data) {
+    if (!data) return 'Request failed';
+    var parts = [];
+    if (data.status && data.statusTitle) parts.push(data.status + ' ' + data.statusTitle);
+    if (data.message) parts.push(data.message);
+    if (data.explanation) parts.push(data.explanation);
+    if (data.hint) parts.push('What to do: ' + data.hint);
+    return parts.length ? parts.join(' — ') : 'Request failed';
+  }
 
   document.addEventListener('DOMContentLoaded', function() {
     findingsModal = new bootstrap.Modal(document.getElementById('findingsModal'));
@@ -330,9 +443,10 @@
     document.getElementById('triageFilterLabel').textContent = label;
   }
 
-  function escapeHtml(value) {
-    return String(value == null ? '' : value)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  function escapeHtml(str) {
+    return String(str === null || str === undefined ? '' : str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   function showWorkspaceFindings(index) {
@@ -370,7 +484,9 @@
   function updateSelectionState() {
     var count = getSelectedWorkspaces().length;
     document.getElementById('selectedCount').textContent = count;
-    document.getElementById('deleteSelectedBtn').disabled = count === 0;
+    // Deleting is only offered once the live status has been confirmed, so a stale
+    // scan can never be used to delete a workspace that has already changed.
+    document.getElementById('deleteSelectedBtn').disabled = count === 0 || !statusVerified;
 
     var visibleBoxes = [];
     document.querySelectorAll('#triage-table tbody tr').forEach(function(row) {
@@ -442,6 +558,27 @@
     }
   }
 
+  // Explain each failure rather than dropping a raw status code into a toast.
+  function showErrorDetails(failures, fallbackMessage) {
+    var html = failures.map(function(f) {
+      var head = escapeHtml(f.name || f.id || 'Workspace');
+      var code = f.status ? '<span class="badge bg-danger me-2">' + f.status + ' ' + escapeHtml(f.statusTitle || '') + '</span>' : '';
+      var body = '<div class="small mb-1">' + escapeHtml(f.message || fallbackMessage || 'Failed') + '</div>';
+      if (f.explanation) {
+        body += '<div class="small text-muted mb-1"><i class="bi bi-info-circle me-1"></i>' + escapeHtml(f.explanation) + '</div>';
+      }
+      if (f.hint) {
+        body += '<div class="small"><i class="bi bi-lightbulb me-1 text-warning"></i><strong>What to do:</strong> ' + escapeHtml(f.hint) + '</div>';
+      }
+      return '<div class="border rounded p-2 mb-2"><div class="mb-1">' + code + '<strong>' + head + '</strong></div>' + body + '</div>';
+    }).join('');
+
+    document.getElementById('errorDetailsBody').innerHTML = html;
+    var el = document.getElementById('errorDetailsModal');
+    var modal = bootstrap.Modal.getInstance(el) || new bootstrap.Modal(el);
+    modal.show();
+  }
+
   async function performDelete() {
     var btn = document.getElementById('deleteWsConfirmBtn');
     btn.disabled = true;
@@ -467,12 +604,23 @@
       if (data.deletedCount) {
         showToast('Deleted ' + data.deletedCount + ' workspace' + (data.deletedCount === 1 ? '' : 's') +
           (data.failedCount ? ', ' + data.failedCount + ' failed' : ''), data.failedCount ? 'error' : 'success');
-      } else {
-        var firstError = (data.results || []).filter(function(r) { return !r.success; })[0];
-        showToast(firstError ? firstError.message : (data.message || 'Deletion failed'), 'error');
       }
 
-      if (data.deletedCount) setTimeout(function() { window.location.reload(); }, 1500);
+      var failures = (data.results || []).filter(function(r) { return !r.success; });
+      if (failures.length) {
+        // Reloading would tear the explanation away before it can be read, so the
+        // page only refreshes once the user dismisses the error list.
+        showErrorDetails(failures, data.message);
+        if (data.deletedCount) {
+          document.getElementById('errorDetailsModal').addEventListener('hidden.bs.modal', function once() {
+            window.location.reload();
+          }, { once: true });
+        }
+      } else if (!data.deletedCount) {
+        showToast(data.message || 'Deletion failed', 'error');
+      } else {
+        setTimeout(function() { window.location.reload(); }, 1500);
+      }
     } catch (e) {
       showToast(e.message, 'error');
     } finally {
