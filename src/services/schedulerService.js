@@ -212,6 +212,7 @@ function startScheduler() {
   // A plain interval rather than a cron expression: the tick is "every minute"
   // either way, and this keeps the cron parser out of the critical path.
   tickTimer = setInterval(() => runSchedulerTick('timer'), TICK_INTERVAL_MS);
+  if (typeof tickTimer.unref === 'function') tickTimer.unref();
   runSchedulerTick('startup');
 }
 
@@ -223,7 +224,12 @@ function stopScheduler() {
 }
 
 function kickScheduler() {
-  if (!schedulerStarted) return;
+  // Self-healing: if bootstrap failed or was never reached, incoming traffic starts
+  // the scheduler rather than leaving the instance permanently idle.
+  if (!schedulerStarted) {
+    startScheduler();
+    return;
+  }
   const nowMs = Date.now();
   if (nowMs - lastKickMs < KICK_THROTTLE_MS) return;
   lastKickMs = nowMs;
@@ -233,6 +239,7 @@ function kickScheduler() {
 // Manual run behind the "Run scheduler now" diagnostic action; bypasses the kick
 // throttle so an operator gets an immediate answer.
 async function runSchedulerNow() {
+  if (!schedulerStarted) startScheduler();
   await runSchedulerTick('manual');
   return getSchedulerStatus();
 }
