@@ -4,6 +4,7 @@ const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
 const { computeWorkspaceInsights, FINDING_DEFS } = require('../services/workspaceInsightsService');
 const { buildItemDetails } = require('../services/itemDetailsService');
+const { deleteWorkspaces } = require('../services/workspaceDeletionService');
 
 function categorizeItems(items) {
   const reports = [], datasets = [], dashboards = [], dataflows = [];
@@ -101,6 +102,22 @@ router.get('/', async (req, res) => {
       referenceDate: run ? (run.completed_at || run.started_at) : null,
     });
 
+    // Deletions recorded after this scan ran are overlaid, so a workspace deleted
+    // today is shown as deleted even when viewing last week's scan.
+    let deletionStates = [];
+    try {
+      deletionStates = await db.getWorkspaceStates();
+    } catch (stateErr) {
+      console.warn('[Workspaces] Could not read workspace states:', stateErr.message);
+    }
+    const deletedById = new Map(deletionStates.map(row => [row.workspace_id, row]));
+    insights.workspaces = (insights.workspaces || []).map(ws => {
+      const deleted = deletedById.get(ws.id);
+      if (!deleted) return ws;
+      return { ...ws, state: deleted.state, deletedAt: deleted.deleted_at, deletedBy: deleted.deleted_by };
+    });
+    insights.deletedCount = insights.workspaces.filter(ws => ws.state === db.WORKSPACE_STATE_DELETED).length;
+
     res.render('workspaces/list', {
       title: 'Workspaces', user: req.user, fromSavedData: true, run,
       insights,
@@ -108,6 +125,41 @@ router.get('/', async (req, res) => {
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
+  }
+});
+
+// ── Delete workspaces (Fabric Core API) ──
+// Registered above /:id so "delete" is not read as a workspace identifier.
+// Accepts one or many ids, so single-row and batch deletion share a code path.
+router.post('/delete', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const raw = Array.isArray(body.workspaces)
+      ? body.workspaces
+      : Array.isArray(body.ids)
+        ? body.ids
+        : body.id
+          ? [{ id: body.id, name: body.name }]
+          : [];
+
+    const targets = raw
+      .map(entry => (typeof entry === 'string' ? { id: entry } : entry || {}))
+      .filter(entry => entry.id);
+
+    if (!targets.length) {
+      return res.status(400).json({ success: false, message: 'Select at least one workspace to delete.' });
+    }
+
+    const pbi = await getPbiService(req, res);
+    const { run } = await resolveRun(req, res);
+    const summary = await deleteWorkspaces(pbi, targets, {
+      runId: run ? run.id : null,
+      deletedBy: (req.user && (req.user.email || req.user.name)) || null,
+    });
+
+    res.json({ success: summary.failedCount === 0, ...summary });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 

@@ -405,6 +405,81 @@ async function saveItemDetailsCache({ workspaceId, itemId, itemType, itemName, p
   }
 }
 
+// ── Workspace lifecycle state ──
+// Deleting a workspace in Fabric never removes it from our records: the row is kept
+// and its state flipped to 'Deleted' so historical scans stay complete and auditable.
+const WORKSPACE_STATE_DELETED = 'Deleted';
+
+async function markWorkspaceDeleted({ workspaceId, workspaceName, runId, deletedBy }) {
+  const conn = await getConnection();
+  try {
+    await execSql(conn, 'DELETE FROM workspace_states WHERE workspace_id=@ws', [
+      { name: 'ws', type: TYPES.NVarChar, value: workspaceId },
+    ]);
+    const parsedRunId = Number.parseInt(runId, 10);
+    await execWithColumnFallback(conn, {
+      required: [
+        { column: 'workspace_id', param: { name: 'ws', type: TYPES.NVarChar, value: workspaceId } },
+        { column: 'state', param: { name: 'state', type: TYPES.NVarChar, value: WORKSPACE_STATE_DELETED } },
+      ],
+      optional: [
+        { column: 'workspace_name', param: { name: 'name', type: TYPES.NVarChar, value: workspaceName || null } },
+        { column: 'run_id', param: { name: 'runId', type: TYPES.Int, value: Number.isFinite(parsedRunId) ? parsedRunId : null } },
+        { column: 'deleted_by', param: { name: 'by', type: TYPES.NVarChar, value: deletedBy || null } },
+      ],
+      build: specs => buildInsert('workspace_states', specs),
+    });
+  } finally {
+    conn.close();
+  }
+}
+
+async function getWorkspaceStates() {
+  const conn = await getConnection();
+  try {
+    return await execSql(conn, 'SELECT workspace_id, workspace_name, state, run_id, deleted_by, deleted_at FROM workspace_states');
+  } catch (err) {
+    // No table yet simply means nothing has ever been deleted.
+    if ((err.message || '').includes('Invalid object name')) return [];
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+/**
+ * Flip the workspace's state to 'Deleted' inside every stored scan that contains it.
+ * The workspace object itself is preserved so its items, users and findings remain
+ * visible after the workspace is gone from the tenant.
+ */
+async function markWorkspaceDeletedInRuns(workspaceId) {
+  const conn = await getConnection();
+  try {
+    const runs = await execSql(conn, 'SELECT id, results_json FROM analysis_runs WHERE results_json IS NOT NULL');
+    let updated = 0;
+    for (const run of runs) {
+      let results;
+      try {
+        results = JSON.parse(run.results_json);
+      } catch {
+        continue;
+      }
+      const workspace = (results.workspaces || []).find(w => w.id === workspaceId);
+      if (!workspace || workspace.state === WORKSPACE_STATE_DELETED) continue;
+      workspace.state = WORKSPACE_STATE_DELETED;
+      workspace.deletedAt = new Date().toISOString();
+      await execSql(conn, 'UPDATE analysis_runs SET results_json=@json WHERE id=@id', [
+        { name: 'json', type: TYPES.NVarChar, value: JSON.stringify(results) },
+        { name: 'id', type: TYPES.Int, value: run.id },
+      ]);
+      updated += 1;
+    }
+    return updated;
+  } finally {
+    conn.close();
+  }
+}
+
 // Capacity Schedules
 async function getCapacitySchedules() {
   const conn = await getConnection();
@@ -681,6 +756,24 @@ async function runMigrations() {
 
     await runStatement(conn, 'add item_details_cache.run_id', `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'item_details_cache') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'item_details_cache') AND name = N'run_id') ALTER TABLE item_details_cache ADD run_id INT NULL`);
 
+    // Workspace lifecycle state. Deleting a workspace in Fabric marks it here rather
+    // than removing any row, so past scans keep their full contents.
+    await runStatement(conn, 'create workspace_states', `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'workspace_states') AND type = 'U')
+      BEGIN
+        CREATE TABLE workspace_states (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          workspace_id NVARCHAR(100) NOT NULL,
+          workspace_name NVARCHAR(400) NULL,
+          state NVARCHAR(50) NOT NULL,
+          run_id INT NULL,
+          deleted_by NVARCHAR(255) NULL,
+          deleted_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+        );
+        CREATE UNIQUE INDEX UX_workspace_states_ws ON workspace_states (workspace_id);
+      END
+    `);
+
     // Create capacity schedules table if missing
     await runStatement(conn, 'create capacity_schedules', `
       IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'capacity_schedules') AND type = 'U')
@@ -839,6 +932,10 @@ async function runMigrations() {
 
 module.exports = {
   runMigrations,
+  WORKSPACE_STATE_DELETED,
+  markWorkspaceDeleted,
+  markWorkspaceDeletedInRuns,
+  getWorkspaceStates,
   getServicePrincipals,
   getServicePrincipalById,
   saveServicePrincipal,

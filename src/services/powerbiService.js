@@ -591,6 +591,15 @@ function createPowerBIService(spConfig, authOptions = {}) {
       {});
   }
 
+  // ── Delete workspace: Fabric Core API ──
+  // DELETE https://api.fabric.microsoft.com/v1/workspaces/{workspaceId}
+  // The caller must be a workspace Admin. Returns 200 with no body on success.
+  async function deleteWorkspace(workspaceId) {
+    if (!workspaceId) throw new Error('Workspace ID is required.');
+    const token = await getFabricToken();
+    return safeDelete(token, `${FABRIC_CORE}/workspaces/${workspaceId}`);
+  }
+
   // ── Item lineage: use Power BI Admin scanner API with lineage ──
   // Fetches lineage for a workspace by calling getInfo with lineage=true
   async function getWorkspaceLineage(workspaceId) {
@@ -951,6 +960,7 @@ function createPowerBIService(spConfig, authOptions = {}) {
     resumeCapacity,
     assignToCapacity,
     unassignFromCapacity,
+    deleteWorkspace,
     addWorkspaceAdmin,
     removeWorkspaceUser,
     getRoleAssignments,

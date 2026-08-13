@@ -95,6 +95,9 @@
         <span class="badge bg-light text-dark border ms-2" id="triageFilterLabel">Showing workspaces needing attention</span>
       </div>
       <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-sm btn-danger" id="deleteSelectedBtn" onclick="confirmDeleteSelected()" disabled>
+          <i class="bi bi-trash me-1"></i>Delete selected (<span id="selectedCount">0</span>)
+        </button>
         <button class="btn btn-sm btn-outline-secondary" id="showAllBtn" onclick="toggleShowClean()">Include clean workspaces</button>
         <input type="text" class="form-control form-control-sm" style="max-width:280px;" placeholder="Filter workspaces..." id="triageSearch" oninput="applyTriageFilter()">
       </div>
@@ -103,8 +106,12 @@
       <table class="table table-hover table-sm mb-0" id="triage-table">
         <thead>
           <tr>
+            <th style="width:36px;">
+              <input type="checkbox" class="form-check-input" id="selectAllWs" onclick="toggleSelectAll(this.checked)" title="Select all visible">
+            </th>
             <th style="width:70px;">Risk</th>
             <th>Workspace</th>
+            <th>Status</th>
             <th>Findings</th>
             <th>Items</th>
             <th>Users</th>
@@ -116,9 +123,18 @@
         </thead>
         <tbody>
           <% rows.forEach(function(ws, idx) { %>
+            <% var isDeleted = ws.state === 'Deleted'; %>
             <tr data-filter="<%= (ws.name || '').toLowerCase() %>"
                 data-findings="<%= ws.findings.map(function(f) { return f.key; }).join(' ') %>"
-                data-clean="<%= ws.findings.length ? 'false' : 'true' %>">
+                data-clean="<%= ws.findings.length ? 'false' : 'true' %>"
+                data-deleted="<%= isDeleted ? 'true' : 'false' %>"
+                class="<%= isDeleted ? 'opacity-50' : '' %>">
+              <td>
+                <% if (!isDeleted) { %>
+                  <input type="checkbox" class="form-check-input ws-select" value="<%= ws.id %>"
+                         data-name="<%= ws.name %>" onchange="updateSelectionState()">
+                <% } %>
+              </td>
               <td>
                 <% if (ws.score > 0) { %>
                   <span class="badge bg-<%= severityColor(ws.highestSeverity) %>"><%= ws.score %></span>
@@ -130,8 +146,19 @@
                 <a href="/workspaces/<%= ws.id %><%= runId ? '?runId=' + runId : '' %>"><strong><%= ws.name %></strong></a>
                 <div class="text-muted" style="font-size:0.7rem;">
                   <%= ws.licenseType %><% if (ws.capacitySku) { %> &middot; <code><%= ws.capacitySku %></code><% } %>
-                  <% if (ws.state && ws.state !== 'Active') { %> &middot; <span class="badge bg-warning"><%= ws.state %></span><% } %>
                 </div>
+              </td>
+              <td>
+                <% if (isDeleted) { %>
+                  <span class="badge bg-danger"><i class="bi bi-trash me-1"></i>Deleted</span>
+                  <% if (ws.deletedAt) { %>
+                    <div class="text-muted" style="font-size:0.7rem;"><%= new Date(ws.deletedAt).toLocaleString() %></div>
+                  <% } %>
+                <% } else if (ws.state && ws.state !== '-' && ws.state !== 'Active') { %>
+                  <span class="badge bg-warning"><%= ws.state %></span>
+                <% } else { %>
+                  <span class="badge bg-success">Active</span>
+                <% } %>
               </td>
               <td>
                 <% if (!ws.findings.length) { %>
@@ -160,9 +187,15 @@
                 <% } %>
               </td>
               <td class="small"><%= formatBytesWs(ws.storageSize) %></td>
-              <td>
+              <td class="text-nowrap">
                 <% if (ws.findings.length) { %>
                   <button class="btn btn-sm btn-outline-primary p-0 px-1" onclick="showWorkspaceFindings(<%= idx %>)" title="Why is this flagged?"><i class="bi bi-info-circle"></i></button>
+                <% } %>
+                <% if (!isDeleted) { %>
+                  <button class="btn btn-sm btn-outline-danger p-0 px-1" title="Delete workspace"
+                          onclick="confirmDeleteOne('<%= ws.id %>', '<%= (ws.name || '').replace(/'/g, "\\'") %>')">
+                    <i class="bi bi-trash"></i>
+                  </button>
                 <% } %>
               </td>
             </tr>
@@ -188,6 +221,31 @@
     </div>
   </div>
 
+  <!-- Delete confirmation modal -->
+  <div class="modal fade" id="deleteWsModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h6 class="modal-title"><i class="bi bi-exclamation-triangle text-danger me-2"></i>Delete workspaces</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="mb-2">This permanently deletes the following workspace(s) and all their content in Fabric. This cannot be undone.</p>
+          <ul class="small mb-3" id="deleteWsList"></ul>
+          <p class="text-muted small mb-2">The workspaces stay in this application's records with status <span class="badge bg-danger">Deleted</span>, so past scan results remain available.</p>
+          <label class="form-label small" for="deleteWsConfirm">Type <strong>DELETE</strong> to confirm</label>
+          <input type="text" class="form-control form-control-sm" id="deleteWsConfirm" autocomplete="off" oninput="onDeleteConfirmInput()">
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-sm btn-danger" id="deleteWsConfirmBtn" onclick="performDelete()" disabled>
+            <i class="bi bi-trash me-1"></i>Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script>
   var triageRows = <%- JSON.stringify(rows.map(function(w) { return { id: w.id, name: w.name, findings: w.findings }; })) %>;
   var findingLabels = <%- JSON.stringify(findingDefs.reduce(function(acc, d) { acc[d.key] = d.label; return acc; }, {})) %>;
@@ -195,9 +253,12 @@
   var activeFinding = '';
   var showClean = false;
   var findingsModal;
+  var deleteWsModal;
+  var pendingDeletions = [];
 
   document.addEventListener('DOMContentLoaded', function() {
     findingsModal = new bootstrap.Modal(document.getElementById('findingsModal'));
+    deleteWsModal = new bootstrap.Modal(document.getElementById('deleteWsModal'));
     applyTriageFilter();
   });
 
@@ -223,8 +284,15 @@
       var matchesClean = showClean || !isClean;
       var visible = matchesText && matchesFinding && matchesClean;
       row.style.display = visible ? '' : 'none';
+      // Hidden rows must never stay selected, otherwise a filtered-out workspace
+      // could be deleted without the user seeing it in the confirmation list.
+      if (!visible) {
+        var box = row.querySelector('.ws-select');
+        if (box) box.checked = false;
+      }
       if (visible) shown++;
     });
+    updateSelectionState();
 
     var label = 'Showing ' + shown + ' workspace' + (shown === 1 ? '' : 's');
     if (activeFinding) {
@@ -258,6 +326,99 @@
     }).join('');
     document.getElementById('findingsModalBody').innerHTML = html || '<p class="text-muted mb-0">No findings.</p>';
     findingsModal.show();
+  }
+
+  // ── Workspace deletion ──
+
+  function getSelectedWorkspaces() {
+    var selected = [];
+    document.querySelectorAll('#triage-table tbody tr').forEach(function(row) {
+      if (row.style.display === 'none') return;
+      var box = row.querySelector('.ws-select');
+      if (box && box.checked) selected.push({ id: box.value, name: box.getAttribute('data-name') || box.value });
+    });
+    return selected;
+  }
+
+  function updateSelectionState() {
+    var count = getSelectedWorkspaces().length;
+    document.getElementById('selectedCount').textContent = count;
+    document.getElementById('deleteSelectedBtn').disabled = count === 0;
+
+    var visibleBoxes = [];
+    document.querySelectorAll('#triage-table tbody tr').forEach(function(row) {
+      if (row.style.display === 'none') return;
+      var box = row.querySelector('.ws-select');
+      if (box) visibleBoxes.push(box);
+    });
+    var selectAll = document.getElementById('selectAllWs');
+    selectAll.checked = visibleBoxes.length > 0 && count === visibleBoxes.length;
+    selectAll.indeterminate = count > 0 && count < visibleBoxes.length;
+  }
+
+  function toggleSelectAll(checked) {
+    document.querySelectorAll('#triage-table tbody tr').forEach(function(row) {
+      if (row.style.display === 'none') return;
+      var box = row.querySelector('.ws-select');
+      if (box) box.checked = checked;
+    });
+    updateSelectionState();
+  }
+
+  function openDeleteModal(targets) {
+    pendingDeletions = targets;
+    document.getElementById('deleteWsList').innerHTML = targets.map(function(t) {
+      return '<li>' + escapeHtml(t.name) + '</li>';
+    }).join('');
+    var confirmInput = document.getElementById('deleteWsConfirm');
+    confirmInput.value = '';
+    document.getElementById('deleteWsConfirmBtn').disabled = true;
+    deleteWsModal.show();
+  }
+
+  function onDeleteConfirmInput() {
+    var value = (document.getElementById('deleteWsConfirm').value || '').trim().toUpperCase();
+    document.getElementById('deleteWsConfirmBtn').disabled = value !== 'DELETE';
+  }
+
+  function confirmDeleteOne(id, name) {
+    openDeleteModal([{ id: id, name: name || id }]);
+  }
+
+  function confirmDeleteSelected() {
+    var selected = getSelectedWorkspaces();
+    if (!selected.length) return;
+    openDeleteModal(selected);
+  }
+
+  async function performDelete() {
+    var btn = document.getElementById('deleteWsConfirmBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Deleting...';
+    try {
+      var res = await fetch('/workspaces/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaces: pendingDeletions })
+      });
+      var data = await res.json();
+      deleteWsModal.hide();
+
+      if (data.deletedCount) {
+        showToast('Deleted ' + data.deletedCount + ' workspace' + (data.deletedCount === 1 ? '' : 's') +
+          (data.failedCount ? ', ' + data.failedCount + ' failed' : ''), data.failedCount ? 'error' : 'success');
+      } else {
+        var firstError = (data.results || []).filter(function(r) { return !r.success; })[0];
+        showToast(firstError ? firstError.message : (data.message || 'Deletion failed'), 'error');
+      }
+
+      if (data.deletedCount) setTimeout(function() { window.location.reload(); }, 1500);
+    } catch (e) {
+      showToast(e.message, 'error');
+    } finally {
+      btn.innerHTML = '<i class="bi bi-trash me-1"></i>Delete';
+      btn.disabled = false;
+    }
   }
   </script>
 <% } %>

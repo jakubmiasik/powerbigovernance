@@ -618,6 +618,33 @@ body.sidebar-collapsed .main-content {
   border-bottom-color: var(--color-primary);
   background: transparent;
 }
+/* Dark mode: Bootstrap's own nav-tab variables resolve to near-black, which is
+   unreadable on the dark surface. Bind them to the theme tokens instead. */
+[data-theme="dark"] .nav-tabs {
+  --bs-nav-tabs-link-active-color: var(--color-primary);
+  --bs-nav-tabs-link-active-bg: transparent;
+  --bs-nav-tabs-link-active-border-color: transparent;
+  --bs-nav-tabs-link-hover-border-color: transparent;
+  --bs-nav-link-color: var(--color-text-muted);
+  --bs-nav-link-hover-color: var(--color-primary);
+}
+[data-theme="dark"] .nav-tabs .nav-link {
+  color: var(--color-text-muted) !important;
+  background-color: transparent;
+}
+[data-theme="dark"] .nav-tabs .nav-link:hover,
+[data-theme="dark"] .nav-tabs .nav-link:focus {
+  color: var(--color-primary) !important;
+}
+[data-theme="dark"] .nav-tabs .nav-link.active {
+  color: var(--color-primary) !important;
+  background-color: transparent;
+  border-bottom-color: var(--color-primary);
+}
+[data-theme="dark"] .nav-tabs .nav-link .badge.bg-light {
+  background-color: var(--color-surface-offset) !important;
+  color: var(--color-text) !important;
+}
 
 /* ──── Form controls ──── */
 .form-control, .form-select {
