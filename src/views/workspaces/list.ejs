@@ -246,6 +246,31 @@
     </div>
   </div>
 
+  <!-- Fabric administrator authorization prompt -->
+  <div class="modal fade" id="adminAuthModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h6 class="modal-title"><i class="bi bi-shield-lock text-warning me-2"></i>Fabric administrator sign-in required</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="mb-3" id="adminAuthMessage"></p>
+          <p class="text-muted small mb-0">
+            Deleting a workspace requires the <strong>Admin</strong> role on that workspace. Signing in as a Fabric
+            administrator lets the application grant the service principal that role and retry the deletion automatically.
+          </p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-sm btn-primary" id="adminAuthConfirmBtn">
+            <i class="bi bi-box-arrow-in-right me-1"></i>Authorize as Fabric Admin
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script>
   var triageRows = <%- JSON.stringify(rows.map(function(w) { return { id: w.id, name: w.name, findings: w.findings }; })) %>;
   var findingLabels = <%- JSON.stringify(findingDefs.reduce(function(acc, d) { acc[d.key] = d.label; return acc; }, {})) %>;
@@ -254,11 +279,13 @@
   var showClean = false;
   var findingsModal;
   var deleteWsModal;
+  var adminAuthModal;
   var pendingDeletions = [];
 
   document.addEventListener('DOMContentLoaded', function() {
     findingsModal = new bootstrap.Modal(document.getElementById('findingsModal'));
     deleteWsModal = new bootstrap.Modal(document.getElementById('deleteWsModal'));
+    adminAuthModal = new bootstrap.Modal(document.getElementById('adminAuthModal'));
     applyTriageFilter();
   });
 
@@ -391,6 +418,30 @@
     openDeleteModal(selected);
   }
 
+  // Showing a second modal while the first is still animating out leaves a stuck
+  // backdrop, so wait for the delete modal to finish hiding.
+  function showAdminAuthPrompt(message, authUrl) {
+    document.getElementById('adminAuthMessage').textContent = message ||
+      'The service principal is not an Admin on these workspaces.';
+
+    var confirmBtn = document.getElementById('adminAuthConfirmBtn');
+    confirmBtn.onclick = function() {
+      sessionStorage.setItem('pendingWorkspaceDeletions', JSON.stringify(pendingDeletions));
+      window.location.href = authUrl;
+    };
+
+    var deleteEl = document.getElementById('deleteWsModal');
+    if (deleteEl.classList.contains('show')) {
+      deleteEl.addEventListener('hidden.bs.modal', function once() {
+        deleteEl.removeEventListener('hidden.bs.modal', once);
+        adminAuthModal.show();
+      });
+      deleteWsModal.hide();
+    } else {
+      adminAuthModal.show();
+    }
+  }
+
   async function performDelete() {
     var btn = document.getElementById('deleteWsConfirmBtn');
     btn.disabled = true;
@@ -402,19 +453,16 @@
         body: JSON.stringify({ workspaces: pendingDeletions })
       });
       var data = await res.json();
-      deleteWsModal.hide();
 
       // The service principal is not a workspace Admin. Offer to sign in as a Fabric
-      // administrator so the app can grant that role and retry.
+      // administrator so the app can grant that role and retry. Handled before the
+      // delete modal is dismissed so the two modals hand over cleanly.
       if (data.requiresAdminAuth) {
-        if (confirm(data.message + '\n\nSign in as a Fabric administrator now?')) {
-          sessionStorage.setItem('pendingWorkspaceDeletions', JSON.stringify(pendingDeletions));
-          window.location.href = data.authUrl;
-        } else {
-          showToast(data.message, 'error');
-        }
+        showAdminAuthPrompt(data.message, data.authUrl);
         return;
       }
+
+      deleteWsModal.hide();
 
       if (data.deletedCount) {
         showToast('Deleted ' + data.deletedCount + ' workspace' + (data.deletedCount === 1 ? '' : 's') +
