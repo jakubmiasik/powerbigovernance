@@ -48,6 +48,9 @@
             <% if (sp.key_vault_name) { %>
               <span class="badge bg-info ms-2"><i class="bi bi-safe me-1"></i>Key Vault</span>
             <% } %>
+            <% if (sp.client_secret) { %>
+              <span class="badge bg-secondary ms-2"><i class="bi bi-lock-fill me-1"></i>Stored secret</span>
+            <% } %>
           </div>
           <div class="btn-group btn-group-sm ms-auto">
             <button class="btn btn-outline-secondary" onclick="testSP(<%= sp.id %>)">
@@ -64,6 +67,7 @@
               data-sp-eaoid="<%= sp.enterprise_app_object_id || '' %>"
               data-sp-kv-name="<%= sp.key_vault_name || '' %>"
               data-sp-kv-secret="<%= sp.key_vault_secret_name || '' %>"
+              data-sp-has-secret="<%= sp.client_secret ? 'true' : 'false' %>"
               onclick="openSpForm(this)"
             >
               <i class="bi bi-pencil me-1"></i>Edit
@@ -113,23 +117,50 @@
 
           <div class="card border-primary mb-3">
             <div class="card-body">
-              <h6 class="card-title"><i class="bi bi-safe me-2 text-primary"></i>Azure Key Vault <span class="badge bg-danger ms-1">Required</span></h6>
-              <p class="text-muted small mb-3">The client secret is stored securely in Azure Key Vault — never in the database.</p>
-              <div class="row">
-                <div class="col-md-6 mb-3 mb-md-0">
-                  <label for="spKvName" class="form-label">Key Vault Name <span class="text-danger">*</span></label>
-                  <input type="text" class="form-control" id="spKvName" name="keyVaultName" placeholder="my-key-vault" required>
-                  <div class="form-text">Azure Key Vault name (without .vault.azure.net)</div>
+              <h6 class="card-title"><i class="bi bi-safe me-2 text-primary"></i>Client secret source</h6>
+              <p class="text-muted small mb-3">Key Vault is recommended. Use a directly stored secret only when the vault cannot be reached from this app (for example a workspace in another tenant).</p>
+
+              <div class="form-check mb-2">
+                <input class="form-check-input" type="radio" name="secretSource" id="secretSourceKv" value="keyvault" checked onchange="updateSecretSource()">
+                <label class="form-check-label" for="secretSourceKv"><strong>Azure Key Vault</strong> <span class="badge bg-success ms-1">Recommended</span></label>
+              </div>
+              <div id="kvFields" class="ms-4 mb-3">
+                <div class="row">
+                  <div class="col-md-6 mb-3 mb-md-0">
+                    <label for="spKvName" class="form-label">Key Vault Name</label>
+                    <input type="text" class="form-control" id="spKvName" name="keyVaultName" placeholder="my-key-vault">
+                    <div class="form-text">Azure Key Vault name (without .vault.azure.net)</div>
+                  </div>
+                  <div class="col-md-6">
+                    <label for="spKvSecret" class="form-label">Secret Name</label>
+                    <input type="text" class="form-control" id="spKvSecret" name="keyVaultSecretName" placeholder="pbi-sp-client-secret">
+                    <div class="form-text">Name of the secret containing the SP client secret</div>
+                  </div>
                 </div>
-                <div class="col-md-6">
-                  <label for="spKvSecret" class="form-label">Secret Name <span class="text-danger">*</span></label>
-                  <input type="text" class="form-control" id="spKvSecret" name="keyVaultSecretName" placeholder="pbi-sp-client-secret" required>
-                  <div class="form-text">Name of the secret containing the SP client secret</div>
+                <div class="form-text mt-2">
+                  <i class="bi bi-shield-check me-1 text-success"></i>
+                  The App Service managed identity must have <strong>Key Vault Secrets User</strong> role on the vault.
                 </div>
               </div>
-              <div class="form-text mt-2">
-                <i class="bi bi-shield-check me-1 text-success"></i>
-                The App Service managed identity must have <strong>Key Vault Secrets User</strong> role on the vault.
+
+              <div class="form-check mb-2">
+                <input class="form-check-input" type="radio" name="secretSource" id="secretSourceDirect" value="direct" onchange="updateSecretSource()">
+                <label class="form-check-label" for="secretSourceDirect"><strong>Enter the client secret directly</strong></label>
+              </div>
+              <div id="directFields" class="ms-4" style="display:none;">
+                <label for="spClientSecret" class="form-label">Client Secret</label>
+                <input type="password" class="form-control" id="spClientSecret" name="clientSecret" autocomplete="new-password" placeholder="Paste the client secret value">
+                <div class="form-text" id="spClientSecretHelp">
+                  Encrypted with AES-256-GCM before it is written to the database — it is never stored as plain text,
+                  and it is never sent back to the browser.
+                </div>
+                <% if (typeof secretEncryptionReady !== 'undefined' && !secretEncryptionReady) { %>
+                  <div class="alert alert-warning py-2 px-3 small mt-2 mb-0">
+                    <i class="bi bi-exclamation-triangle me-1"></i>
+                    <strong>SECRET_ENCRYPTION_KEY is not set</strong> on this App Service, so a secret cannot be stored securely.
+                    Add that app setting before using this option.
+                  </div>
+                <% } %>
               </div>
             </div>
           </div>
@@ -160,6 +191,27 @@ function openSpForm(button) {
   document.getElementById('spEnterpriseAppObjectId').value = isEdit ? button.getAttribute('data-sp-eaoid') || '' : '';
   document.getElementById('spKvName').value = isEdit ? button.getAttribute('data-sp-kv-name') || '' : '';
   document.getElementById('spKvSecret').value = isEdit ? button.getAttribute('data-sp-kv-secret') || '' : '';
+
+  // Never round-trip a stored secret to the browser: the field starts empty and an
+  // empty value on save means "keep the existing secret".
+  var secretInput = document.getElementById('spClientSecret');
+  secretInput.value = '';
+  var hasStoredSecret = isEdit && button.getAttribute('data-sp-has-secret') === 'true';
+  var usesKeyVault = !isEdit || !!(button.getAttribute('data-sp-kv-name') || '');
+  document.getElementById('secretSourceKv').checked = usesKeyVault || !hasStoredSecret;
+  document.getElementById('secretSourceDirect').checked = !usesKeyVault && hasStoredSecret;
+  document.getElementById('spClientSecretHelp').innerHTML = hasStoredSecret
+    ? 'A secret is already stored (encrypted). Leave this blank to keep it, or enter a new value to replace it.'
+    : 'Encrypted with AES-256-GCM before it is written to the database — it is never stored as plain text, and it is never sent back to the browser.';
+  updateSecretSource();
+}
+
+function updateSecretSource() {
+  var useKv = document.getElementById('secretSourceKv').checked;
+  document.getElementById('kvFields').style.display = useKv ? '' : 'none';
+  document.getElementById('directFields').style.display = useKv ? 'none' : '';
+  document.getElementById('spKvName').required = useKv;
+  document.getElementById('spKvSecret').required = useKv;
 }
 
 async function testSP(id) {

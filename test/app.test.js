@@ -127,6 +127,84 @@ test('scheduler exposes a status snapshot for diagnostics', () => {
 
 const runMetrics = require('../src/services/runMetricsService');
 
+const workspaceDeletion = require('../src/services/workspaceDeletionService');
+const dbService = require('../src/services/databaseService');
+
+function stubDeletionDb() {
+  const calls = { marked: [], runs: [] };
+  const originalMark = dbService.markWorkspaceDeleted;
+  const originalRuns = dbService.markWorkspaceDeletedInRuns;
+  dbService.markWorkspaceDeleted = async (args) => { calls.marked.push(args); };
+  dbService.markWorkspaceDeletedInRuns = async (id) => { calls.runs.push(id); return 1; };
+  calls.restore = () => {
+    dbService.markWorkspaceDeleted = originalMark;
+    dbService.markWorkspaceDeletedInRuns = originalRuns;
+  };
+  return calls;
+}
+
+test('deleting a workspace records deleted state instead of removing the row', async () => {
+  const calls = stubDeletionDb();
+  try {
+    const pbi = { deleteWorkspace: async () => ({}) };
+    const result = await workspaceDeletion.deleteWorkspace(pbi, { id: 'ws-1', name: 'Finance', runId: 7 });
+    assert.equal(result.success, true);
+    assert.equal(calls.marked.length, 1);
+    assert.equal(calls.marked[0].workspaceId, 'ws-1');
+    assert.deepEqual(calls.runs, ['ws-1']);
+  } finally {
+    calls.restore();
+  }
+});
+
+test('a failed API delete is not recorded as deleted', async () => {
+  const calls = stubDeletionDb();
+  try {
+    const pbi = { deleteWorkspace: async () => { throw new Error('API error (403): Forbidden'); } };
+    const result = await workspaceDeletion.deleteWorkspace(pbi, { id: 'ws-2', name: 'Sales' });
+    assert.equal(result.success, false);
+    assert.match(result.message, /403/);
+    assert.equal(calls.marked.length, 0, 'state must not be recorded when the API call failed');
+  } finally {
+    calls.restore();
+  }
+});
+
+test('batch deletion reports per-workspace outcomes and keeps going after a failure', async () => {
+  const calls = stubDeletionDb();
+  try {
+    const pbi = {
+      deleteWorkspace: async (id) => {
+        if (id === 'bad') throw new Error('API error (404): Not found');
+        return {};
+      },
+    };
+    const summary = await workspaceDeletion.deleteWorkspaces(pbi, [
+      { id: 'ws-1', name: 'One' }, { id: 'bad', name: 'Broken' }, { id: 'ws-3', name: 'Three' },
+    ]);
+    assert.equal(summary.deletedCount, 2);
+    assert.equal(summary.failedCount, 1);
+    assert.equal(summary.results.length, 3);
+    assert.equal(summary.results[1].success, false);
+  } finally {
+    calls.restore();
+  }
+});
+
+test('bookkeeping failure after a successful delete still reports success', async () => {
+  const calls = stubDeletionDb();
+  dbService.markWorkspaceDeleted = async () => { throw new Error('Invalid object name'); };
+  try {
+    const pbi = { deleteWorkspace: async () => ({}) };
+    const result = await workspaceDeletion.deleteWorkspace(pbi, { id: 'ws-9', name: 'Nine' });
+    assert.equal(result.success, true, 'the workspace is gone; do not ask the user to retry');
+    assert.equal(result.stateRecorded, false);
+    assert.match(result.message, /could not be recorded/);
+  } finally {
+    calls.restore();
+  }
+});
+
 function sampleRun(overrides) {
   return Object.assign({
     summary: {
@@ -732,4 +810,54 @@ test('onelake content is grouped by area with folders underneath', async () => {
   assert.deepEqual(onelake.groups.map(g => g.label), ['Files', 'Tables']);
   assert.equal(onelake.groups[1].sizeBytes, 900);
   assert.deepEqual(onelake.groups[1].rows, [['Tables/dim_date', 3, 900]]);
+});
+
+// ── Stored service principal secret encryption ──
+test('secretCryptoService round-trips a secret', () => {
+  process.env.SECRET_ENCRYPTION_KEY = 'unit-test-encryption-key-value-01';
+  delete require.cache[require.resolve('../src/services/secretCryptoService')];
+  const crypto = require('../src/services/secretCryptoService');
+  const cipher = crypto.encryptSecret('super-secret-value');
+  assert.ok(crypto.isEncrypted(cipher));
+  assert.ok(!cipher.includes('super-secret-value'));
+  assert.equal(crypto.decryptSecret(cipher), 'super-secret-value');
+});
+
+test('secretCryptoService passes legacy plaintext through unchanged', () => {
+  process.env.SECRET_ENCRYPTION_KEY = 'unit-test-encryption-key-value-01';
+  delete require.cache[require.resolve('../src/services/secretCryptoService')];
+  const crypto = require('../src/services/secretCryptoService');
+  assert.equal(crypto.decryptSecret('legacy-plaintext'), 'legacy-plaintext');
+});
+
+test('secretCryptoService refuses to encrypt without a configured key', () => {
+  const saved = process.env.SECRET_ENCRYPTION_KEY;
+  delete process.env.SECRET_ENCRYPTION_KEY;
+  delete process.env.SECRET_ENCRYPTION_KEY_BASE64;
+  delete require.cache[require.resolve('../src/services/secretCryptoService')];
+  const crypto = require('../src/services/secretCryptoService');
+  assert.equal(crypto.isEncryptionConfigured(), false);
+  assert.throws(() => crypto.encryptSecret('nope'));
+  if (saved) process.env.SECRET_ENCRYPTION_KEY = saved;
+  delete require.cache[require.resolve('../src/services/secretCryptoService')];
+});
+
+test('resolveClientSecret falls back to the stored secret when Key Vault is unset', async () => {
+  process.env.SECRET_ENCRYPTION_KEY = 'unit-test-encryption-key-value-01';
+  delete require.cache[require.resolve('../src/services/secretCryptoService')];
+  delete require.cache[require.resolve('../src/services/authService')];
+  const crypto = require('../src/services/secretCryptoService');
+  const auth = require('../src/services/authService');
+  const stored = crypto.encryptSecret('fallback-secret');
+  const value = await auth._private.resolveClientSecret({ name: 'sp', client_id: 'abc', client_secret: stored });
+  assert.equal(value, 'fallback-secret');
+});
+
+test('resolveClientSecret throws when no credential is available', async () => {
+  delete require.cache[require.resolve('../src/services/authService')];
+  const auth = require('../src/services/authService');
+  await assert.rejects(
+    () => auth._private.resolveClientSecret({ name: 'sp', client_id: 'abc' }),
+    /no credential/i
+  );
 });

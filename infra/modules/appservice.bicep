@@ -10,6 +10,10 @@ param resourceSuffix string
 @description('Application Insights connection string')
 param appInsightsConnectionString string
 
+@description('Key used to encrypt service principal secrets stored in the database')
+@secure()
+param secretEncryptionKey string = uniqueString(subscription().id, resourceGroup().id, 'pbi-gov-secret-encryption')
+
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: 'asp-pbi-gov-${resourceSuffix}'
   location: location
@@ -56,6 +60,10 @@ resource webApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'SCM_DO_BUILD_DURING_DEPLOYMENT'
           value: 'true'
+        }
+        {
+          name: 'SECRET_ENCRYPTION_KEY'
+          value: secretEncryptionKey
         }
       ]
     }

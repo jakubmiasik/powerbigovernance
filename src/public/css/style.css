@@ -597,6 +597,65 @@ body.sidebar-collapsed .main-content {
   color: #fff;
 }
 
+/* Dark mode: bind Bootstrap's own dark palette to the app tokens so components
+   we do not style explicitly (list groups, tables, dropdowns, modals) stay legible. */
+[data-theme="dark"] {
+  --bs-body-bg: var(--color-bg);
+  --bs-body-color: var(--color-text);
+  --bs-emphasis-color: var(--color-text);
+  --bs-secondary-color: var(--color-text-muted);
+  --bs-tertiary-bg: var(--color-surface-2);
+  --bs-secondary-bg: var(--color-surface-offset);
+  --bs-border-color: var(--color-border);
+  --bs-list-group-bg: var(--color-surface);
+  --bs-list-group-color: var(--color-text);
+  --bs-list-group-border-color: var(--color-divider);
+  --bs-list-group-action-hover-bg: var(--color-surface-offset);
+  --bs-list-group-action-hover-color: var(--color-text);
+  --bs-table-bg: transparent;
+  --bs-table-color: var(--color-text);
+}
+/* Expanded row / panel backgrounds used by the users detail table. */
+[data-theme="dark"] .bg-body-tertiary,
+[data-theme="dark"] .bg-body-secondary,
+[data-theme="dark"] .bg-light,
+[data-theme="dark"] .bg-white {
+  background-color: var(--color-surface-2) !important;
+  color: var(--color-text) !important;
+}
+[data-theme="dark"] .list-group-item {
+  background-color: var(--color-surface) !important;
+  color: var(--color-text) !important;
+  border-color: var(--color-divider);
+}
+[data-theme="dark"] .table > :not(caption) > * > * {
+  color: var(--color-text);
+}
+[data-theme="dark"] .table-light,
+[data-theme="dark"] .table-light > th,
+[data-theme="dark"] .table-light > td {
+  background-color: var(--color-surface-offset) !important;
+  color: var(--color-text) !important;
+}
+/* Stat-card subtitles: keep them muted but never near-black on a dark card. */
+[data-theme="dark"] .stat-card .text-muted,
+[data-theme="dark"] .card .small.text-muted {
+  color: var(--color-text-muted) !important;
+}
+
+/* Migrate: "click Refresh" veil over the workspace table. Mostly transparent so the
+   table stays readable underneath instead of being washed out to near-white. */
+.workspace-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--color-surface) 20%, transparent);
+  backdrop-filter: blur(1px);
+}
+
 /* ──── Nav tabs ──── */
 .nav-tabs { border-bottom-color: var(--color-divider); }
 .nav-tabs .nav-link {
@@ -617,6 +676,33 @@ body.sidebar-collapsed .main-content {
   color: var(--color-primary);
   border-bottom-color: var(--color-primary);
   background: transparent;
+}
+/* Dark mode: Bootstrap's own nav-tab variables resolve to near-black, which is
+   unreadable on the dark surface. Bind them to the theme tokens instead. */
+[data-theme="dark"] .nav-tabs {
+  --bs-nav-tabs-link-active-color: var(--color-primary);
+  --bs-nav-tabs-link-active-bg: transparent;
+  --bs-nav-tabs-link-active-border-color: transparent;
+  --bs-nav-tabs-link-hover-border-color: transparent;
+  --bs-nav-link-color: var(--color-text-muted);
+  --bs-nav-link-hover-color: var(--color-primary);
+}
+[data-theme="dark"] .nav-tabs .nav-link {
+  color: var(--color-text-muted) !important;
+  background-color: transparent;
+}
+[data-theme="dark"] .nav-tabs .nav-link:hover,
+[data-theme="dark"] .nav-tabs .nav-link:focus {
+  color: var(--color-primary) !important;
+}
+[data-theme="dark"] .nav-tabs .nav-link.active {
+  color: var(--color-primary) !important;
+  background-color: transparent;
+  border-bottom-color: var(--color-primary);
+}
+[data-theme="dark"] .nav-tabs .nav-link .badge.bg-light {
+  background-color: var(--color-surface-offset) !important;
+  color: var(--color-text) !important;
 }
 
 /* ──── Form controls ──── */
