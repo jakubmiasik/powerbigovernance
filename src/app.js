@@ -89,7 +89,13 @@ app.use((req, res, next) => {
 
 // Health check BEFORE DB middleware so it always responds instantly
 app.get('/health', (_req, res) => {
-  res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
+  const { isEncryptionConfigured } = require('./services/secretCryptoService');
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    // Reports whether the runtime can see SECRET_ENCRYPTION_KEY, without leaking it.
+    secretEncryption: isEncryptionConfigured() ? 'configured' : 'missing',
+  });
 });
 
 // Global context: selected run + available runs, cached to avoid DB work on every request
