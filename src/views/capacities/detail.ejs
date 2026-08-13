@@ -295,7 +295,12 @@
   <div class="card-body small" id="schedulerHealthBody">
     <% if (!sched || !sched.started) { %>
       <span class="badge bg-danger">Not running</span>
-      <span class="text-muted ms-2">The background scheduler is not active on this instance.</span>
+      <span class="text-muted ms-2">
+        No scheduler is active in the process serving this request, so no pause/resume
+        will fire. Usual causes: the App Service worker was recycled before startup
+        completed, or startup failed. Click <strong>Run scheduler now</strong> to start
+        it on this instance, then reload.
+      </span>
     <% } else { %>
       <span class="badge bg-success">Running</span>
       <span class="text-muted ms-2">
