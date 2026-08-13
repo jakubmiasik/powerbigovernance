@@ -937,3 +937,54 @@ test('non-permission failures are never elevated', async () => {
     stub.restore();
   }
 });
+
+// ── HTTP error explanations ──
+const httpErrors = require('../src/services/httpErrorService');
+
+test('known status codes are explained in plain language', () => {
+  const bad = httpErrors.explainStatus(400);
+  assert.equal(bad.title, 'Bad Request');
+  assert.match(bad.explanation, /could not understand the request/i);
+  assert.ok(bad.hint);
+
+  const forbidden = httpErrors.explainStatus(403);
+  assert.match(forbidden.explanation, /not allowed/i);
+  assert.match(forbidden.hint, /Admin role/i);
+});
+
+test('status codes are recovered from error text and axios errors', () => {
+  assert.equal(httpErrors.extractStatus('API error (429): rate limited'), 429);
+  assert.equal(httpErrors.extractStatus({ response: { status: 503 } }), 503);
+  assert.equal(httpErrors.extractStatus(new Error('API error (404): missing')), 404);
+  assert.equal(httpErrors.extractStatus('no code here'), null);
+});
+
+test('unknown codes fall back to a class-level explanation', () => {
+  const client = httpErrors.explainStatus(418);
+  assert.equal(client.status, 418);
+  assert.match(client.explanation, /4xx/);
+
+  const server = httpErrors.explainStatus(599);
+  assert.match(server.explanation, /5xx/);
+  assert.equal(httpErrors.explainStatus(null), null);
+});
+
+test('describeError produces a one-line summary', () => {
+  assert.match(httpErrors.describeError('API error (401): nope'), /^401 Unauthorized — /);
+  assert.equal(httpErrors.describeError('nothing to explain'), null);
+});
+
+test('deletion failures carry an explanation of the status code', async () => {
+  const stub = stubDeletionDb();
+  try {
+    const pbi = { deleteWorkspace: async () => { throw new Error('API error (404): Workspace not found'); } };
+    const result = await workspaceDeletion.deleteWorkspace(pbi, { id: 'ws-9', name: 'Gone' });
+    assert.equal(result.success, false);
+    assert.equal(result.status, 404);
+    assert.equal(result.statusTitle, 'Not Found');
+    assert.match(result.explanation, /does not exist/i);
+    assert.ok(result.hint);
+  } finally {
+    stub.restore();
+  }
+});

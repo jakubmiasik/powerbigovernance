@@ -5,6 +5,7 @@ const {
   getAccessTokenForSP, getFabricTokenForSP, getAzureManagementTokenForSP, getGraphTokenForSP, getOneLakeTokenForSP,
   getSqlTokenForSP,
 } = require('./authService');
+const { explainStatus } = require('./httpErrorService');
 
 const PBI_BASE = 'https://api.powerbi.com/v1.0/myorg';
 const PBI_ADMIN = PBI_BASE + '/admin';
@@ -101,7 +102,18 @@ async function withRetry(operation, context = {}) {
 function buildApiError(err) {
   const status = err.response?.status;
   const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-  return new Error('API error (' + (status || 'unknown') + '): ' + message);
+  const apiError = new Error('API error (' + (status || 'unknown') + '): ' + message);
+  // Keep the structured detail alongside the text so callers can explain the
+  // failure to the user instead of surfacing a bare status code.
+  apiError.status = status || null;
+  apiError.apiMessage = message;
+  const info = explainStatus(status);
+  if (info) {
+    apiError.explanation = info.explanation;
+    apiError.hint = info.hint;
+    apiError.statusTitle = info.title;
+  }
+  return apiError;
 }
 
 async function safeGet(token, url, params = {}) {
@@ -591,6 +603,40 @@ function createPowerBIService(spConfig, authOptions = {}) {
       {});
   }
 
+  // ── Current state of a single workspace ──
+  // GET https://api.fabric.microsoft.com/v1/workspaces/{workspaceId}
+  // Used to confirm a workspace still exists (and is still reachable) before a
+  // destructive action is offered.
+  async function getWorkspaceState(workspaceId) {
+    if (!workspaceId) throw new Error('Workspace ID is required.');
+    const token = await getFabricToken();
+    try {
+      const data = await safeGet(token, `${FABRIC_CORE}/workspaces/${workspaceId}`);
+      return {
+        id: workspaceId,
+        exists: true,
+        name: data.displayName || data.name || null,
+        state: data.state || 'Active',
+        capacityId: data.capacityId || null,
+      };
+    } catch (err) {
+      if (err.status === 404) {
+        return { id: workspaceId, exists: false, state: 'Deleted', name: null };
+      }
+      // 403 means it exists but this principal cannot see it — that is a permission
+      // problem, not a deleted workspace, and must not be reported as "gone".
+      return {
+        id: workspaceId,
+        exists: null,
+        state: 'Unknown',
+        error: err.message,
+        status: err.status || null,
+        explanation: err.explanation || null,
+        hint: err.hint || null,
+      };
+    }
+  }
+
   // ── Delete workspace: Fabric Core API ──
   // DELETE https://api.fabric.microsoft.com/v1/workspaces/{workspaceId}
   // The caller must be a workspace Admin. Returns 200 with no body on success.
@@ -961,6 +1007,7 @@ function createPowerBIService(spConfig, authOptions = {}) {
     assignToCapacity,
     unassignFromCapacity,
     deleteWorkspace,
+    getWorkspaceState,
     addWorkspaceAdmin,
     removeWorkspaceUser,
     getRoleAssignments,

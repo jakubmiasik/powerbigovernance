@@ -6,7 +6,16 @@ const { computeWorkspaceInsights, FINDING_DEFS } = require('../services/workspac
 const { buildItemDetails } = require('../services/itemDetailsService');
 const { deleteWorkspaces } = require('../services/workspaceDeletionService');
 const { getDelegatedAuthUrl } = require('../services/authService');
+const { explainError } = require('../services/httpErrorService');
 const axios = require('axios');
+
+// Attach a plain-language explanation to an error response so the UI can tell the
+// user what a bare status code such as 403 actually means.
+function explainForResponse(err) {
+  const info = explainError(err);
+  if (!info) return {};
+  return { status: info.status, statusTitle: info.title, explanation: info.explanation, hint: info.hint };
+}
 
 // Grant the service principal the workspace Admin role using a delegated Fabric
 // administrator token. The Fabric delete API only accepts a workspace Admin, and
@@ -206,6 +215,51 @@ router.post('/delete', async (req, res) => {
 
 // Sign in as a Fabric administrator so the app can grant itself the workspace
 // Admin role required by the delete API. Registered above /:id.
+// ── Live workspace status check ──
+// The list is rendered from a stored scan, which can be hours old. Deletion is only
+// offered once the current state has been confirmed against Fabric.
+router.post('/status-check', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const ids = (Array.isArray(body.ids) ? body.ids : [])
+      .map(entry => (typeof entry === 'string' ? entry : entry && entry.id))
+      .filter(Boolean);
+
+    if (!ids.length) {
+      return res.status(400).json({ success: false, message: 'No workspaces to check.' });
+    }
+
+    const pbi = await getPbiService(req, res);
+    const persisted = await db.getWorkspaceStates().catch(() => []);
+    const deletedIds = new Set(
+      (persisted || [])
+        .filter(row => (row.state || '').toLowerCase() === 'deleted')
+        .map(row => row.workspace_id)
+    );
+
+    const statuses = [];
+    for (const id of ids) {
+      // A workspace we already recorded as deleted needs no API call.
+      if (deletedIds.has(id)) {
+        statuses.push({ id, exists: false, state: 'Deleted', source: 'recorded' });
+        continue;
+      }
+      statuses.push({ ...(await pbi.getWorkspaceState(id)), source: 'api' });
+    }
+
+    res.json({
+      success: true,
+      checkedAt: new Date().toISOString(),
+      statuses,
+      activeCount: statuses.filter(s => s.exists === true).length,
+      deletedCount: statuses.filter(s => s.exists === false).length,
+      unknownCount: statuses.filter(s => s.exists === null).length,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message, ...explainForResponse(err) });
+  }
+});
+
 router.get('/grant-auth', async (req, res) => {
   try {
     const redirectUri = `${req.protocol}://${req.get('host')}/migrate/auth/callback`;

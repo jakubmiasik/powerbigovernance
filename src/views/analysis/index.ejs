@@ -64,7 +64,18 @@
               <tr data-filter="<%= [runItem.id, runItem.sp_name || '', runItem.status || '', runItem.run_by || '', runItem.tenant_id || ''].join(' ').toLowerCase() %>">
                 <td><%= runItem.id %></td>
                 <td><strong><%= runItem.sp_name || '-' %></strong></td>
-                <td><span class="badge bg-<%= statusColor %>"><%= runItem.status %></span></td>
+                <td>
+                  <% var isLive = runItem.status === 'running' || runItem.status === 'cancelling'; %>
+                  <% if (isLive) { %>
+                    <button class="badge bg-<%= statusColor %> border-0"
+                            title="Show live progress for this run"
+                            onclick="showRunProgress(<%= runItem.id %>)">
+                      <span class="spinner-border spinner-border-sm me-1" style="width:.6rem;height:.6rem;"></span><%= runItem.status %>
+                    </button>
+                  <% } else { %>
+                    <span class="badge bg-<%= statusColor %>"><%= runItem.status %></span>
+                  <% } %>
+                </td>
                 <td><%= runItem.total_workspaces || 0 %></td>
                 <td><%= runItem.total_reports || 0 %></td>
                 <td><%= runItem.total_datasets || 0 %></td>
@@ -135,6 +146,10 @@
       </div>
       <div class="modal-footer justify-content-between flex-wrap gap-2">
         <button class="btn btn-outline-danger" id="cancelAnalysisBtn" style="display:none;" onclick="cancelAnalysis()"><i class="bi bi-x-circle me-1"></i>Cancel</button>
+        <button class="btn btn-outline-secondary" id="hideProgressBtn" style="display:none;" data-bs-dismiss="modal"
+                title="The run continues on the server. Click the Running badge to come back.">
+          <i class="bi bi-box-arrow-down me-1"></i>Run in background
+        </button>
         <div class="ms-auto d-flex gap-2" id="progressFooterActions" style="display:none;">
           <a href="#" class="btn btn-primary" id="viewResultsBtn"><i class="bi bi-eye me-1"></i>View Results</a>
           <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
@@ -147,22 +162,57 @@
 <script>
 var progressInterval = null;
 var activeRunId = null;
+var progressModal = null;
 
-async function startAnalysis() {
-  var spId = document.getElementById('spSelect').value;
-  var modal = new bootstrap.Modal(document.getElementById('progressModal'));
-  modal.show();
+function getProgressModal() {
+  if (!progressModal) {
+    progressModal = new bootstrap.Modal(document.getElementById('progressModal'));
+  }
+  return progressModal;
+}
 
-  activeRunId = null;
+// Put the modal back into its "in flight" state. Shared by a new run and by
+// reattaching to a run that is already going.
+function resetProgressUi(message) {
   document.getElementById('progressBar').style.width = '0%';
   document.getElementById('progressBar').textContent = '0%';
   document.getElementById('progressBar').classList.add('progress-bar-animated');
-  document.getElementById('progressMessage').textContent = 'Starting analysis...';
+  document.getElementById('progressMessage').textContent = message;
   document.getElementById('progressDetail').textContent = '';
   document.getElementById('progressFooterActions').style.display = 'none';
   document.getElementById('cancelAnalysisBtn').style.display = 'none';
   document.getElementById('cancelAnalysisBtn').disabled = false;
+  document.getElementById('hideProgressBtn').style.display = 'none';
   document.getElementById('analysisSpinner').style.display = '';
+}
+
+function startPolling(runId) {
+  if (progressInterval) clearInterval(progressInterval);
+  activeRunId = runId;
+  pollProgress(runId);
+  progressInterval = setInterval(function() { pollProgress(runId); }, 2000);
+}
+
+/**
+ * Reopen the progress modal for a run that is already in flight — for example after
+ * the modal was closed, or after the page was reloaded while the run continued on
+ * the server.
+ */
+function showRunProgress(runId) {
+  if (!runId) return;
+  resetProgressUi('Reconnecting to run #' + runId + '...');
+  document.getElementById('cancelAnalysisBtn').style.display = '';
+  document.getElementById('hideProgressBtn').style.display = '';
+  getProgressModal().show();
+  startPolling(runId);
+}
+
+async function startAnalysis() {
+  var spId = document.getElementById('spSelect').value;
+  getProgressModal().show();
+
+  activeRunId = null;
+  resetProgressUi('Starting analysis...');
 
   try {
     var response = await fetch('/analysis/run', {
@@ -179,9 +229,9 @@ async function startAnalysis() {
       return;
     }
 
-    activeRunId = data.runId;
     document.getElementById('cancelAnalysisBtn').style.display = '';
-    progressInterval = setInterval(function() { pollProgress(data.runId); }, 2000);
+    document.getElementById('hideProgressBtn').style.display = '';
+    startPolling(data.runId);
   } catch (err) {
     document.getElementById('progressMessage').textContent = 'Error: ' + err.message;
     document.getElementById('analysisSpinner').style.display = 'none';
@@ -263,11 +313,29 @@ async function pollProgress(runId) {
 
     renderActivityLog(data.events || []);
 
+    // A run the server no longer holds in memory (for example after a restart)
+    // would otherwise be polled forever with an empty progress bar.
+    if (data.status === 'unknown') {
+      clearInterval(progressInterval);
+      progressInterval = null;
+      document.getElementById('analysisSpinner').style.display = 'none';
+      document.getElementById('cancelAnalysisBtn').style.display = 'none';
+      document.getElementById('hideProgressBtn').style.display = 'none';
+      document.getElementById('progressFooterActions').style.display = '';
+      document.getElementById('progressBar').classList.remove('progress-bar-animated');
+      document.getElementById('progressMessage').textContent =
+        'Live progress for run #' + runId + ' is no longer available.';
+      document.getElementById('progressDetail').textContent =
+        'The application restarted while this run was in flight, so its progress is no longer tracked. Check the run status in the table below.';
+      return;
+    }
+
     if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
       clearInterval(progressInterval);
       progressInterval = null;
       document.getElementById('analysisSpinner').style.display = 'none';
       document.getElementById('cancelAnalysisBtn').style.display = 'none';
+      document.getElementById('hideProgressBtn').style.display = 'none';
       document.getElementById('progressFooterActions').style.display = '';
       document.getElementById('progressBar').classList.remove('progress-bar-animated');
 
