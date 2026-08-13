@@ -5,6 +5,29 @@ const { createPowerBIService } = require('../services/powerbiService');
 const { computeWorkspaceInsights, FINDING_DEFS } = require('../services/workspaceInsightsService');
 const { buildItemDetails } = require('../services/itemDetailsService');
 const { deleteWorkspaces } = require('../services/workspaceDeletionService');
+const { getDelegatedAuthUrl } = require('../services/authService');
+const axios = require('axios');
+
+// Grant the service principal the workspace Admin role using a delegated Fabric
+// administrator token. The Fabric delete API only accepts a workspace Admin, and
+// Power BI's write admin APIs do not accept service principal tokens — so the
+// signed-in administrator's own token has to perform the grant.
+function buildElevator(req, sp) {
+  const token = req.session && req.session.pbiGrantToken;
+  if (!token || !sp || !sp.enterprise_app_object_id) return null;
+
+  return async function elevate(workspaceId) {
+    await axios.post(
+      `https://api.powerbi.com/v1.0/myorg/admin/groups/${workspaceId}/users`,
+      {
+        groupUserAccessRight: 'Admin',
+        identifier: sp.enterprise_app_object_id,
+        principalType: 'App',
+      },
+      { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, timeout: 30000 }
+    );
+  };
+}
 
 function categorizeItems(items) {
   const reports = [], datasets = [], dashboards = [], dataflows = [];
@@ -152,14 +175,43 @@ router.post('/delete', async (req, res) => {
 
     const pbi = await getPbiService(req, res);
     const { run } = await resolveRun(req, res);
+    const sps = await db.getServicePrincipals();
+    const sp = sps.length ? sps[0] : null;
+
     const summary = await deleteWorkspaces(pbi, targets, {
       runId: run ? run.id : null,
       deletedBy: (req.user && (req.user.email || req.user.name)) || null,
+      elevate: buildElevator(req, sp),
     });
+
+    // A permission failure is recoverable: signing in as a Fabric administrator lets
+    // the app grant itself the workspace Admin role and retry.
+    if (summary.permissionDeniedCount > 0 && !(req.session && req.session.pbiGrantToken)) {
+      return res.json({
+        success: false,
+        ...summary,
+        requiresAdminAuth: true,
+        authUrl: '/workspaces/grant-auth',
+        message: sp && sp.enterprise_app_object_id
+          ? 'The service principal is not an Admin on these workspaces. Authorize as a Fabric administrator to grant that role and retry.'
+          : 'The service principal is not an Admin on these workspaces. Add the Enterprise Application Object ID in Settings, then authorize as a Fabric administrator.',
+      });
+    }
 
     res.json({ success: summary.failedCount === 0, ...summary });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Sign in as a Fabric administrator so the app can grant itself the workspace
+// Admin role required by the delete API. Registered above /:id.
+router.get('/grant-auth', async (req, res) => {
+  try {
+    const redirectUri = `${req.protocol}://${req.get('host')}/migrate/auth/callback`;
+    res.redirect(await getDelegatedAuthUrl(redirectUri, 'grant-sp-workspaces'));
+  } catch (err) {
+    res.redirect('/workspaces?error=' + encodeURIComponent(err.message));
   }
 });
 

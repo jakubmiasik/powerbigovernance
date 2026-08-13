@@ -151,6 +151,11 @@ router.get('/auth/callback', async (req, res) => {
       return res.redirect('/analysis?grantAuth=success');
     }
 
+    if (state === 'grant-sp-workspaces') {
+      req.session.pbiGrantToken = token;
+      return res.redirect('/workspaces?grantAuth=success');
+    }
+
     req.session.pbiMigrationToken = token;
     res.redirect('/migrate');
   } catch (err) {

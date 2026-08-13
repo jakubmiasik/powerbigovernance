@@ -861,3 +861,79 @@ test('resolveClientSecret throws when no credential is available', async () => {
     /no credential/i
   );
 });
+
+// ── Workspace deletion: elevate to workspace Admin on 403 ──
+test('a 403 triggers a workspace Admin grant and one retry', async () => {
+  const stub = stubDeletionDb();
+  try {
+    const granted = [];
+    let attempts = 0;
+    const pbi = {
+      deleteWorkspace: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('API error (403): Insufficient privileges');
+      },
+    };
+    const result = await workspaceDeletion.deleteWorkspace(pbi, {
+      id: 'ws-1',
+      name: 'Finance',
+      elevate: async (id) => { granted.push(id); },
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.elevated, true);
+    assert.equal(attempts, 2);
+    assert.deepEqual(granted, ['ws-1']);
+    assert.deepEqual(stub.runs, ['ws-1']);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('a 403 without an elevate callback is reported as a permission problem', async () => {
+  const stub = stubDeletionDb();
+  try {
+    const pbi = { deleteWorkspace: async () => { throw new Error('API error (403): Forbidden'); } };
+    const result = await workspaceDeletion.deleteWorkspace(pbi, { id: 'ws-2' });
+    assert.equal(result.success, false);
+    assert.equal(result.permissionDenied, true);
+    assert.equal(stub.runs.length, 0);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('a failed grant does not retry and explains why', async () => {
+  const stub = stubDeletionDb();
+  try {
+    let attempts = 0;
+    const pbi = {
+      deleteWorkspace: async () => { attempts += 1; throw new Error('API error (403): Forbidden'); },
+    };
+    const result = await workspaceDeletion.deleteWorkspace(pbi, {
+      id: 'ws-3',
+      elevate: async () => { throw new Error('Tenant.ReadWrite.All required'); },
+    });
+    assert.equal(result.success, false);
+    assert.equal(attempts, 1);
+    assert.match(result.message, /could not be granted/i);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('non-permission failures are never elevated', async () => {
+  const stub = stubDeletionDb();
+  try {
+    let elevateCalls = 0;
+    const pbi = { deleteWorkspace: async () => { throw new Error('API error (500): Server error'); } };
+    const result = await workspaceDeletion.deleteWorkspace(pbi, {
+      id: 'ws-4',
+      elevate: async () => { elevateCalls += 1; },
+    });
+    assert.equal(result.success, false);
+    assert.equal(elevateCalls, 0);
+    assert.equal(result.permissionDenied, false);
+  } finally {
+    stub.restore();
+  }
+});
