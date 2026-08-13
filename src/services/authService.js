@@ -1,6 +1,7 @@
 const msal = require('@azure/msal-node');
 const { DefaultAzureCredential } = require('@azure/identity');
 const { SecretClient } = require('@azure/keyvault-secrets');
+const { decryptSecret } = require('./secretCryptoService');
 
 // ── Key Vault: resolve SP client secret at runtime ──
 const kvClientCache = new Map(); // kvName → SecretClient
@@ -89,12 +90,33 @@ async function getSecretFromKeyVault(keyVaultName, secretName, options = {}) {
   }
 }
 
-// Resolve the client secret for a SP config — ALWAYS from Key Vault
+// Resolve the client secret for a SP config.
+// Key Vault is preferred. A directly stored secret (encrypted at rest) is the
+// fallback for tenants where the vault cannot be reached at all.
 async function resolveClientSecret(spConfig, options = {}) {
-  if (!spConfig.key_vault_name || !spConfig.key_vault_secret_name) {
-    throw new Error('Service principal must have Key Vault configured. Open Settings and set the Key Vault Name and Secret Name.');
+  const hasKeyVault = Boolean(spConfig.key_vault_name && spConfig.key_vault_secret_name);
+  const hasStoredSecret = Boolean(spConfig.client_secret);
+
+  if (hasKeyVault) {
+    try {
+      return await getSecretFromKeyVault(spConfig.key_vault_name, spConfig.key_vault_secret_name, options);
+    } catch (err) {
+      if (!hasStoredSecret) throw err;
+      // The vault is configured but unusable (cross-tenant, network, or policy).
+      // Fall back rather than blocking the tenant entirely.
+      console.warn(`[Auth] Key Vault lookup failed for "${spConfig.name || spConfig.client_id}", using the stored secret:`, err.message);
+    }
   }
-  return getSecretFromKeyVault(spConfig.key_vault_name, spConfig.key_vault_secret_name, options);
+
+  if (hasStoredSecret) {
+    try {
+      return decryptSecret(spConfig.client_secret);
+    } catch (err) {
+      throw new Error(`Stored client secret could not be decrypted (${err.message}). Re-enter it in Settings, or check SECRET_ENCRYPTION_KEY.`);
+    }
+  }
+
+  throw new Error('Service principal has no credential. Open Settings and either configure Key Vault or provide the client secret directly.');
 }
 
 // ── Cache MSAL apps by config hash to support multiple SPs ──
@@ -252,4 +274,5 @@ module.exports = {
   getDelegatedAuthUrl, acquireDelegatedToken,
   getKeyVaultDelegatedAuthUrl, acquireKeyVaultDelegatedToken,
   getSecretFromKeyVault,
+  _private: { resolveClientSecret },
 };

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
+const { isEncryptionConfigured } = require('../services/secretCryptoService');
 const {
   getAccessTokenForSP,
   getKeyVaultDelegatedAuthUrl,
@@ -44,7 +45,9 @@ router.get('/', async (req, res) => {
     res.render('config', {
       title: 'Settings',
       user: req.user,
-      servicePrincipals,
+      // Never hand the stored ciphertext to the template — only whether one exists.
+      servicePrincipals: servicePrincipals.map((sp) => ({ ...sp, client_secret: sp.client_secret ? true : null })),
+      secretEncryptionReady: isEncryptionConfigured(),
       success: req.flash('success'),
       error: req.flash('error'),
     });
@@ -53,6 +56,7 @@ router.get('/', async (req, res) => {
       title: 'Settings',
       user: req.user,
       servicePrincipals: [],
+      secretEncryptionReady: isEncryptionConfigured(),
       success: [],
       error: [err.message],
     });
@@ -60,21 +64,33 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/sp/save', async (req, res) => {
-  const { id, name, tenantId, clientId, enterpriseAppObjectId, keyVaultName, keyVaultSecretName } = req.body;
-  if (!name || !tenantId || !clientId || !keyVaultName || !keyVaultSecretName) {
-    req.flash('error', 'Name, Tenant ID, Client ID, Key Vault Name, and Secret Name are all required.');
+  const { id, name, tenantId, clientId, enterpriseAppObjectId, keyVaultName, keyVaultSecretName, clientSecret, secretSource } = req.body;
+  const useKeyVault = secretSource !== 'direct';
+
+  if (!name || !tenantId || !clientId) {
+    req.flash('error', 'Name, Tenant ID and Client ID are required.');
     return res.redirect('/settings');
   }
+  if (useKeyVault && (!keyVaultName || !keyVaultSecretName)) {
+    req.flash('error', 'Key Vault Name and Secret Name are required when using Key Vault.');
+    return res.redirect('/settings');
+  }
+  if (!useKeyVault && !clientSecret && !id) {
+    req.flash('error', 'A client secret is required when Key Vault is not used.');
+    return res.redirect('/settings');
+  }
+
   try {
     await db.saveServicePrincipal({
       id: id ? parseInt(id, 10) : null,
       name,
       tenantId,
       clientId,
-      clientSecret: null,
+      // undefined leaves any existing secret untouched; null clears it.
+      clientSecret: useKeyVault ? null : (clientSecret ? clientSecret : undefined),
       enterpriseAppObjectId: enterpriseAppObjectId || null,
-      keyVaultName,
-      keyVaultSecretName,
+      keyVaultName: useKeyVault ? keyVaultName : null,
+      keyVaultSecretName: useKeyVault ? keyVaultSecretName : null,
     });
     req.flash('success', 'Service principal saved.');
   } catch (err) {

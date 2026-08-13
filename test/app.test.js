@@ -811,3 +811,53 @@ test('onelake content is grouped by area with folders underneath', async () => {
   assert.equal(onelake.groups[1].sizeBytes, 900);
   assert.deepEqual(onelake.groups[1].rows, [['Tables/dim_date', 3, 900]]);
 });
+
+// ── Stored service principal secret encryption ──
+test('secretCryptoService round-trips a secret', () => {
+  process.env.SECRET_ENCRYPTION_KEY = 'unit-test-encryption-key-value-01';
+  delete require.cache[require.resolve('../src/services/secretCryptoService')];
+  const crypto = require('../src/services/secretCryptoService');
+  const cipher = crypto.encryptSecret('super-secret-value');
+  assert.ok(crypto.isEncrypted(cipher));
+  assert.ok(!cipher.includes('super-secret-value'));
+  assert.equal(crypto.decryptSecret(cipher), 'super-secret-value');
+});
+
+test('secretCryptoService passes legacy plaintext through unchanged', () => {
+  process.env.SECRET_ENCRYPTION_KEY = 'unit-test-encryption-key-value-01';
+  delete require.cache[require.resolve('../src/services/secretCryptoService')];
+  const crypto = require('../src/services/secretCryptoService');
+  assert.equal(crypto.decryptSecret('legacy-plaintext'), 'legacy-plaintext');
+});
+
+test('secretCryptoService refuses to encrypt without a configured key', () => {
+  const saved = process.env.SECRET_ENCRYPTION_KEY;
+  delete process.env.SECRET_ENCRYPTION_KEY;
+  delete process.env.SECRET_ENCRYPTION_KEY_BASE64;
+  delete require.cache[require.resolve('../src/services/secretCryptoService')];
+  const crypto = require('../src/services/secretCryptoService');
+  assert.equal(crypto.isEncryptionConfigured(), false);
+  assert.throws(() => crypto.encryptSecret('nope'));
+  if (saved) process.env.SECRET_ENCRYPTION_KEY = saved;
+  delete require.cache[require.resolve('../src/services/secretCryptoService')];
+});
+
+test('resolveClientSecret falls back to the stored secret when Key Vault is unset', async () => {
+  process.env.SECRET_ENCRYPTION_KEY = 'unit-test-encryption-key-value-01';
+  delete require.cache[require.resolve('../src/services/secretCryptoService')];
+  delete require.cache[require.resolve('../src/services/authService')];
+  const crypto = require('../src/services/secretCryptoService');
+  const auth = require('../src/services/authService');
+  const stored = crypto.encryptSecret('fallback-secret');
+  const value = await auth._private.resolveClientSecret({ name: 'sp', client_id: 'abc', client_secret: stored });
+  assert.equal(value, 'fallback-secret');
+});
+
+test('resolveClientSecret throws when no credential is available', async () => {
+  delete require.cache[require.resolve('../src/services/authService')];
+  const auth = require('../src/services/authService');
+  await assert.rejects(
+    () => auth._private.resolveClientSecret({ name: 'sp', client_id: 'abc' }),
+    /no credential/i
+  );
+});

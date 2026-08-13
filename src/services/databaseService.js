@@ -3,6 +3,7 @@ const { DefaultAzureCredential } = require('@azure/identity');
 const { convertScheduleToUtc, normalizeTimezone } = require('./scheduleTimeService');
 const { METRIC_DEFS } = require('./runMetricsService');
 const { getConfig } = require('../config/settings');
+const { encryptSecret, isEncryptionConfigured } = require('./secretCryptoService');
 
 const cfg = getConfig();
 const SQL_SERVER = cfg.sql.server;
@@ -161,22 +162,42 @@ async function getServicePrincipalById(id) {
 }
 
 async function saveServicePrincipal({ id, name, tenantId, clientId, clientSecret, enterpriseAppObjectId, keyVaultName, keyVaultSecretName }) {
+  // A directly supplied client secret is the fallback for tenants where Key Vault
+  // is unreachable. It is encrypted before it ever reaches the database, so no
+  // plaintext secret is persisted.
+  let storedSecret;
+  if (clientSecret === undefined) {
+    storedSecret = undefined; // caller is not changing the secret
+  } else if (clientSecret === null || clientSecret === '') {
+    storedSecret = null;
+  } else {
+    if (!isEncryptionConfigured()) {
+      throw new Error('Cannot store a client secret: SECRET_ENCRYPTION_KEY is not configured on the app. Use Key Vault, or set that app setting first.');
+    }
+    storedSecret = encryptSecret(clientSecret);
+  }
+
   const conn = await getConnection();
   try {
     if (id) {
+      // Leave the stored secret untouched when the form did not send a new one,
+      // so editing a name does not silently clear the credential.
+      const setSecret = storedSecret !== undefined;
+      const params = [
+        { name: 'id', type: TYPES.Int, value: id },
+        { name: 'name', type: TYPES.NVarChar, value: name },
+        { name: 'tenantId', type: TYPES.NVarChar, value: tenantId },
+        { name: 'clientId', type: TYPES.NVarChar, value: clientId },
+        { name: 'eaoid', type: TYPES.NVarChar, value: enterpriseAppObjectId || null },
+        { name: 'kvName', type: TYPES.NVarChar, value: keyVaultName || null },
+        { name: 'kvSecret', type: TYPES.NVarChar, value: keyVaultSecretName || null },
+      ];
+      if (setSecret) params.push({ name: 'clientSecret', type: TYPES.NVarChar, value: storedSecret });
+
       await execSql(
         conn,
-        `UPDATE service_principals SET name=@name, tenant_id=@tenantId, client_id=@clientId, client_secret=@clientSecret, enterprise_app_object_id=@eaoid, key_vault_name=@kvName, key_vault_secret_name=@kvSecret, updated_at=GETUTCDATE() WHERE id=@id`,
-        [
-          { name: 'id', type: TYPES.Int, value: id },
-          { name: 'name', type: TYPES.NVarChar, value: name },
-          { name: 'tenantId', type: TYPES.NVarChar, value: tenantId },
-          { name: 'clientId', type: TYPES.NVarChar, value: clientId },
-          { name: 'clientSecret', type: TYPES.NVarChar, value: clientSecret || null },
-          { name: 'eaoid', type: TYPES.NVarChar, value: enterpriseAppObjectId || null },
-          { name: 'kvName', type: TYPES.NVarChar, value: keyVaultName || null },
-          { name: 'kvSecret', type: TYPES.NVarChar, value: keyVaultSecretName || null },
-        ]
+        `UPDATE service_principals SET name=@name, tenant_id=@tenantId, client_id=@clientId,${setSecret ? ' client_secret=@clientSecret,' : ''} enterprise_app_object_id=@eaoid, key_vault_name=@kvName, key_vault_secret_name=@kvSecret, updated_at=GETUTCDATE() WHERE id=@id`,
+        params
       );
     } else {
       await execSql(
@@ -186,7 +207,7 @@ async function saveServicePrincipal({ id, name, tenantId, clientId, clientSecret
           { name: 'name', type: TYPES.NVarChar, value: name },
           { name: 'tenantId', type: TYPES.NVarChar, value: tenantId },
           { name: 'clientId', type: TYPES.NVarChar, value: clientId },
-          { name: 'clientSecret', type: TYPES.NVarChar, value: clientSecret || null },
+          { name: 'clientSecret', type: TYPES.NVarChar, value: storedSecret === undefined ? null : storedSecret },
           { name: 'eaoid', type: TYPES.NVarChar, value: enterpriseAppObjectId || null },
           { name: 'kvName', type: TYPES.NVarChar, value: keyVaultName || null },
           { name: 'kvSecret', type: TYPES.NVarChar, value: keyVaultSecretName || null },
