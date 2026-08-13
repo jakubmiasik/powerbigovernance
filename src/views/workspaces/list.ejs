@@ -404,6 +404,18 @@
       var data = await res.json();
       deleteWsModal.hide();
 
+      // The service principal is not a workspace Admin. Offer to sign in as a Fabric
+      // administrator so the app can grant that role and retry.
+      if (data.requiresAdminAuth) {
+        if (confirm(data.message + '\n\nSign in as a Fabric administrator now?')) {
+          sessionStorage.setItem('pendingWorkspaceDeletions', JSON.stringify(pendingDeletions));
+          window.location.href = data.authUrl;
+        } else {
+          showToast(data.message, 'error');
+        }
+        return;
+      }
+
       if (data.deletedCount) {
         showToast('Deleted ' + data.deletedCount + ' workspace' + (data.deletedCount === 1 ? '' : 's') +
           (data.failedCount ? ', ' + data.failedCount + ' failed' : ''), data.failedCount ? 'error' : 'success');
@@ -420,6 +432,19 @@
       btn.disabled = false;
     }
   }
+
+  // Returning from the Fabric administrator sign-in: pick the deletion back up so
+  // the user does not have to reselect the workspaces.
+  (function resumePendingDeletion() {
+    if (new URLSearchParams(window.location.search).get('grantAuth') !== 'success') return;
+    var stored = sessionStorage.getItem('pendingWorkspaceDeletions');
+    sessionStorage.removeItem('pendingWorkspaceDeletions');
+    if (!stored) return;
+    try {
+      var targets = JSON.parse(stored);
+      if (targets && targets.length) openDeleteModal(targets);
+    } catch (e) { /* nothing worth resuming */ }
+  })();
   </script>
 <% } %>
 
