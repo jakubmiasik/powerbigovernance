@@ -104,6 +104,11 @@
       <% if (workspace.state) { %>
         &bull; State: <span class="badge bg-<%= workspace.state === 'Active' ? 'success' : 'warning' %>"><%= workspace.state %></span>
       <% } %>
+      <% if (workspace.deploymentPipeline) { %>
+        &bull; Deployment pipeline:
+        <a href="/pipelines"><%= workspace.deploymentPipeline.pipelineName || workspace.deploymentPipeline.pipelineId %></a>
+        <span class="badge bg-info text-dark"><%= workspace.deploymentPipeline.stageName %></span>
+      <% } %>
     </p>
   </div>
   <a href="/workspaces" class="btn btn-outline-secondary" onclick="goBackOr('/workspaces'); return false;"><i class="bi bi-arrow-left me-1"></i>Back</a>
