@@ -26,7 +26,7 @@
     { label: 'Pipelines', count: governanceSummary.totalPipelines || 0, color: 'secondary', icon: 'arrow-left-right', href: '/governance/artifacts?type=DataPipeline' + (runId ? '&runId=' + runId : '') },
     { label: 'Warehouses', count: governanceSummary.totalWarehouses || 0, color: 'secondary', icon: 'building', href: '/governance/artifacts?type=Warehouse' + (runId ? '&runId=' + runId : '') },
     { label: 'Unique Users', count: governanceSummary.totalUsers || 0, color: 'secondary', icon: 'people', href: '/governance/users' + (runId ? '?runId=' + runId : ''), sub: '(' + (typeof creatorCount !== 'undefined' ? creatorCount : 0) + ' Creators / ' + (typeof explorerCount !== 'undefined' ? explorerCount : 0) + ' Explorers)' },
-    { label: 'Tenant Settings', count: '—', countId: 'tenantSettingsCount', color: 'teal', icon: 'sliders', href: '/governance/tenant-settings', sub: 'Live from admin API', subId: 'tenantSettingsSub' }
+    { label: 'Tenant Settings', count: '—', countId: 'tenantSettingsCount', color: 'teal', icon: 'sliders', href: '/governance/tenant-settings', sub: 'Snapshot from this run', subId: 'tenantSettingsSub' }
   ];
 %>
 <div class="mb-3">
@@ -257,7 +257,7 @@
   <div class="alert alert-info small">
     <i class="bi bi-info-circle me-2"></i>
     Data from analysis run #<%= run.id %> on <%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %>. <a href="/analysis">Run a new analysis</a> to refresh.
-    Tenant settings are read live and are not part of the saved run.
+    Tenant settings shown here are the snapshot captured with this run. See <a href="/tenant-settings">Tenant Settings (Live)</a> for the current state.
   </div>
 
   <script>

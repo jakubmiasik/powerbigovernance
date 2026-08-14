@@ -1092,6 +1092,58 @@ test('requireAuth redirects anonymous page requests and 401s API calls', () => {
   }
 });
 
+test('governance tenant settings read the snapshot stored with the selected run', async () => {
+  // The Governance page is evidence for a point in time, so it must never fall
+  // back to the live admin API.
+  const db = require('../src/services/databaseService');
+  const originalGet = db.getAnalysisRunById;
+
+  const express = require('express');
+  const app = express();
+  let run = {
+    id: 7,
+    completed_at: '2024-05-01T10:00:00.000Z',
+    results_json: JSON.stringify({
+      tenantSettings: [{ settingName: 'A', title: 'A', enabled: true, tenantSettingGroup: 'G' }],
+    }),
+  };
+  db.getAnalysisRunById = async () => run;
+
+  app.use((req, res, next) => { res.locals.globalRun = { id: 7, sp_id: 1 }; next(); });
+  app.use('/governance', require('../src/routes/governance'));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+
+  const fetchData = () => new Promise((resolve, reject) => {
+    require('node:http').get({
+      host: '127.0.0.1', port: server.address().port, path: '/governance/tenant-settings/data',
+      headers: { host: '127.0.0.1' },
+    }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve(JSON.parse(body)));
+    }).on('error', reject);
+  });
+
+  try {
+    const captured = await fetchData();
+    assert.strictEqual(captured.success, true);
+    assert.strictEqual(captured.total, 1);
+    assert.strictEqual(captured.runId, 7);
+    assert.strictEqual(captured.capturedAt, '2024-05-01T10:00:00.000Z');
+
+    // A run recorded before tenant settings were captured must say so rather than
+    // reporting zero settings, which would read as "everything is disabled".
+    run = { id: 8, results_json: JSON.stringify({ workspaces: [] }) };
+    const missing = await fetchData();
+    assert.strictEqual(missing.success, false);
+    assert.match(missing.message, /did not capture tenant settings/);
+  } finally {
+    server.close();
+    db.getAnalysisRunById = originalGet;
+  }
+});
+
 test('the pipeline grant redirect resolves the async auth URL', async () => {
   // getDelegatedAuthUrl is a promise-returning MSAL call. Redirecting to it
   // without awaiting sends the browser to "/pipelines/[object Promise]".

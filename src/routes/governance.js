@@ -54,21 +54,6 @@ async function loadGlobalResults(res) {
   return { run: fullRun, results };
 }
 
-// Tenant settings come from the live Fabric Admin API, not from a saved run, so
-// they use the service principal behind the selected run when there is one.
-async function getPbiServiceForTenant(res) {
-  const globalRun = res ? res.locals.globalRun : null;
-  let sp;
-  if (globalRun && globalRun.sp_id) {
-    sp = await db.getServicePrincipalById(globalRun.sp_id);
-  }
-  if (!sp) {
-    const sps = await db.getServicePrincipals();
-    if (!sps.length) throw new Error('No service principal configured. Go to Settings to add one.');
-    sp = sps[0];
-  }
-  return createPowerBIService(sp);
-}
 
 router.get('/', async (req, res) => {
   try {
@@ -146,42 +131,75 @@ router.get('/artifacts', async (req, res) => {
   }
 });
 
-// Tenant settings summary for the Governance Overview cards. Loaded over AJAX so a
-// slow or unauthorized admin API call never delays the rest of the page.
+// Tenant settings on the Governance pages come from the snapshot captured with the
+// selected analysis run, so the page describes a specific point in time and can be
+// used as evidence. The live state lives on its own page at /tenant-settings.
 router.get('/tenant-settings/data', async (req, res) => {
   try {
-    const pbi = await getPbiServiceForTenant(res);
-    const settings = await pbi.getTenantSettings();
-    res.json({ success: true, ...summarizeTenantSettings(settings) });
+    const { run, results } = await loadGlobalResults(res);
+    if (!run) {
+      return res.json({ success: false, message: 'No analysis run is selected. Select a scan from the top bar.' });
+    }
+    const settings = results && Array.isArray(results.tenantSettings) ? results.tenantSettings : null;
+    if (!settings) {
+      return res.json({
+        success: false,
+        message: 'The selected run did not capture tenant settings. Run a new analysis with a service principal '
+          + 'that has Tenant.Read.All.',
+      });
+    }
+    res.json({
+      success: true,
+      ...summarizeTenantSettings(settings),
+      capturedAt: run.completed_at || run.started_at || null,
+      runId: run.id,
+    });
   } catch (err) {
-    const detail = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-    res.json({ success: false, message: detail });
+    res.json({ success: false, message: err.message });
   }
 });
 
 router.get('/tenant-settings', async (req, res) => {
+  const base = {
+    title: 'Tenant Settings',
+    user: req.user,
+    source: 'snapshot',
+    run: null,
+    capturedAt: null,
+  };
   try {
-    const pbi = await getPbiServiceForTenant(res);
-    const settings = await pbi.getTenantSettings();
+    const { run, results } = await loadGlobalResults(res);
+    const settings = results && Array.isArray(results.tenantSettings) ? results.tenantSettings : null;
+
+    if (!run) {
+      return res.render('governance/tenant-settings', {
+        ...base, settings: [], summary: summarizeTenantSettings([]),
+        error: 'No analysis run is selected. Choose a scan from the top bar to see the tenant settings captured with it.',
+      });
+    }
+    if (!settings) {
+      return res.render('governance/tenant-settings', {
+        ...base, run, settings: [], summary: summarizeTenantSettings([]),
+        error: 'This analysis run did not capture tenant settings. The service principal needs Tenant.Read.All at '
+          + 'the time the analysis runs. You can still see the current state on the live Tenant Settings page.',
+      });
+    }
+
     const sorted = [...settings].sort((a, b) =>
       (a.tenantSettingGroup || 'Ungrouped').localeCompare(b.tenantSettingGroup || 'Ungrouped')
       || (a.title || a.settingName || '').localeCompare(b.title || b.settingName || '')
     );
     res.render('governance/tenant-settings', {
-      title: 'Tenant Settings',
-      user: req.user,
+      ...base,
+      run,
+      capturedAt: run.completed_at || run.started_at || null,
       settings: sorted,
       summary: summarizeTenantSettings(settings),
       error: null,
     });
   } catch (err) {
-    const detail = err.response?.data?.error?.message || err.response?.data?.message || err.message;
     res.render('governance/tenant-settings', {
-      title: 'Tenant Settings',
-      user: req.user,
-      settings: [],
-      summary: summarizeTenantSettings([]),
-      error: detail,
+      ...base, settings: [], summary: summarizeTenantSettings([]), error: err.message,
     });
   }
 });

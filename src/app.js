@@ -136,6 +136,7 @@ const analysisRoutes = require('./routes/analysis');
 const migrateRoutes = require('./routes/migrate');
 const capacityRoutes = require('./routes/capacities');
 const pipelineRoutes = require('./routes/pipelines');
+const tenantSettingsRoutes = require('./routes/tenantSettings');
 
 app.use('/', indexRoutes);
 app.use('/settings', configRoutes);
@@ -145,6 +146,7 @@ app.use('/analysis', analysisRoutes);
 app.use('/migrate', migrateRoutes);
 app.use('/capacities', capacityRoutes);
 app.use('/pipelines', pipelineRoutes);
+app.use('/tenant-settings', tenantSettingsRoutes);
 
 // Error handler
 app.use((err, req, res, _next) => {
