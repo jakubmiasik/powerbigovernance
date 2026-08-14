@@ -13,22 +13,60 @@
 
 <div class="mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
   <div>
-    <h2><i class="bi bi-sliders me-2"></i>Tenant Settings</h2>
-    <p class="text-muted mb-0">Live from the Fabric Admin API — not part of a saved analysis run.</p>
+    <h2>
+      <i class="bi bi-sliders me-2"></i>Tenant Settings
+      <% if (source === 'live') { %>
+        <span class="badge bg-primary align-middle ms-1"><i class="bi bi-broadcast me-1"></i>Live</span>
+      <% } else { %>
+        <span class="badge bg-secondary align-middle ms-1"><i class="bi bi-camera me-1"></i>Snapshot</span>
+      <% } %>
+    </h2>
+    <% if (source === 'live') { %>
+      <p class="text-muted mb-0">
+        Current state, read from the Fabric Admin API just now. For a point-in-time record use the
+        <a href="/governance/tenant-settings">snapshot in Governance</a>.
+      </p>
+    <% } else { %>
+      <p class="text-muted mb-0">
+        Captured with
+        <% if (run) { %>
+          analysis run #<%= run.id %><% if (run.name) { %> &mdash; <%= run.name %><% } %><% if (capturedAt) { %>
+          on <%= new Date(capturedAt).toLocaleString() %><% } %>.
+        <% } else { %>
+          the selected analysis run.
+        <% } %>
+        This is a fixed record for analysis. For the state right now see
+        <a href="/tenant-settings">Tenant Settings (Live)</a>.
+      </p>
+    <% } %>
   </div>
-  <a href="/governance" class="btn btn-outline-secondary btn-sm" onclick="goBackOr('/governance'); return false;"><i class="bi bi-arrow-left me-1"></i>Back</a>
+  <div class="d-flex gap-2">
+    <% if (source === 'live') { %>
+      <a href="/tenant-settings" class="btn btn-outline-primary btn-sm"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</a>
+      <a href="/governance/tenant-settings" class="btn btn-outline-secondary btn-sm"><i class="bi bi-camera me-1"></i>View snapshot</a>
+    <% } else { %>
+      <a href="/tenant-settings" class="btn btn-outline-primary btn-sm"><i class="bi bi-broadcast me-1"></i>View live state</a>
+      <a href="/governance" class="btn btn-outline-secondary btn-sm" onclick="goBackOr('/governance'); return false;"><i class="bi bi-arrow-left me-1"></i>Back</a>
+    <% } %>
+  </div>
 </div>
 
 <% if (error) { %>
   <div class="alert alert-warning">
     <i class="bi bi-exclamation-triangle me-2"></i>
-    <strong>Could not read tenant settings.</strong><br>
+    <strong><%= source === 'live' ? 'Could not read tenant settings.' : 'No tenant settings snapshot available.' %></strong><br>
     <span class="small"><%= error %></span>
     <hr class="my-2">
     <div class="small mb-0">
       The service principal needs <code>Tenant.Read.All</code> (Application permission, admin consented) and must be
       in the security group enabled under <strong>Power BI Admin Portal → Tenant settings → Developer settings →
       Service principals can use Fabric APIs</strong>.
+      <% if (source !== 'live') { %>
+        <div class="mt-2">
+          <a href="/tenant-settings" class="btn btn-sm btn-outline-primary"><i class="bi bi-broadcast me-1"></i>See the live state instead</a>
+          <a href="/analysis" class="btn btn-sm btn-outline-secondary ms-1"><i class="bi bi-play-circle me-1"></i>Run an analysis</a>
+        </div>
+      <% } %>
     </div>
   </div>
 <% } else { %>
