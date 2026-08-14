@@ -6,6 +6,7 @@ const {
   METRIC_DEFS, computeRunTotals, diffTotals, diffRunDetails,
 } = require('../services/runMetricsService');
 const { buildItemDetails } = require('../services/itemDetailsService');
+const { buildWorkspaceAssignments, lookupAssignment } = require('../services/deploymentPipelineService');
 
 const activeAnalyses = new Map();
 
@@ -419,6 +420,22 @@ async function runAnalysis(runId, sp, authOptions = {}) {
     setProgress(progress, { phase: 'Workspace details', message: 'Building workspace details...', progress: 60 });
     ensureNotCancelled(progress);
 
+    // ── Deployment pipelines ──
+    // Fetched once for the whole tenant and then mapped onto each workspace, so a
+    // workspace can show which pipeline and stage it belongs to. A failure here is
+    // not fatal: pipelines are supplementary metadata, not the point of the scan.
+    setProgress(progress, { phase: 'Deployment pipelines', progress: 72, message: 'Fetching deployment pipelines...' });
+    let deploymentPipelines = [];
+    let deploymentPipelineError = null;
+    try {
+      deploymentPipelines = await pbi.getDeploymentPipelines();
+      addProgressEvent(progress, 'info', 'Found ' + deploymentPipelines.length + ' deployment pipeline(s).');
+    } catch (err) {
+      deploymentPipelineError = err.message;
+      addProgressEvent(progress, 'warning', 'Could not read deployment pipelines: ' + err.message);
+    }
+    const pipelineAssignments = buildWorkspaceAssignments(deploymentPipelines);
+
     const workspaceDetails = [];
     let totalReports = 0;
     let totalDatasets = 0;
@@ -472,6 +489,7 @@ async function runAnalysis(runId, sp, authOptions = {}) {
         notebookCount: notebooks.length,
         pipelineCount: pipelines.length,
         warehouseCount: warehouses.length,
+        deploymentPipeline: lookupAssignment(pipelineAssignments, ws.id),
         items: wsItems.map((item) => ({
           id: item.id,
           name: item.name,
@@ -608,6 +626,18 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       totalNotebooks,
       totalPipelines,
       totalWarehouses,
+      // Deployment pipelines are a tenant-level construct, unlike totalPipelines
+      // which counts Fabric Data Pipeline items inside workspaces.
+      totalDeploymentPipelines: deploymentPipelines.length,
+      deploymentPipelines: deploymentPipelines.map((p) => ({
+        id: p.id,
+        name: p.name,
+        stages: p.stages,
+        workspaceCount: (p.stages || []).filter((s) => s.workspaceId).length,
+      })),
+      deploymentPipelineAssignments: pipelineAssignments,
+      deploymentPipelineError,
+      workspacesInDeploymentPipeline: Object.keys(pipelineAssignments).length,
       totalUsers: allUsers.size,
       totalStorageSize,
       totalStorageFiles,

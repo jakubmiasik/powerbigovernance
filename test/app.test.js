@@ -988,3 +988,106 @@ test('deletion failures carry an explanation of the status code', async () => {
     stub.restore();
   }
 });
+
+// ── Deployment pipelines ──
+const pipelineService = require('../src/services/deploymentPipelineService');
+const { requireAuth } = require('../src/middleware/auth');
+
+test('pipeline stages map to workspace assignments with stage names', () => {
+  const pipelines = [{
+    id: 'p1', name: 'Sales',
+    stages: [
+      { order: 0, workspaceId: 'WS-A', workspaceName: 'Sales Dev' },
+      { order: 2, workspaceId: 'ws-b', workspaceName: 'Sales Prod' },
+      { order: 1, workspaceId: null, workspaceName: null },
+    ],
+  }];
+  const assignments = pipelineService.buildWorkspaceAssignments(pipelines);
+  assert.equal(Object.keys(assignments).length, 2);
+
+  // Workspace IDs are matched case-insensitively.
+  const dev = pipelineService.lookupAssignment(assignments, 'ws-a');
+  assert.equal(dev.pipelineName, 'Sales');
+  assert.equal(dev.stageName, 'Development');
+  assert.equal(pipelineService.lookupAssignment(assignments, 'WS-B').stageName, 'Production');
+  assert.equal(pipelineService.lookupAssignment(assignments, 'missing'), null);
+  assert.equal(pipelineService.stageName(7), 'Stage 8');
+});
+
+test('service principal access is detected only for a matching App principal', () => {
+  const users = [
+    { identifier: 'jane@contoso.com', accessRight: 'Admin', principalType: 'User' },
+    { identifier: 'ABC-123', accessRight: 'Admin', principalType: 'App' },
+  ];
+  assert.equal(pipelineService.hasPrincipalAccess(users, 'abc-123'), true);
+  assert.equal(pipelineService.hasPrincipalAccess(users, 'jane@contoso.com'), false);
+  assert.equal(pipelineService.hasPrincipalAccess(users, null), false);
+  assert.equal(pipelineService.principalIdentifier({ client_id: 'c', enterprise_app_object_id: 'e' }), 'e');
+  assert.equal(pipelineService.principalIdentifier({ client_id: 'c' }), null);
+});
+
+test('listing pipelines reports access per pipeline and survives a probe failure', async () => {
+  const pbi = {
+    getDeploymentPipelines: async () => ([
+      { id: 'p1', name: 'A', stages: [{ order: 0, workspaceId: 'w1', workspaceName: 'W1' }] },
+      { id: 'p2', name: 'B', stages: [] },
+    ]),
+    getDeploymentPipelineUsers: async (id) => {
+      if (id === 'p2') throw Object.assign(new Error('API error (403): forbidden'), { status: 403 });
+      return [{ identifier: 'sp-obj', accessRight: 'Admin', principalType: 'App' }];
+    },
+  };
+  const { pipelines } = await pipelineService.listPipelinesWithAccess(pbi, { enterprise_app_object_id: 'sp-obj' });
+  assert.equal(pipelines[0].access, 'granted');
+  assert.equal(pipelines[0].workspaceCount, 1);
+  assert.equal(pipelines[0].stages[0].stageName, 'Development');
+  // A failed probe must not be reported as "no access" — the UI would then offer
+  // a grant button for a pipeline whose state is genuinely unknown.
+  assert.equal(pipelines[1].access, 'unknown');
+  assert.equal(pipelines[1].accessStatus, 403);
+});
+
+test('pipeline deletion reports per-pipeline failures with explanations', async () => {
+  const pbi = {
+    deleteDeploymentPipeline: async (id) => {
+      if (id === 'bad') throw Object.assign(new Error('API error (403): no access'), { status: 403 });
+      return {};
+    },
+  };
+  const outcome = await pipelineService.deletePipelines(pbi, [
+    { id: 'ok', name: 'Good' }, { id: 'bad', name: 'Bad' },
+  ]);
+  assert.equal(outcome.deleted, 1);
+  assert.equal(outcome.failed, 1);
+  const failed = outcome.results.find((r) => !r.success);
+  assert.equal(failed.status, 403);
+  assert.match(failed.explanation, /not allowed/i);
+});
+
+test('requireAuth redirects anonymous page requests and 401s API calls', () => {
+  const previous = process.env.REQUIRE_AUTH;
+  process.env.REQUIRE_AUTH = 'true';
+  try {
+    let redirectedTo = null;
+    requireAuth({ user: null, path: '/workspaces', originalUrl: '/workspaces?a=1', get: () => '' },
+      { redirect: (url) => { redirectedTo = url; } }, () => { throw new Error('should not pass'); });
+    assert.match(redirectedTo, /^\/\.auth\/login\/aad\?post_login_redirect_uri=/);
+
+    let status = null; let payload = null;
+    requireAuth({ user: null, path: '/api/user', originalUrl: '/api/user', get: () => '' },
+      { status: (s) => { status = s; return { json: (b) => { payload = b; } }; } },
+      () => { throw new Error('should not pass'); });
+    assert.equal(status, 401);
+    assert.equal(payload.error, 'Not authenticated');
+
+    // The health probe and the auth endpoints themselves must stay open.
+    let passed = 0;
+    requireAuth({ user: null, path: '/health', get: () => '' }, {}, () => { passed += 1; });
+    requireAuth({ user: null, path: '/.auth/login/aad', get: () => '' }, {}, () => { passed += 1; });
+    requireAuth({ user: { name: 'x' }, path: '/workspaces', get: () => '' }, {}, () => { passed += 1; });
+    assert.equal(passed, 3);
+  } finally {
+    if (previous === undefined) delete process.env.REQUIRE_AUTH;
+    else process.env.REQUIRE_AUTH = previous;
+  }
+});

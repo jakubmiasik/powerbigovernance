@@ -7,6 +7,7 @@ const { buildItemDetails } = require('../services/itemDetailsService');
 const { deleteWorkspaces } = require('../services/workspaceDeletionService');
 const { getDelegatedAuthUrl } = require('../services/authService');
 const { explainError } = require('../services/httpErrorService');
+const { buildWorkspaceAssignments, lookupAssignment } = require('../services/deploymentPipelineService');
 const axios = require('axios');
 
 // Attach a plain-language explanation to an error response so the UI can tell the
@@ -301,9 +302,17 @@ router.get('/:id', async (req, res) => {
     const categorized = categorizeItems(items);
     const wsName = workspace.displayName || workspace.name || 'Workspace';
 
+    // Best effort: without a saved run there is no cached pipeline map, so ask the
+    // admin API directly. A failure here must not break the workspace page.
+    let deploymentPipeline = null;
+    try {
+      const pipelines = await pbi.getDeploymentPipelines();
+      deploymentPipeline = lookupAssignment(buildWorkspaceAssignments(pipelines), workspaceId);
+    } catch { /* pipeline metadata is optional */ }
+
     res.render('workspaces/detail', {
       title: wsName, user: req.user,
-      workspace: { ...workspace, name: wsName }, items, ...categorized, users,
+      workspace: { ...workspace, name: wsName, deploymentPipeline }, items, ...categorized, users,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });

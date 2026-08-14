@@ -77,7 +77,14 @@ npm run dev
 | `POWERBI_CLIENT_SECRET` | Service principal client secret |
 | `POWERBI_TENANT_ID` | Tenant ID for Power BI API |
 | `SESSION_SECRET` | Express session secret |
+| `REQUIRE_AUTH` | Force (`true`) or disable (`false`) the in-app sign-in requirement. Defaults to enabled whenever the app runs on Azure App Service. |
 | `PORT` | Server port (default: 3000) |
+
+Authentication is enforced in two places. Azure App Service EasyAuth should be configured with
+`unauthenticatedClientAction: RedirectToLoginPage` and `/health` in `globalValidation.excludedPaths`
+so the health probe (which also drives the scheduler catch-up tick) stays reachable. The application
+additionally refuses anonymous requests itself, so leaving EasyAuth on "allow unauthenticated
+access" no longer exposes the app.
 
 ## Architecture
 

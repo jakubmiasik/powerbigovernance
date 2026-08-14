@@ -6,7 +6,7 @@ const flash = require('connect-flash');
 const cookieParser = require('cookie-parser');
 const path = require('path');
 const { getConfig } = require('./config/settings');
-const { parseEasyAuthUser } = require('./middleware/auth');
+const { parseEasyAuthUser, requireAuth } = require('./middleware/auth');
 const { securityHeaders, createRateLimiter } = require('./middleware/security');
 const { loadRuns } = require('./middleware/loadRuns');
 
@@ -98,6 +98,10 @@ app.get('/health', (_req, res) => {
   });
 });
 
+// Everything below this line requires a signed-in user. Registered after /health
+// so the App Service probe (which sends no user) keeps working.
+app.use(requireAuth);
+
 // Global context: selected run + available runs, cached to avoid DB work on every request
 app.use(loadRuns);
 
@@ -131,6 +135,7 @@ const governanceRoutes = require('./routes/governance');
 const analysisRoutes = require('./routes/analysis');
 const migrateRoutes = require('./routes/migrate');
 const capacityRoutes = require('./routes/capacities');
+const pipelineRoutes = require('./routes/pipelines');
 
 app.use('/', indexRoutes);
 app.use('/settings', configRoutes);
@@ -139,6 +144,7 @@ app.use('/governance', governanceRoutes);
 app.use('/analysis', analysisRoutes);
 app.use('/migrate', migrateRoutes);
 app.use('/capacities', capacityRoutes);
+app.use('/pipelines', pipelineRoutes);
 
 // Error handler
 app.use((err, req, res, _next) => {

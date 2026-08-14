@@ -646,6 +646,74 @@ function createPowerBIService(spConfig, authOptions = {}) {
     return safeDelete(token, `${FABRIC_CORE}/workspaces/${workspaceId}`);
   }
 
+  // ── Deployment pipelines (admin scope) ──
+  // GET https://api.powerbi.com/v1.0/myorg/admin/pipelines?$expand=stages&$top=100
+  // The admin endpoint returns every pipeline in the tenant regardless of whether
+  // this principal has been granted access to it, which is what makes the access
+  // column on the pipelines page meaningful. $top is capped at 100 by the API, so
+  // page through with $skip until a short page comes back.
+  async function getDeploymentPipelines() {
+    const token = await getToken();
+    const pageSize = 100;
+    const all = [];
+    for (let skip = 0; ; skip += pageSize) {
+      const data = await safeGet(token, PBI_ADMIN + '/pipelines', {
+        $expand: 'stages', $top: pageSize, $skip: skip,
+      });
+      const page = data.value || [];
+      all.push(...page);
+      if (page.length < pageSize) break;
+      // Defensive stop: the admin API is capped at 200 requests/hour.
+      if (skip >= pageSize * 50) break;
+    }
+    return all.map((p) => ({
+      id: p.id,
+      name: p.displayName || p.name || null,
+      description: p.description || null,
+      stages: (p.stages || []).map((s) => ({
+        order: typeof s.order === 'number' ? s.order : null,
+        workspaceId: s.workspaceId || null,
+        workspaceName: s.workspaceName || null,
+      })),
+    }));
+  }
+
+  // GET https://api.powerbi.com/v1.0/myorg/admin/pipelines/{pipelineId}/users
+  async function getDeploymentPipelineUsers(pipelineId) {
+    if (!pipelineId) throw new Error('Pipeline ID is required.');
+    const token = await getToken();
+    const data = await safeGet(token, `${PBI_ADMIN}/pipelines/${pipelineId}/users`);
+    return (data.value || []).map((u) => ({
+      identifier: u.identifier || null,
+      accessRight: u.accessRight || null,
+      principalType: u.principalType || null,
+      displayName: u.displayName || null,
+    }));
+  }
+
+  // POST https://api.powerbi.com/v1.0/myorg/admin/pipelines/{pipelineId}/users
+  // Grants the service principal Admin on the pipeline. `identifier` must be the
+  // enterprise application (service principal) object ID, not the client ID.
+  async function grantDeploymentPipelineAccess(pipelineId, identifier, options = {}) {
+    if (!pipelineId) throw new Error('Pipeline ID is required.');
+    if (!identifier) throw new Error('A principal object ID is required.');
+    const token = options.delegatedToken || await getToken();
+    return safePost(token, `${PBI_ADMIN}/pipelines/${pipelineId}/users`, {
+      identifier,
+      accessRight: options.accessRight || 'Admin',
+      principalType: options.principalType || 'App',
+    });
+  }
+
+  // DELETE https://api.powerbi.com/v1.0/myorg/pipelines/{pipelineId}
+  // This is the non-admin endpoint: the caller must itself be an Admin on the
+  // pipeline, which is why the UI only enables delete once access is confirmed.
+  async function deleteDeploymentPipeline(pipelineId) {
+    if (!pipelineId) throw new Error('Pipeline ID is required.');
+    const token = await getToken();
+    return safeDelete(token, `${PBI_BASE}/pipelines/${pipelineId}`);
+  }
+
   // ── Item lineage: use Power BI Admin scanner API with lineage ──
   // Fetches lineage for a workspace by calling getInfo with lineage=true
   async function getWorkspaceLineage(workspaceId) {
@@ -1008,6 +1076,10 @@ function createPowerBIService(spConfig, authOptions = {}) {
     unassignFromCapacity,
     deleteWorkspace,
     getWorkspaceState,
+    getDeploymentPipelines,
+    getDeploymentPipelineUsers,
+    grantDeploymentPipelineAccess,
+    deleteDeploymentPipeline,
     addWorkspaceAdmin,
     removeWorkspaceUser,
     getRoleAssignments,

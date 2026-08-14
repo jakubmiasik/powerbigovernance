@@ -300,7 +300,7 @@
 
         var rows = (data.groups || []).map(function(g) {
           var pct = g.total ? Math.round((g.enabled / g.total) * 100) : 0;
-          return '<tr><td><a href="/governance/tenant-settings">' + g.name + '</a></td>' +
+          return '<tr><td>' + g.name + '</td>' +
             '<td><strong>' + g.total + '</strong></td><td>' + g.enabled + '</td>' +
             '<td>' + (g.total - g.enabled) + '</td>' +
             '<td><div class="progress" style="height:16px;min-width:80px;"><div class="progress-bar bg-success" style="width:' + pct + '%">' + pct + '%</div></div></td></tr>';
