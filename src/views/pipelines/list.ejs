@@ -27,6 +27,13 @@
     </div>
   <% } %>
 
+  <% if (grantError) { %>
+    <div class="alert alert-danger alert-dismissible fade show">
+      <i class="bi bi-exclamation-octagon me-2"></i>Could not start the Fabric administrator sign-in: <%= grantError %>
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+  <% } %>
+
   <div class="row g-3 mb-4" id="summaryCards" style="display:none;">
     <div class="col-6 col-lg-3">
       <div class="card h-100"><div class="card-body">

@@ -1091,3 +1091,37 @@ test('requireAuth redirects anonymous page requests and 401s API calls', () => {
     else process.env.REQUIRE_AUTH = previous;
   }
 });
+
+test('the pipeline grant redirect resolves the async auth URL', async () => {
+  // getDelegatedAuthUrl is a promise-returning MSAL call. Redirecting to it
+  // without awaiting sends the browser to "/pipelines/[object Promise]".
+  const authService = require('../src/services/authService');
+  const original = authService.getDelegatedAuthUrl;
+  authService.getDelegatedAuthUrl = async (redirectUri, state) =>
+    'https://login.microsoftonline.com/authorize?state=' + state;
+
+  // The route captures the function at require time, so it must be re-required
+  // after the stub is installed.
+  delete require.cache[require.resolve('../src/routes/pipelines')];
+  const express = require('express');
+  const app = express();
+  app.use('/pipelines', require('../src/routes/pipelines'));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+
+  try {
+    const location = await new Promise((resolve, reject) => {
+      require('node:http').get({
+        host: '127.0.0.1', port: server.address().port, path: '/pipelines/grant-auth',
+        headers: { host: '127.0.0.1' },
+      }, (res) => { res.resume(); resolve(res.headers.location); }).on('error', reject);
+    });
+    assert.match(location, /^https:\/\/login\.microsoftonline\.com\//);
+    assert.match(location, /state=grant-sp-pipelines/);
+    assert.ok(!location.includes('Promise'));
+  } finally {
+    server.close();
+    authService.getDelegatedAuthUrl = original;
+    delete require.cache[require.resolve('../src/routes/pipelines')];
+  }
+});

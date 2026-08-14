@@ -57,6 +57,7 @@ router.get('/', async (req, res) => {
     spName,
     configError,
     grantAuth: req.query.grantAuth || null,
+    grantError: req.query.error || null,
   });
 });
 
@@ -121,12 +122,14 @@ router.post('/grant', async (req, res) => {
 });
 
 // ── Delegated sign-in for the grant ──
-router.get('/grant-auth', (req, res) => {
+// getDelegatedAuthUrl is async (MSAL builds the URL), so it must be awaited —
+// redirecting to the unresolved promise sends the browser to "[object Promise]".
+router.get('/grant-auth', async (req, res) => {
   try {
     const redirectUri = `${req.protocol}://${req.get('host')}/migrate/auth/callback`;
-    res.redirect(getDelegatedAuthUrl(redirectUri, 'grant-sp-pipelines'));
+    res.redirect(await getDelegatedAuthUrl(redirectUri, 'grant-sp-pipelines'));
   } catch (err) {
-    res.status(500).render('error', { title: 'Error', message: err.message, user: req.user });
+    res.redirect('/pipelines?error=' + encodeURIComponent(err.message));
   }
 });
 
