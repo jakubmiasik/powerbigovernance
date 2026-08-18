@@ -8,6 +8,11 @@ const {
   isStatusTransitionAllowed, EXCEPTION_STATUS, OPERAND_KINDS,
   planRule, validateCompareFields, normalizeCompareField,
 } = require('../services/reconciliationService');
+const sqlSource = require('../services/sqlSourceService');
+const { encryptSecret, isEncryptionConfigured } = require('../services/secretCryptoService');
+const { compareRuns, VERDICT_DEFS } = require('../services/reconciliationComparisonService');
+
+const SOURCE_KIND = { FABRIC: 'fabric-sql', EXTERNAL: 'external-sql' };
 
 // The reconciliation area is not tied to an analysis scan, so the global
 // "Service Principal / Scan" bar would suggest a relationship that does not exist.
@@ -19,14 +24,17 @@ function actorOf(req) {
   return (req.user && (req.user.name || req.user.email)) || 'anonymous';
 }
 
-async function getPbiService(res) {
-  const globalRun = res ? res.locals.globalRun : null;
-  let sp;
-  if (globalRun && globalRun.sp_id) sp = await db.getServicePrincipalById(globalRun.sp_id);
+/**
+ * The service principal a source belongs to.
+ *
+ * A source names its own tenant, so reconciliation never has to guess which
+ * credential to use — guessing is wrong as soon as more than one tenant is
+ * configured, and it fails in a way that looks like a permission problem.
+ */
+async function getPbiServiceForSp(spId) {
+  const sp = spId ? await db.getServicePrincipalById(spId) : null;
   if (!sp) {
-    const sps = await db.getServicePrincipals();
-    if (!sps.length) throw new Error('No service principal configured. Go to Settings to add one.');
-    sp = sps[0];
+    throw new Error('This source has no service principal recorded, or the one it named has been removed. Re-register it and pick a tenant.');
   }
   return createPowerBIService(sp);
 }
@@ -35,15 +43,11 @@ async function getPbiService(res) {
 // Candidate sources come from the artifact details already collected by an
 // analysis run, so browsing what is available costs nothing and works even when
 // the Fabric APIs are unavailable.
-async function loadCandidateSources(req, res) {
+function extractCandidates(run) {
   const candidates = [];
-  const globalRun = res.locals.globalRun;
-  if (!globalRun) return candidates;
-
-  const run = await db.getAnalysisRunById(globalRun.id);
   let workspaces = [];
   try {
-    workspaces = JSON.parse(run.results_json || '{}').workspaces || [];
+    workspaces = JSON.parse((run && run.results_json) || '{}').workspaces || [];
   } catch { workspaces = []; }
 
   for (const workspace of workspaces) {
@@ -63,10 +67,31 @@ async function loadCandidateSources(req, res) {
     (a.workspaceName || '').localeCompare(b.workspaceName || '') || (a.itemName || '').localeCompare(b.itemName || ''));
 }
 
-// The schema captured for an item during the last analysis run, reshaped into the
-// datasets and fields a rule author picks from.
+/** The most recent completed analysis run for a service principal, if there is one. */
+function latestRunForSp(runs, spId) {
+  const wanted = Number.parseInt(spId, 10);
+  return (runs || []).find(run =>
+    Number(run.sp_id) === wanted && run.status === 'completed') || null;
+}
+
+/**
+ * The datasets and fields a rule author picks from.
+ *
+ * A Fabric source reads the schema captured by an analysis run, so browsing costs
+ * no API calls. An external database has no analysis run behind it, so its schema
+ * is read once at registration and stored on the source row.
+ */
 async function loadSourceDatasets(source) {
-  if (!source || !source.workspace_id || !source.item_id) return [];
+  if (!source) return [];
+
+  if (source.schema_json) {
+    try {
+      const stored = JSON.parse(source.schema_json);
+      if (Array.isArray(stored) && stored.length) return stored;
+    } catch { /* fall through to the analysis-run schema */ }
+  }
+
+  if (!source.workspace_id || !source.item_id) return [];
   const cached = await db.getItemDetailsCache(source.workspace_id, source.item_id);
   if (!cached || !cached.payload) return [];
   let payload;
@@ -82,48 +107,92 @@ async function loadSourceDatasets(source) {
 }
 
 router.get('/', async (req, res) => {
+  const runId = req.query.runId ? Number.parseInt(req.query.runId, 10) : null;
   try {
-    const data = await repo.getDashboardData();
+    const [data, runs] = await Promise.all([
+      repo.getDashboardData({ runId }),
+      repo.listRuns({ limit: 200 }),
+    ]);
     view(res, 'reconciliation/dashboard', {
-      title: 'Reconciliation', user: req.user, data,
+      title: 'Reconciliation', user: req.user, data, runs, selectedRunId: runId,
       outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, error: null,
     });
   } catch (err) {
     view(res, 'reconciliation/dashboard', {
-      title: 'Reconciliation', user: req.user, data: null,
+      title: 'Reconciliation', user: req.user, data: null, runs: [], selectedRunId: runId,
       outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, error: err.message,
     });
   }
 });
 
 router.get('/sources', async (req, res) => {
+  const base = {
+    title: 'Reconciliation Sources', user: req.user,
+    authModes: sqlSource.AUTH_MODES,
+    canStoreSecrets: isEncryptionConfigured(),
+  };
   try {
-    const [sources, candidates] = await Promise.all([repo.listSources(), loadCandidateSources(req, res)]);
+    const [sources, servicePrincipals, analysisRuns] = await Promise.all([
+      repo.listSources(), db.getServicePrincipals(), db.getAnalysisRuns(),
+    ]);
     const datasetsBySource = {};
     for (const source of sources) {
       datasetsBySource[source.id] = await loadSourceDatasets(source);
     }
+    // Which tenants have a scan to pick items from, so the page can say so before
+    // the user selects one and finds an empty list.
+    const scanBySp = {};
+    for (const sp of servicePrincipals) {
+      const run = latestRunForSp(analysisRuns, sp.id);
+      scanBySp[sp.id] = run ? { id: run.id, startedAt: run.started_at } : null;
+    }
     view(res, 'reconciliation/sources', {
-      title: 'Reconciliation Sources', user: req.user, sources, candidates, datasetsBySource, error: null,
+      ...base, sources, servicePrincipals, scanBySp, datasetsBySource, error: null,
     });
   } catch (err) {
     view(res, 'reconciliation/sources', {
-      title: 'Reconciliation Sources', user: req.user, sources: [], candidates: [], datasetsBySource: {}, error: err.message,
+      ...base, sources: [], servicePrincipals: [], scanBySp: {}, datasetsBySource: {}, error: err.message,
     });
   }
 });
 
+/** Fabric items available in a tenant, taken from that tenant's most recent scan. */
+router.get('/sources/candidates', async (req, res) => {
+  try {
+    const spId = Number.parseInt(req.query.spId, 10);
+    if (!Number.isFinite(spId)) return res.json({ success: false, message: 'Select a tenant first.' });
+
+    const runs = await db.getAnalysisRuns();
+    const latest = latestRunForSp(runs, spId);
+    if (!latest) {
+      return res.json({
+        success: true, candidates: [],
+        message: 'No completed analysis run for this tenant yet. Run an analysis so its lakehouses and warehouses are discovered.',
+      });
+    }
+    const run = await db.getAnalysisRunById(latest.id);
+    res.json({ success: true, runId: latest.id, candidates: extractCandidates(run) });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ── Registering a Fabric item ──
 router.post('/sources', async (req, res) => {
   try {
-    const { workspaceId, itemId, workspaceName, itemName, itemType, systemLabel } = req.body;
+    const { workspaceId, itemId, workspaceName, itemName, itemType, systemLabel, spId } = req.body;
     if (!workspaceId || !itemId) return res.json({ success: false, message: 'Pick an item to register.' });
+    if (!spId) return res.json({ success: false, message: 'Pick the tenant this item belongs to.' });
+
+    const sp = await db.getServicePrincipalById(Number.parseInt(spId, 10));
+    if (!sp) return res.json({ success: false, message: 'That service principal is no longer configured.' });
 
     // The connection string is resolved once, at registration, so runs do not have
     // to rediscover it every time.
     let connectionString = null;
     let databaseName = itemName;
     try {
-      const pbi = await getPbiService(res);
+      const pbi = createPowerBIService(sp);
       const endpoint = await pbi.getSqlEndpointInfo(workspaceId, itemId, itemType);
       if (endpoint) {
         connectionString = endpoint.connectionString;
@@ -139,12 +208,130 @@ router.post('/sources', async (req, res) => {
     const id = await repo.saveSource({
       name: itemName || itemId,
       systemLabel: systemLabel || null,
-      kind: 'fabric-sql',
+      kind: SOURCE_KIND.FABRIC,
       workspaceId, workspaceName, itemId, itemType,
+      spId: sp.id, spName: sp.name, tenantId: sp.tenant_id,
       connectionString, databaseName,
       createdBy: actorOf(req),
     });
     res.json({ success: true, id });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ── Registering any other SQL Server or Azure SQL database ──
+function readExternalBody(body) {
+  return {
+    id: body.id || null,
+    name: (body.name || '').trim(),
+    systemLabel: (body.systemLabel || '').trim() || null,
+    server: (body.server || '').trim(),
+    database: (body.database || '').trim(),
+    port: body.port || null,
+    authMode: body.authMode === 'sql' ? 'sql' : 'entra',
+    username: (body.username || '').trim() || null,
+    password: body.password === undefined ? undefined : String(body.password),
+  };
+}
+
+function validateExternal(input) {
+  if (!input.name) return 'Give the source a name.';
+  if (!input.server) return 'Enter the server, for example myserver.database.windows.net.';
+  if (!input.database) return 'Enter the database name.';
+  if (input.authMode === 'sql') {
+    if (!input.username) return 'A SQL login needs a username.';
+    if (!input.password) return 'A SQL login needs a password.';
+    if (!isEncryptionConfigured()) {
+      return 'SECRET_ENCRYPTION_KEY is not configured on this application, so a SQL password cannot be stored. Use Entra ID authentication instead, or set that app setting.';
+    }
+  }
+  return null;
+}
+
+// Shapes the form input into what the connector reads, so testing and registering
+// take exactly the same path — a test that passes cannot then fail on registration.
+function externalSourceRow(input, storedPassword) {
+  return {
+    connection_string: input.server,
+    database_name: input.database,
+    sql_port: input.port,
+    auth_mode: input.authMode,
+    sql_username: input.username,
+    sql_password: storedPassword,
+  };
+}
+
+router.post('/sources/external/test', async (req, res) => {
+  const input = readExternalBody(req.body);
+  const problem = validateExternal(input);
+  if (problem) return res.json({ success: false, message: problem });
+  try {
+    let password = input.password ? encryptSecret(input.password) : null;
+    if (input.id && input.password === undefined) {
+      // Testing an existing source without retyping its password.
+      const existing = await repo.getSourceById(Number.parseInt(input.id, 10));
+      password = existing ? existing.sql_password : null;
+    }
+    const info = await sqlSource.testConnection(externalSourceRow(input, password));
+    res.json({ success: true, info });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+router.post('/sources/external', async (req, res) => {
+  const input = readExternalBody(req.body);
+  const problem = validateExternal(input);
+  if (problem) return res.json({ success: false, message: problem });
+
+  try {
+    const password = input.password ? encryptSecret(input.password) : undefined;
+    const row = externalSourceRow(input, password === undefined ? null : password);
+
+    // The schema is read now rather than at rule-authoring time, so an unreachable
+    // database is reported to the person registering it.
+    let datasets;
+    try {
+      datasets = await sqlSource.readSchema(row);
+    } catch (err) {
+      return res.json({ success: false, message: 'Could not read the database: ' + err.message });
+    }
+    if (!datasets.length) {
+      return res.json({ success: false, message: 'Connected, but this identity cannot see any tables or views in that database. Grant it read access.' });
+    }
+
+    const id = await repo.saveSource({
+      id: input.id || null,
+      name: input.name,
+      systemLabel: input.systemLabel,
+      kind: SOURCE_KIND.EXTERNAL,
+      connectionString: input.server,
+      databaseName: input.database,
+      authMode: input.authMode,
+      sqlPort: input.port,
+      sqlUsername: input.username,
+      sqlPassword: password,
+      schemaJson: JSON.stringify(datasets),
+      createdBy: actorOf(req),
+    });
+    res.json({ success: true, id, datasets: datasets.length });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/** Re-reads an external source's schema after the database has changed. */
+router.post('/sources/:id/refresh-schema', async (req, res) => {
+  try {
+    const source = await repo.getSourceById(Number.parseInt(req.params.id, 10));
+    if (!source) return res.json({ success: false, message: 'Source not found.' });
+    if (source.kind !== SOURCE_KIND.EXTERNAL) {
+      return res.json({ success: false, message: 'A Fabric item\'s schema comes from an analysis run. Run an analysis to refresh it.' });
+    }
+    const datasets = await sqlSource.readSchema(source);
+    await repo.saveSourceSchema(source.id, JSON.stringify(datasets));
+    res.json({ success: true, datasets: datasets.length });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
@@ -179,10 +366,10 @@ router.get('/sources/:id/datasets', async (req, res) => {
 // ── Rules ──
 router.get('/rules', async (req, res) => {
   try {
-    const rules = await repo.listRules();
-    view(res, 'reconciliation/rules', { title: 'Reconciliation Rules', user: req.user, rules, error: null });
+    const [rules, owners] = await Promise.all([repo.listRules(), repo.listOwners()]);
+    view(res, 'reconciliation/rules', { title: 'Reconciliation Rules', user: req.user, rules, owners, error: null });
   } catch (err) {
-    view(res, 'reconciliation/rules', { title: 'Reconciliation Rules', user: req.user, rules: [], error: err.message });
+    view(res, 'reconciliation/rules', { title: 'Reconciliation Rules', user: req.user, rules: [], owners: [], error: err.message });
   }
 });
 
@@ -276,25 +463,89 @@ router.put('/rules/:id', async (req, res) => {
   }
 });
 
+/**
+ * A rule that cannot run must never be presented to operators as active, so
+ * activation re-validates the stored definition rather than trusting that it was
+ * valid when it was written.
+ */
+async function activationProblem(id) {
+  const rule = await repo.getRuleById(id);
+  if (!rule) return 'Rule not found.';
+  return validateRule({
+    name: rule.name, sourceAId: rule.source_a_id, sourceBId: rule.source_b_id,
+    datasetA: rule.dataset_a, datasetB: rule.dataset_b,
+    keyFieldA: rule.key_field_a, keyFieldB: rule.key_field_b, compareFields: rule.compareFields,
+  });
+}
+
+function isKnownStatus(status) {
+  return [RULE_STATUS.DRAFT, RULE_STATUS.ACTIVE, RULE_STATUS.RETIRED].includes(status);
+}
+
 router.post('/rules/:id/status', async (req, res) => {
   try {
     const status = req.body.status;
-    if (![RULE_STATUS.DRAFT, RULE_STATUS.ACTIVE, RULE_STATUS.RETIRED].includes(status)) {
-      return res.json({ success: false, message: 'Unknown rule status.' });
-    }
+    if (!isKnownStatus(status)) return res.json({ success: false, message: 'Unknown rule status.' });
+
     const id = Number.parseInt(req.params.id, 10);
     if (status === RULE_STATUS.ACTIVE) {
-      const rule = await repo.getRuleById(id);
-      const problem = rule ? validateRule({
-        name: rule.name, sourceAId: rule.source_a_id, sourceBId: rule.source_b_id,
-        datasetA: rule.dataset_a, datasetB: rule.dataset_b,
-        keyFieldA: rule.key_field_a, keyFieldB: rule.key_field_b, compareFields: rule.compareFields,
-      }) : 'Rule not found.';
-      // A rule that cannot run should never be presented to operators as active.
+      const problem = await activationProblem(id);
       if (problem) return res.json({ success: false, message: 'Cannot activate: ' + problem });
     }
     await repo.setRuleStatus(id, status, actorOf(req));
     res.json({ success: true });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * Applies a status change and/or an owner to several rules at once.
+ *
+ * Rules are checked individually and reported individually: a batch that includes
+ * one incomplete rule should move the others and say which one it could not
+ * activate, rather than refusing the whole operation or — worse — activating a
+ * control that cannot run.
+ */
+router.post('/rules/batch', async (req, res) => {
+  try {
+    const ids = [].concat(req.body.ruleIds || [])
+      .map(id => Number.parseInt(id, 10))
+      .filter(Number.isFinite);
+    if (!ids.length) return res.json({ success: false, message: 'Select at least one rule.' });
+
+    const status = req.body.status || null;
+    const assignOwner = req.body.assignOwner === true || req.body.assignOwner === 'true';
+    const owner = (req.body.owner || '').trim() || null;
+    if (!status && !assignOwner) {
+      return res.json({ success: false, message: 'Choose a status to apply, an owner to assign, or both.' });
+    }
+    if (status && !isKnownStatus(status)) return res.json({ success: false, message: 'Unknown rule status.' });
+
+    const rules = await repo.listRules();
+    const byId = new Map(rules.map(rule => [Number(rule.id), rule]));
+
+    const eligible = [];
+    const skipped = [];
+    for (const id of ids) {
+      const rule = byId.get(id);
+      if (!rule) { skipped.push({ id, name: 'Rule #' + id, message: 'No longer exists.' }); continue; }
+      if (status === RULE_STATUS.ACTIVE) {
+        const problem = await activationProblem(id);
+        if (problem) { skipped.push({ id, name: rule.name, message: problem }); continue; }
+      }
+      eligible.push(id);
+    }
+
+    const results = eligible.length ? await repo.batchUpdateRules(eligible, { status, owner, assignOwner }, actorOf(req)) : [];
+    const failed = results.filter(result => !result.success)
+      .map(result => ({ id: result.id, name: (byId.get(result.id) || {}).name, message: result.message }));
+
+    res.json({
+      success: true,
+      updated: results.filter(result => result.success).length,
+      skipped: skipped.concat(failed),
+    });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
@@ -310,7 +561,25 @@ router.delete('/rules/:id', async (req, res) => {
 });
 
 // ── Execution ──
-async function executeRule(pbi, rule) {
+/**
+ * Reads one side of a comparison, whatever kind of system it is.
+ *
+ * A Fabric item is reached with its own tenant's service principal; a registered
+ * database is reached directly. Both return the same aliased shape, because the
+ * projection is planned once and built by the same code for either path.
+ */
+async function readSourceRows(source, { dataset, selections, rowLimit }) {
+  if (source.kind === SOURCE_KIND.EXTERNAL) {
+    return sqlSource.readRows(source, { dataset, selections, rowLimit });
+  }
+  const pbi = await getPbiServiceForSp(source.sp_id);
+  return pbi.readSqlEndpointRows(
+    { connectionString: source.connection_string, database: source.database_name },
+    { dataset, selections, rowLimit }
+  );
+}
+
+async function executeRule(rule) {
   const [sourceA, sourceB] = await Promise.all([
     repo.getSourceById(rule.source_a_id), repo.getSourceById(rule.source_b_id),
   ]);
@@ -328,14 +597,8 @@ async function executeRule(pbi, rule) {
   });
 
   const [rowsA, rowsB] = await Promise.all([
-    pbi.readSqlEndpointRows(
-      { connectionString: sourceA.connection_string, database: sourceA.database_name },
-      { dataset: rule.dataset_a, selections: plan.selectionsA, rowLimit: rule.row_limit }
-    ),
-    pbi.readSqlEndpointRows(
-      { connectionString: sourceB.connection_string, database: sourceB.database_name },
-      { dataset: rule.dataset_b, selections: plan.selectionsB, rowLimit: rule.row_limit }
-    ),
+    readSourceRows(sourceA, { dataset: rule.dataset_a, selections: plan.selectionsA, rowLimit: rule.row_limit }),
+    readSourceRows(sourceB, { dataset: rule.dataset_b, selections: plan.selectionsB, rowLimit: rule.row_limit }),
   ]);
 
   return reconcile({ rowsA, rowsB, rule: plan.engineRule });
@@ -350,7 +613,6 @@ router.post('/run', async (req, res) => {
 
   const results = [];
   try {
-    const pbi = await getPbiService(res);
     for (const ruleId of ruleIds) {
       const rule = await repo.getRuleById(ruleId);
       if (!rule) {
@@ -368,7 +630,7 @@ router.post('/run', async (req, res) => {
         ruleId, ruleVersion: rule.version, ruleName: rule.name, runBy: actorOf(req),
       });
       try {
-        const outcome = await executeRule(pbi, rule);
+        const outcome = await executeRule(rule);
         const recorded = await repo.recordExceptions(runId, rule, outcome.exceptions);
         await repo.completeRun(runId, { status: 'completed', summary: outcome.summary });
         results.push({
@@ -392,6 +654,65 @@ router.get('/runs', async (req, res) => {
     view(res, 'reconciliation/runs', { title: 'Reconciliation Runs', user: req.user, runs, rules, error: null });
   } catch (err) {
     view(res, 'reconciliation/runs', { title: 'Reconciliation Runs', user: req.user, runs: [], rules: [], error: err.message });
+  }
+});
+
+/**
+ * Comparing two runs of the same control.
+ *
+ * The run list is grouped by rule, because only runs of the same rule can be
+ * compared — the page offers the pairs that make sense rather than letting the user
+ * assemble a meaningless one and then refusing it.
+ */
+router.get('/compare', async (req, res) => {
+  const fromId = req.query.from ? Number.parseInt(req.query.from, 10) : null;
+  const toId = req.query.to ? Number.parseInt(req.query.to, 10) : null;
+
+  const base = { title: 'Compare Reconciliation Runs', user: req.user, verdictDefs: VERDICT_DEFS };
+  try {
+    const runs = (await repo.listRuns({ limit: 300 })).filter(run => run.status === 'completed');
+    if (!fromId || !toId) {
+      return view(res, 'reconciliation/compare', {
+        ...base, runs, comparison: null, fromId, toId, error: null, notice: null,
+      });
+    }
+
+    const [fromRun, toRun] = await Promise.all([repo.getRunById(fromId), repo.getRunById(toId)]);
+    if (!fromRun || !toRun) {
+      return view(res, 'reconciliation/compare', {
+        ...base, runs, comparison: null, fromId, toId, notice: null, error: 'One of the selected runs no longer exists.',
+      });
+    }
+
+    const [findingsFrom, findingsTo] = await Promise.all([
+      repo.listRunFindings(fromId), repo.listRunFindings(toId),
+    ]);
+
+    let comparison = null;
+    let error = null;
+    try {
+      comparison = compareRuns({ fromRun, toRun, findingsFrom, findingsTo });
+    } catch (compareErr) {
+      error = compareErr.message;
+    }
+
+    // A run from before per-run findings were kept has none. Its totals still
+    // compare, but item-level movement would read as "everything was fixed", so say
+    // so rather than presenting an answer that is not true.
+    const missingDetail = [];
+    if (comparison) {
+      if (!findingsFrom.length && Number(fromRun.exception_count) > 0) missingDetail.push('#' + fromRun.id);
+      if (!findingsTo.length && Number(toRun.exception_count) > 0) missingDetail.push('#' + toRun.id);
+    }
+    const notice = missingDetail.length
+      ? 'Run ' + missingDetail.join(' and ') + ' recorded exceptions but no per-item detail, because it ran before findings were kept per run. The totals below are accurate; the item lists are not.'
+      : null;
+
+    view(res, 'reconciliation/compare', { ...base, runs, comparison, fromId, toId, error, notice });
+  } catch (err) {
+    view(res, 'reconciliation/compare', {
+      ...base, runs: [], comparison: null, fromId, toId, notice: null, error: err.message,
+    });
   }
 });
 

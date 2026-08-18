@@ -24,11 +24,48 @@
       <input type="text" class="form-control form-control-sm" style="max-width:260px;" placeholder="Filter rules..." oninput="filterTable(this, 'recon-rules-table')">
     </div>
   </div>
+
+  <!-- Batch actions: only meaningful once something is selected, so it stays hidden
+       until then rather than sitting there inert. -->
+  <div class="card-body border-bottom py-2 d-none" id="batchBar">
+    <div class="row g-2 align-items-end">
+      <div class="col-auto">
+        <span class="badge bg-primary" id="batchCount">0 selected</span>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small mb-1" for="batchStatus">Set status</label>
+        <select class="form-select form-select-sm" id="batchStatus">
+          <option value="">Leave unchanged</option>
+          <option value="draft">Draft</option>
+          <option value="active">Active</option>
+          <option value="retired">Retired</option>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small mb-1" for="batchOwner">Assign owner</label>
+        <input type="text" class="form-control form-control-sm" id="batchOwner" list="ownerOptions" placeholder="Leave blank to keep current owners">
+        <datalist id="ownerOptions">
+          <% (owners || []).forEach(function(owner) { %><option value="<%= owner %>"></option><% }) %>
+        </datalist>
+      </div>
+      <div class="col-auto">
+        <div class="form-check small">
+          <input class="form-check-input" type="checkbox" id="batchClearOwner">
+          <label class="form-check-label" for="batchClearOwner">Apply owner (blank clears it)</label>
+        </div>
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-sm btn-primary" onclick="applyBatch()"><i class="bi bi-check2-all me-1"></i>Apply to selected</button>
+      </div>
+    </div>
+    <div class="mt-2" id="batchResult"></div>
+  </div>
+
   <div class="table-responsive">
     <table class="table table-sm table-hover mb-0" id="recon-rules-table">
       <thead>
         <tr>
-          <th style="width:32px;"></th>
+          <th style="width:32px;"><input type="checkbox" class="form-check-input" title="Select all" onchange="toggleAllRules(this.checked)"></th>
           <th>Rule</th><th>Business area</th><th>Owner</th><th>Priority</th>
           <th>Status</th><th>Version</th><th>Actions</th>
         </tr>
@@ -40,9 +77,8 @@
         <% rules.forEach(function(rule) { %>
           <tr data-filter="<%= [rule.name, rule.business_area || '', rule.owner || '', rule.status].join(' ').toLowerCase() %>">
             <td>
-              <% if (rule.status === 'active') { %>
-                <input type="checkbox" class="form-check-input rule-select" value="<%= rule.id %>">
-              <% } %>
+              <input type="checkbox" class="form-check-input rule-select" value="<%= rule.id %>"
+                     data-status="<%= rule.status %>" onchange="updateBatchBar()">
             </td>
             <td>
               <a href="/reconciliation/rules/<%= rule.id %>"><strong><%= rule.name %></strong></a>
@@ -69,7 +105,11 @@
       </tbody>
     </table>
   </div>
-  <div class="card-footer small text-muted">Only active rules can be run. A rule is refused activation until it defines both sources, a business key and at least one value to compare.</div>
+  <div class="card-footer small text-muted">
+    Only active rules can be run. A rule is refused activation until it defines both sources, a business key and at least one
+    value to compare — in a batch too, where the rules that cannot be activated are named and the rest still go through.
+    Every change is versioned individually, whether it was made one rule at a time or in a batch.
+  </div>
 </div>
 
 <div class="modal fade" id="runResultModal" tabindex="-1">
@@ -82,6 +122,67 @@
 </div>
 
 <script>
+function selectedRules() {
+  return Array.from(document.querySelectorAll('.rule-select:checked'));
+}
+
+function toggleAllRules(checked) {
+  // Only rows the filter is currently showing, so "select all" cannot quietly
+  // include rules the user has filtered out of view.
+  document.querySelectorAll('#recon-rules-table tbody tr').forEach(function(row) {
+    if (row.style.display === 'none') return;
+    var box = row.querySelector('.rule-select');
+    if (box) box.checked = checked;
+  });
+  updateBatchBar();
+}
+
+function updateBatchBar() {
+  var selected = selectedRules();
+  var bar = document.getElementById('batchBar');
+  bar.classList.toggle('d-none', selected.length === 0);
+  document.getElementById('batchCount').textContent = selected.length + ' selected';
+}
+
+async function applyBatch() {
+  var ids = selectedRules().map(function(el) { return el.value; });
+  if (!ids.length) return;
+
+  var status = document.getElementById('batchStatus').value || null;
+  var assignOwner = document.getElementById('batchClearOwner').checked;
+  var owner = document.getElementById('batchOwner').value.trim();
+  if (!status && !assignOwner) {
+    showToast('Choose a status, or tick "Apply owner"', 'error');
+    return;
+  }
+
+  var result = document.getElementById('batchResult');
+  result.innerHTML = '<div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Applying...</div>';
+  try {
+    var resp = await fetch('/reconciliation/rules/batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ruleIds: ids, status: status, owner: owner, assignOwner: assignOwner })
+    });
+    var data = await resp.json();
+    if (!data.success) { result.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + data.message + '</div>'; return; }
+
+    // Rules that could not take the change are named, because "12 of 15 updated"
+    // without saying which three is not something anyone can act on.
+    var skipped = (data.skipped || []).map(function(s) {
+      return '<li>' + escapeText(s.name || ('Rule #' + s.id)) + ' — ' + escapeText(s.message) + '</li>';
+    }).join('');
+    result.innerHTML = '<div class="alert alert-' + (skipped ? 'warning' : 'success') + ' py-2 small mb-0">' +
+      data.updated + ' rule(s) updated.' +
+      (skipped ? '<br>Not changed:<ul class="mb-0">' + skipped + '</ul>' : ' Reloading...') + '</div>';
+    if (!skipped) setTimeout(function() { window.location.reload(); }, 700);
+    else setTimeout(function() { window.location.reload(); }, 4000);
+  } catch (e) {
+    result.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeText(e.message) + '</div>';
+  }
+}
+
+function escapeText(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
 async function setStatus(id, status) {
   try {
     var resp = await fetch('/reconciliation/rules/' + id + '/status', {
@@ -105,8 +206,15 @@ async function removeRule(id) {
 }
 
 async function runSelected() {
-  var ids = Array.from(document.querySelectorAll('.rule-select:checked')).map(function(el) { return el.value; });
+  // Every rule is selectable so batch changes can reach drafts, but only active
+  // rules can be run — say so rather than sending them and collecting refusals.
+  var selected = selectedRules();
+  var ids = selected.filter(function(el) { return el.getAttribute('data-status') === 'active'; })
+    .map(function(el) { return el.value; });
   if (!ids.length) { showToast('Select at least one active rule', 'error'); return; }
+  if (ids.length < selected.length) {
+    showToast((selected.length - ids.length) + ' selected rule(s) are not active and will be skipped', 'error');
+  }
 
   var modal = new bootstrap.Modal(document.getElementById('runResultModal'));
   document.getElementById('runResultBody').innerHTML =

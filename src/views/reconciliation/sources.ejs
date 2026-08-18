@@ -12,31 +12,108 @@
 <div class="card mb-4">
   <div class="card-header"><i class="bi bi-plus-circle me-2"></i>Register a Source</div>
   <div class="card-body py-3">
-    <% if (!candidates.length) { %>
-      <p class="text-muted small mb-0">
-        No lakehouses or warehouses found in the selected scan. Select a scan in the top bar, or
-        <a href="/analysis">run an analysis</a> so its SQL endpoints are discovered.
-      </p>
-    <% } else { %>
-      <div class="row g-2 align-items-end">
-        <div class="col-md-6">
-          <label class="form-label small" for="candidateSelect">Fabric item</label>
-          <select class="form-select form-select-sm" id="candidateSelect">
-            <% candidates.forEach(function(c, i) { %>
-              <option value="<%= i %>"><%= c.workspaceName %> → <%= c.itemName %> (<%= c.itemType %>)</option>
-            <% }) %>
-          </select>
+    <ul class="nav nav-tabs mb-3" role="tablist">
+      <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-fabric" type="button"><i class="bi bi-hexagon me-1"></i>Fabric item</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-external" type="button"><i class="bi bi-hdd-network me-1"></i>Other database</button></li>
+    </ul>
+
+    <div class="tab-content">
+      <!-- ── Fabric lakehouse or warehouse ── -->
+      <div class="tab-pane fade show active" id="tab-fabric">
+        <% if (!servicePrincipals.length) { %>
+          <p class="text-muted small mb-0">
+            No service principals configured. <a href="/settings">Add one in Settings</a>, then run an analysis so its
+            lakehouses and warehouses are discovered.
+          </p>
+        <% } else { %>
+          <div class="row g-2 align-items-end">
+            <div class="col-md-4">
+              <label class="form-label small" for="spSelect">Tenant / Service principal</label>
+              <select class="form-select form-select-sm" id="spSelect" onchange="loadCandidates()">
+                <% servicePrincipals.forEach(function(sp) { var scan = scanBySp[sp.id]; %>
+                  <option value="<%= sp.id %>" data-scan="<%= scan ? scan.id : '' %>">
+                    <%= sp.name %> (<%= sp.tenant_id %>)<%= scan ? '' : ' — no scan yet' %>
+                  </option>
+                <% }) %>
+              </select>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small" for="candidateSelect">Lakehouse or warehouse</label>
+              <select class="form-select form-select-sm" id="candidateSelect"><option value="">Loading...</option></select>
+            </div>
+            <div class="col-md-2">
+              <label class="form-label small" for="systemLabel">Business system</label>
+              <input type="text" class="form-control form-control-sm" id="systemLabel" placeholder="e.g. ERP">
+            </div>
+            <div class="col-md-2">
+              <button class="btn btn-sm btn-primary w-100" id="registerFabricBtn" onclick="registerSource()"><i class="bi bi-plus me-1"></i>Register</button>
+            </div>
+          </div>
+          <div class="form-text mt-2" id="candidateNote">
+            <i class="bi bi-info-circle me-1"></i>Items come from the most recent completed analysis run for the selected tenant.
+            Registering resolves the SQL analytics endpoint once, so runs do not have to rediscover it.
+          </div>
+        <% } %>
+      </div>
+
+      <!-- ── Any other SQL Server or Azure SQL database ── -->
+      <div class="tab-pane fade" id="tab-external">
+        <div class="row g-2">
+          <div class="col-md-4">
+            <label class="form-label small" for="extName">Name</label>
+            <input type="text" class="form-control form-control-sm" id="extName" placeholder="e.g. ERP production">
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small" for="extServer">Server</label>
+            <input type="text" class="form-control form-control-sm" id="extServer" placeholder="myserver.database.windows.net">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small" for="extDatabase">Database</label>
+            <input type="text" class="form-control form-control-sm" id="extDatabase" placeholder="SalesDW">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small" for="extPort">Port <span class="text-muted">(optional)</span></label>
+            <input type="number" class="form-control form-control-sm" id="extPort" placeholder="1433">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small" for="extLabel">Business system</label>
+            <input type="text" class="form-control form-control-sm" id="extLabel" placeholder="e.g. ERP">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small" for="extAuth">Authentication</label>
+            <select class="form-select form-select-sm" id="extAuth" onchange="toggleExtAuth()">
+              <% authModes.forEach(function(mode) { %>
+                <option value="<%= mode.key %>"><%= mode.label %></option>
+              <% }) %>
+            </select>
+          </div>
+          <div class="col-md-3 d-none" id="extUserWrap">
+            <label class="form-label small" for="extUser">Username</label>
+            <input type="text" class="form-control form-control-sm" id="extUser" autocomplete="off">
+          </div>
+          <div class="col-md-3 d-none" id="extPassWrap">
+            <label class="form-label small" for="extPass">Password</label>
+            <input type="password" class="form-control form-control-sm" id="extPass" autocomplete="new-password">
+          </div>
         </div>
-        <div class="col-md-4">
-          <label class="form-label small" for="systemLabel">Business system label</label>
-          <input type="text" class="form-control form-control-sm" id="systemLabel" placeholder="e.g. ERP, Reporting Platform">
+
+        <div class="d-flex gap-2 mt-3">
+          <button class="btn btn-sm btn-outline-secondary" onclick="testExternal()"><i class="bi bi-plug me-1"></i>Test connection</button>
+          <button class="btn btn-sm btn-primary" onclick="registerExternal()"><i class="bi bi-plus me-1"></i>Register</button>
         </div>
-        <div class="col-md-2">
-          <button class="btn btn-sm btn-primary w-100" onclick="registerSource()"><i class="bi bi-plus me-1"></i>Register</button>
+        <div class="mt-2" id="extResult"></div>
+
+        <div class="form-text mt-2">
+          <i class="bi bi-info-circle me-1"></i>
+          SQL Server and Azure SQL are supported, because that is the wire protocol this application speaks.
+          Other engines would need their own driver.
+          <% if (!canStoreSecrets) { %>
+            <br><span class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>SQL logins are unavailable until <code>SECRET_ENCRYPTION_KEY</code> is set, because the password could not be stored encrypted. Entra ID authentication works without it.</span>
+          <% } %>
+          The schema is read once at registration and stored, so authoring a rule does not open a connection to the business system.
         </div>
       </div>
-      <div class="form-text mt-2"><i class="bi bi-info-circle me-1"></i>Registering resolves the SQL analytics endpoint once, so reconciliation runs do not have to rediscover it.</div>
-    <% } %>
+    </div>
   </div>
 </div>
 
@@ -46,22 +123,39 @@
     <div class="card-body text-muted small">No sources registered yet.</div>
   <% } else { %>
     <div class="card-body py-2">
-      <% sources.forEach(function(source, si) { var datasets = datasetsBySource[source.id] || []; %>
+      <% sources.forEach(function(source, si) {
+           var datasets = datasetsBySource[source.id] || [];
+           var isExternal = source.kind === 'external-sql';
+      %>
         <div class="border rounded mb-2">
           <div class="d-flex align-items-center justify-content-between px-3 py-2">
-            <button class="btn btn-sm text-start flex-grow-1 d-flex align-items-center p-0" type="button" data-bs-toggle="collapse" data-bs-target="#src-<%= si %>">
+            <button class="btn btn-sm text-start flex-grow-1 d-flex align-items-center flex-wrap p-0" type="button" data-bs-toggle="collapse" data-bs-target="#src-<%= si %>">
               <i class="bi bi-chevron-right me-2"></i>
               <span class="fw-bold"><%= source.name %></span>
               <% if (source.system_label) { %><span class="badge bg-primary ms-2"><%= source.system_label %></span><% } %>
+              <span class="badge bg-<%= isExternal ? 'dark' : 'info' %> ms-2"><%= isExternal ? 'Database' : 'Fabric' %></span>
+              <% if (source.sp_name) { %><span class="badge bg-secondary ms-2" title="Tenant this source is read under"><%= source.sp_name %></span><% } %>
               <span class="text-muted small ms-2"><%= source.workspace_name || '' %> · <%= datasets.length %> dataset(s)</span>
             </button>
-            <button class="btn btn-sm btn-outline-danger p-0 px-1" onclick="removeSource(<%= source.id %>)" title="Remove"><i class="bi bi-trash"></i></button>
+            <div class="d-flex gap-1">
+              <% if (isExternal) { %>
+                <button class="btn btn-sm btn-outline-secondary p-0 px-1" onclick="refreshSchema(<%= source.id %>)" title="Re-read tables and columns"><i class="bi bi-arrow-clockwise"></i></button>
+              <% } %>
+              <button class="btn btn-sm btn-outline-danger p-0 px-1" onclick="removeSource(<%= source.id %>)" title="Remove"><i class="bi bi-trash"></i></button>
+            </div>
           </div>
           <div class="collapse" id="src-<%= si %>">
             <div class="px-3 pb-2">
-              <div class="small text-muted mb-2"><code><%= source.connection_string || '-' %></code> · database <code><%= source.database_name || '-' %></code></div>
+              <div class="small text-muted mb-2">
+                <code><%= source.connection_string || '-' %></code> · database <code><%= source.database_name || '-' %></code>
+                <% if (isExternal) { %> · <%= source.auth_mode === 'sql' ? 'SQL login ' + (source.sql_username || '') : 'Entra ID' %><% } %>
+                <% if (source.tenant_id) { %> · tenant <code><%= source.tenant_id %></code><% } %>
+              </div>
               <% if (!datasets.length) { %>
-                <p class="small text-muted mb-2">No schema captured yet. Run an analysis so this item's SQL endpoint is read.</p>
+                <p class="small text-muted mb-2">
+                  <% if (isExternal) { %>No schema stored. Use the refresh button to read this database's tables and columns.
+                  <% } else { %>No schema captured yet. Run an analysis so this item's SQL endpoint is read.<% } %>
+                </p>
               <% } else { %>
                 <div class="table-responsive" style="max-height:320px;">
                   <table class="table table-sm mb-0">
@@ -87,13 +181,49 @@
 </div>
 
 <script>
-var candidates = <%- JSON.stringify(candidates) %>;
+var candidates = [];
+
+// Items belong to a tenant, so the list is reloaded whenever the tenant changes
+// rather than being rendered once from whichever scan happened to be selected.
+async function loadCandidates() {
+  var select = document.getElementById('candidateSelect');
+  var spId = document.getElementById('spSelect').value;
+  select.innerHTML = '<option value="">Loading...</option>';
+  candidates = [];
+
+  try {
+    var resp = await fetch('/reconciliation/sources/candidates?spId=' + encodeURIComponent(spId));
+    var data = await resp.json();
+    if (!data.success) { select.innerHTML = '<option value="">' + (data.message || 'Could not load items') + '</option>'; return; }
+
+    candidates = data.candidates || [];
+    if (!candidates.length) {
+      select.innerHTML = '<option value="">No lakehouses or warehouses found</option>';
+      document.getElementById('candidateNote').innerHTML =
+        '<i class="bi bi-info-circle me-1"></i>' + (data.message || 'This tenant\'s scan found no lakehouses or warehouses.');
+      return;
+    }
+    select.innerHTML = candidates.map(function(c, i) {
+      return '<option value="' + i + '">' + escapeHtml(c.workspaceName + ' → ' + c.itemName + ' (' + c.itemType + ')') + '</option>';
+    }).join('');
+    document.getElementById('candidateNote').innerHTML =
+      '<i class="bi bi-info-circle me-1"></i>' + candidates.length + ' item(s) from analysis run #' + data.runId + '.';
+  } catch (e) {
+    select.innerHTML = '<option value="">' + e.message + '</option>';
+  }
+}
+
+function escapeHtml(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 
 async function registerSource() {
   var idx = document.getElementById('candidateSelect').value;
   var candidate = candidates[Number(idx)];
-  if (!candidate) return;
-  var body = Object.assign({}, candidate, { systemLabel: document.getElementById('systemLabel').value.trim() });
+  if (!candidate) { showToast('Select an item to register', 'error'); return; }
+
+  var body = Object.assign({}, candidate, {
+    systemLabel: document.getElementById('systemLabel').value.trim(),
+    spId: document.getElementById('spSelect').value
+  });
   try {
     var resp = await fetch('/reconciliation/sources', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
@@ -101,6 +231,63 @@ async function registerSource() {
     var data = await resp.json();
     if (data.success) { showToast('Source registered', 'success'); setTimeout(function() { window.location.reload(); }, 600); }
     else showToast(data.message || 'Could not register the source', 'error');
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+function toggleExtAuth() {
+  var isSql = document.getElementById('extAuth').value === 'sql';
+  document.getElementById('extUserWrap').classList.toggle('d-none', !isSql);
+  document.getElementById('extPassWrap').classList.toggle('d-none', !isSql);
+}
+
+function externalBody() {
+  return {
+    name: document.getElementById('extName').value,
+    systemLabel: document.getElementById('extLabel').value,
+    server: document.getElementById('extServer').value,
+    database: document.getElementById('extDatabase').value,
+    port: document.getElementById('extPort').value,
+    authMode: document.getElementById('extAuth').value,
+    username: document.getElementById('extUser').value,
+    password: document.getElementById('extPass').value
+  };
+}
+
+function showExtResult(html) { document.getElementById('extResult').innerHTML = html; }
+
+async function testExternal() {
+  showExtResult('<div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Connecting...</div>');
+  try {
+    var resp = await fetch('/reconciliation/sources/external/test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(externalBody())
+    });
+    var data = await resp.json();
+    if (!data.success) { showExtResult('<div class="alert alert-danger py-2 small mb-0">' + escapeHtml(data.message) + '</div>'); return; }
+    showExtResult('<div class="alert alert-success py-2 small mb-0"><i class="bi bi-check-circle me-1"></i>Connected to <strong>' +
+      escapeHtml(data.info.database) + '</strong> as <code>' + escapeHtml(data.info.login) + '</code>' +
+      (data.info.version ? '<br><span class="text-muted">' + escapeHtml(data.info.version) + '</span>' : '') + '</div>');
+  } catch (e) { showExtResult('<div class="alert alert-danger py-2 small mb-0">' + escapeHtml(e.message) + '</div>'); }
+}
+
+async function registerExternal() {
+  showExtResult('<div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Connecting and reading the schema...</div>');
+  try {
+    var resp = await fetch('/reconciliation/sources/external', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(externalBody())
+    });
+    var data = await resp.json();
+    if (!data.success) { showExtResult('<div class="alert alert-danger py-2 small mb-0">' + escapeHtml(data.message) + '</div>'); return; }
+    showExtResult('<div class="alert alert-success py-2 small mb-0">Registered with ' + data.datasets + ' dataset(s). Reloading...</div>');
+    setTimeout(function() { window.location.reload(); }, 700);
+  } catch (e) { showExtResult('<div class="alert alert-danger py-2 small mb-0">' + escapeHtml(e.message) + '</div>'); }
+}
+
+async function refreshSchema(id) {
+  try {
+    var resp = await fetch('/reconciliation/sources/' + id + '/refresh-schema', { method: 'POST' });
+    var data = await resp.json();
+    if (data.success) { showToast('Read ' + data.datasets + ' dataset(s)', 'success'); setTimeout(function() { window.location.reload(); }, 600); }
+    else showToast(data.message, 'error');
   } catch (e) { showToast(e.message, 'error'); }
 }
 
@@ -115,5 +302,7 @@ async function removeSource(id) {
     }
   });
 }
+
+if (document.getElementById('spSelect')) loadCandidates();
 </script>
 <%- include('../partials/footer') %>

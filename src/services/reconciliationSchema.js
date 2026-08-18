@@ -24,8 +24,59 @@ const RECONCILIATION_MIGRATIONS = [
           created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
           created_by NVARCHAR(255) NULL
         );
-        CREATE UNIQUE INDEX UX_recon_sources_item ON recon_sources (workspace_id, item_id);
       END
+    `,
+  },
+  // Which tenant a Fabric source was registered under. Without it the engine had to
+  // guess a service principal, which is wrong as soon as more than one is configured.
+  {
+    label: 'add recon_sources tenant columns',
+    sql: `
+      IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_sources') AND type = 'U')
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_sources') AND name = N'sp_id')
+          ALTER TABLE recon_sources ADD sp_id INT NULL;
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_sources') AND name = N'sp_name')
+          ALTER TABLE recon_sources ADD sp_name NVARCHAR(255) NULL;
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_sources') AND name = N'tenant_id')
+          ALTER TABLE recon_sources ADD tenant_id NVARCHAR(100) NULL;
+      END
+    `,
+  },
+  // Databases that are not Fabric items: a server, a database, and how to sign in.
+  {
+    label: 'add recon_sources external connection columns',
+    sql: `
+      IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_sources') AND type = 'U')
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_sources') AND name = N'auth_mode')
+          ALTER TABLE recon_sources ADD auth_mode NVARCHAR(30) NULL;
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_sources') AND name = N'sql_port')
+          ALTER TABLE recon_sources ADD sql_port INT NULL;
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_sources') AND name = N'sql_username')
+          ALTER TABLE recon_sources ADD sql_username NVARCHAR(255) NULL;
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_sources') AND name = N'sql_password')
+          ALTER TABLE recon_sources ADD sql_password NVARCHAR(MAX) NULL;
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_sources') AND name = N'schema_json')
+          ALTER TABLE recon_sources ADD schema_json NVARCHAR(MAX) NULL;
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_sources') AND name = N'schema_read_at')
+          ALTER TABLE recon_sources ADD schema_read_at DATETIME2 NULL;
+      END
+    `,
+  },
+  // SQL Server treats NULLs as equal in a unique index, so the original index let
+  // exactly one source have no workspace/item — every external database after the
+  // first would be refused. A filtered index keeps Fabric items unique without
+  // constraining the sources that have no item at all.
+  {
+    label: 'rebuild recon_sources item index as filtered',
+    sql: `
+      IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_recon_sources_item' AND object_id = OBJECT_ID(N'recon_sources') AND has_filter = 0)
+        DROP INDEX UX_recon_sources_item ON recon_sources;
+      IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_sources') AND type = 'U')
+         AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_recon_sources_item' AND object_id = OBJECT_ID(N'recon_sources'))
+        CREATE UNIQUE INDEX UX_recon_sources_item ON recon_sources (workspace_id, item_id)
+          WHERE workspace_id IS NOT NULL AND item_id IS NOT NULL;
     `,
   },
   {
@@ -153,6 +204,31 @@ const RECONCILIATION_MIGRATIONS = [
           occurred_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
         );
         CREATE INDEX IX_recon_exception_events_exception ON recon_exception_events (exception_id, occurred_at DESC);
+      END
+    `,
+  },
+  // What each run actually found. The standing exception list carries only the
+  // current state of an item, so without this there is no way to ask what a
+  // particular run saw — which is what comparing two runs needs.
+  {
+    label: 'create recon_run_findings',
+    sql: `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_run_findings') AND type = 'U')
+      BEGIN
+        CREATE TABLE recon_run_findings (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          run_id INT NOT NULL,
+          rule_id INT NOT NULL,
+          exception_id INT NULL,
+          fingerprint NVARCHAR(500) NOT NULL,
+          business_key NVARCHAR(400) NULL,
+          outcome NVARCHAR(50) NOT NULL,
+          severity NVARCHAR(20) NULL,
+          is_new BIT NOT NULL DEFAULT 0,
+          recorded_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+        );
+        CREATE INDEX IX_recon_run_findings_run ON recon_run_findings (run_id, outcome);
+        CREATE INDEX IX_recon_run_findings_fingerprint ON recon_run_findings (fingerprint);
       END
     `,
   },

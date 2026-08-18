@@ -6,6 +6,7 @@ const {
   getSqlTokenForSP,
 } = require('./authService');
 const { explainStatus } = require('./httpErrorService');
+const { buildSelectSql } = require('./reconciliationService');
 
 const PBI_BASE = 'https://api.powerbi.com/v1.0/myorg';
 const PBI_ADMIN = PBI_BASE + '/admin';
@@ -545,34 +546,10 @@ function createPowerBIService(spConfig, authOptions = {}) {
   // Identifiers are validated and bracket-quoted rather than interpolated raw:
   // dataset and column names arrive from user-authored rules, so they are treated
   // as untrusted input even though only readers can reach this path.
+  // The projection is built by the reconciliation layer so a Fabric endpoint and a
+  // registered external database read exactly the same shape.
   async function readSqlEndpointRows(endpoint, { dataset, selections, columns, rowLimit }) {
-    const quote = (identifier) => {
-      const text = String(identifier || '').trim();
-      if (!text || !/^[A-Za-z0-9_ .$#@-]+$/.test(text)) {
-        throw new Error('Unsupported identifier in rule definition: "' + identifier + '"');
-      }
-      return text.split('.').map(part => '[' + part.trim() + ']').join('.');
-    };
-
-    // Plain column lists remain supported; selections add aliases and expressions.
-    const list = selections && selections.length
-      ? selections
-      : (columns || []).filter(Boolean).map(name => ({ alias: name, kind: 'field', value: name }));
-    if (!list.length) throw new Error('No columns selected to read.');
-
-    const projection = list.map(selection => {
-      const alias = quote(selection.alias || selection.value);
-      if (selection.kind === 'expression') {
-        // The expression is validated by the rule layer before it reaches here;
-        // wrapping it keeps it a single value within the SELECT list.
-        return '(' + String(selection.value).trim() + ') AS ' + alias;
-      }
-      return quote(selection.value) + ' AS ' + alias;
-    });
-
-    const top = Number.parseInt(rowLimit, 10);
-    const topClause = Number.isFinite(top) && top > 0 ? 'TOP (' + Math.min(top, 200000) + ') ' : '';
-    const sql = 'SELECT ' + topClause + projection.join(', ') + ' FROM ' + quote(dataset);
+    const sql = buildSelectSql({ dataset, selections, columns, rowLimit });
     const token = await getSqlTokenForSP(spConfig);
     return querySqlEndpoint(endpoint.connectionString, endpoint.database, token, sql);
   }

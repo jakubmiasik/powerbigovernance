@@ -131,13 +131,21 @@ Verifies that records representing the same business event exist and agree acros
 
 | Page | Purpose |
 |---|---|
-| `/reconciliation` | Oversight: active rules, open exceptions by type, severity, owner and age, rules with recurring discrepancies, recent runs |
+| `/reconciliation` | Oversight: active rules, open exceptions by type, severity, owner and age, rules with recurring discrepancies, recent runs. A dropdown scopes the whole page to what a single run found |
 | `/reconciliation/sources` | Register the systems to compare and browse their datasets and fields |
-| `/reconciliation/rules` | Create, version, activate and retire controls; run one or more of them |
+| `/reconciliation/rules` | Create, version, activate and retire controls; change status or assign an owner across several at once; run one or more of them |
 | `/reconciliation/runs` | Full run history: what was checked, when, under which rule version, and what it produced |
+| `/reconciliation/compare` | Two runs of the same rule side by side: what was fixed, what is newly failing, what persists |
 | `/reconciliation/exceptions` | Investigate, assign, comment and resolve discrepancies |
 
-Sources are Fabric SQL analytics endpoints (lakehouses and warehouses). Their schema comes from the artifact details already collected by an analysis run, so browsing available fields costs no extra API calls.
+Two kinds of source can be registered:
+
+- **Fabric lakehouses and warehouses.** You choose the tenant (service principal) the item belongs to, and the item list comes from that tenant's most recent completed analysis run. The source records which service principal it was registered under, so runs read it under the right credential instead of guessing. Its schema comes from the artifact details the analysis run already collected, so browsing fields costs no extra API calls.
+- **Any other SQL Server or Azure SQL database**, by server, database and optional port, authenticating either with this application's Entra ID identity or with a SQL login whose password is stored encrypted (which requires `SECRET_ENCRYPTION_KEY`). *Test connection* checks it before you register, and the schema is read once at registration and stored, so authoring a rule never opens a connection to the business system. Other database engines are not supported — they would need their own wire protocol and driver, and a connector that quietly failed against them would be worse than saying so.
+
+Batch changes apply the same status and/or owner to several rules at once. Rules are still checked individually: a batch activation moves the rules that are complete, names the ones it could not activate and why, and records a version entry for each rule it changed.
+
+Comparing two runs works from the findings each run recorded, not from its totals — twenty exceptions before and twenty after can mean nothing moved, or that twenty were fixed and twenty new ones appeared. Only runs of the same rule can be compared, because different rules check different records. Runs recorded before per-run findings were kept still compare on totals, and the page says so rather than reporting every item as fixed.
 
 Each side of a comparison can be a **field**, a **SQL expression** evaluated by that source (`TRIM(Customer)`, `CASE WHEN Status = 1 THEN 'Posted' ELSE 'Draft' END`), or a **fixed value** to check a column against. Expressions are validated when the rule is saved — statement separators, comments and anything that writes are refused — but they are author-written SQL running against the source, so rule authoring should be treated as a privileged capability.
 
@@ -157,6 +165,7 @@ Exceptions follow a controlled lifecycle — open, acknowledged, in investigatio
 - Progress is measured as work units per step rather than as fixed percentages. Each step reports what it has finished and what is left (`85 / 210`, `125 remaining`), the overall bar is weighted by how expensive each step actually is, and an estimated time remaining appears once the estimate is worth showing. A run in flight never reads 100%.
 - A run whose application instance stopped mid-scan is recognised rather than left at "running" forever: once its progress has not been written for `ANALYSIS_HEARTBEAT_STALE_SECONDS` (default 900) it is reported as **interrupted**, and startup marks such runs interrupted in the database.
 - Basic security headers, JSON/form body limits, and a lightweight `/api` rate limiter are enabled without adding runtime dependencies.
+- Repository queries that share one connection run one after another. A `tedious` connection carries a single request at a time, so issuing several together leaves the first answered and the rest rejected — which is how the reconciliation dashboard came to render empty panels that looked like stale data. A panel that genuinely cannot be read is now named on the page and logged, rather than blanked silently.
 - Startup migrations run statement by statement, so one failing `ALTER` no longer skips the migrations behind it, and a database that is unreachable at startup no longer prevents the capacity scheduler from starting.
 - The capacity scheduler catches up on schedules that came due while the process was restarting or idle. The look-back window is `SCHEDULER_CATCHUP_MINUTES` (default 20, `0` disables it); already-completed runs are recognised from `capacity_schedule_history`, so a catch-up never repeats an action that already ran.
 - On Azure App Service, enable **Always On** so the minute-by-minute scheduler tick keeps running when there is no incoming traffic. Without it, actions only fire when a request wakes the app and the schedule is still inside the catch-up window.
