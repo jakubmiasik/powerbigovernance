@@ -5,8 +5,15 @@ const repo = require('../services/reconciliationRepository');
 const { createPowerBIService } = require('../services/powerbiService');
 const {
   reconcile, OUTCOME_DEFS, STATUS_DEFS, STATUS_BY_KEY, RULE_STATUS,
-  isStatusTransitionAllowed, EXCEPTION_STATUS,
+  isStatusTransitionAllowed, EXCEPTION_STATUS, OPERAND_KINDS,
+  planRule, validateCompareFields, normalizeCompareField,
 } = require('../services/reconciliationService');
+
+// The reconciliation area is not tied to an analysis scan, so the global
+// "Service Principal / Scan" bar would suggest a relationship that does not exist.
+function view(res, template, locals) {
+  return res.render(template, { hideRunSelector: true, ...locals });
+}
 
 function actorOf(req) {
   return (req.user && (req.user.name || req.user.email)) || 'anonymous';
@@ -77,12 +84,12 @@ async function loadSourceDatasets(source) {
 router.get('/', async (req, res) => {
   try {
     const data = await repo.getDashboardData();
-    res.render('reconciliation/dashboard', {
+    view(res, 'reconciliation/dashboard', {
       title: 'Reconciliation', user: req.user, data,
       outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, error: null,
     });
   } catch (err) {
-    res.render('reconciliation/dashboard', {
+    view(res, 'reconciliation/dashboard', {
       title: 'Reconciliation', user: req.user, data: null,
       outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, error: err.message,
     });
@@ -96,11 +103,11 @@ router.get('/sources', async (req, res) => {
     for (const source of sources) {
       datasetsBySource[source.id] = await loadSourceDatasets(source);
     }
-    res.render('reconciliation/sources', {
+    view(res, 'reconciliation/sources', {
       title: 'Reconciliation Sources', user: req.user, sources, candidates, datasetsBySource, error: null,
     });
   } catch (err) {
-    res.render('reconciliation/sources', {
+    view(res, 'reconciliation/sources', {
       title: 'Reconciliation Sources', user: req.user, sources: [], candidates: [], datasetsBySource: {}, error: err.message,
     });
   }
@@ -173,17 +180,18 @@ router.get('/sources/:id/datasets', async (req, res) => {
 router.get('/rules', async (req, res) => {
   try {
     const rules = await repo.listRules();
-    res.render('reconciliation/rules', { title: 'Reconciliation Rules', user: req.user, rules, error: null });
+    view(res, 'reconciliation/rules', { title: 'Reconciliation Rules', user: req.user, rules, error: null });
   } catch (err) {
-    res.render('reconciliation/rules', { title: 'Reconciliation Rules', user: req.user, rules: [], error: err.message });
+    view(res, 'reconciliation/rules', { title: 'Reconciliation Rules', user: req.user, rules: [], error: err.message });
   }
 });
 
 router.get('/rules/new', async (req, res) => {
   try {
     const sources = await repo.listSources();
-    res.render('reconciliation/rule-form', {
+    view(res, 'reconciliation/rule-form', {
       title: 'New Reconciliation Rule', user: req.user, rule: null, sources, versions: [], error: null,
+      operandKinds: OPERAND_KINDS,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -197,8 +205,9 @@ router.get('/rules/:id', async (req, res) => {
       repo.getRuleById(id), repo.listSources(), repo.getRuleVersions(id),
     ]);
     if (!rule) return res.render('error', { title: 'Error', user: req.user, message: 'Rule not found.' });
-    res.render('reconciliation/rule-form', {
+    view(res, 'reconciliation/rule-form', {
       title: 'Rule: ' + rule.name, user: req.user, rule, sources, versions, error: null,
+      operandKinds: OPERAND_KINDS,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -220,7 +229,10 @@ function readRuleBody(body) {
     sourceAId: body.sourceAId, sourceBId: body.sourceBId,
     datasetA: body.datasetA, datasetB: body.datasetB,
     keyFieldA: body.keyFieldA, keyFieldB: body.keyFieldB,
-    compareFields: compareFields.filter(f => f && f.fieldA && f.fieldB),
+    // Keep whatever operand shape the form sent; the engine normalizes legacy rows.
+    compareFields: compareFields
+      .filter(Boolean)
+      .map((field, index) => normalizeCompareField(field, index)),
     duplicateHandling: body.duplicateHandling || 'exception',
     incompleteKeyHandling: body.incompleteKeyHandling || 'exception',
     rowLimit: body.rowLimit || null,
@@ -233,6 +245,10 @@ function validateRule(rule) {
   if (!rule.datasetA || !rule.datasetB) return 'A dataset must be selected in each source.';
   if (!rule.keyFieldA || !rule.keyFieldB) return 'The business key must be named in both sources.';
   if (!rule.compareFields.length) return 'Select at least one value to compare.';
+  // Expressions are author-written SQL, so they are checked before the rule can be
+  // saved rather than failing at run time against the live source.
+  const problems = validateCompareFields(rule.compareFields);
+  if (problems.length) return problems.join(' ');
   return null;
 }
 
@@ -300,31 +316,29 @@ async function executeRule(pbi, rule) {
   ]);
   if (!sourceA || !sourceB) throw new Error('One of the rule\'s sources is no longer registered.');
 
-  const columnsA = [rule.key_field_a, ...rule.compareFields.map(f => f.fieldA)];
-  const columnsB = [rule.key_field_b, ...rule.compareFields.map(f => f.fieldB)];
+  // Planning decides what each source must SELECT — columns, expressions, aliases —
+  // and leaves constants out of the query entirely.
+  const plan = planRule({
+    keyFieldA: rule.key_field_a,
+    keyFieldB: rule.key_field_b,
+    compareFields: rule.compareFields,
+    duplicateHandling: rule.duplicate_handling,
+    incompleteKeyHandling: rule.incomplete_key_handling,
+    priority: rule.priority,
+  });
 
   const [rowsA, rowsB] = await Promise.all([
     pbi.readSqlEndpointRows(
       { connectionString: sourceA.connection_string, database: sourceA.database_name },
-      { dataset: rule.dataset_a, columns: [...new Set(columnsA)], rowLimit: rule.row_limit }
+      { dataset: rule.dataset_a, selections: plan.selectionsA, rowLimit: rule.row_limit }
     ),
     pbi.readSqlEndpointRows(
       { connectionString: sourceB.connection_string, database: sourceB.database_name },
-      { dataset: rule.dataset_b, columns: [...new Set(columnsB)], rowLimit: rule.row_limit }
+      { dataset: rule.dataset_b, selections: plan.selectionsB, rowLimit: rule.row_limit }
     ),
   ]);
 
-  return reconcile({
-    rowsA, rowsB,
-    rule: {
-      keyFieldA: rule.key_field_a,
-      keyFieldB: rule.key_field_b,
-      compareFields: rule.compareFields,
-      duplicateHandling: rule.duplicate_handling,
-      incompleteKeyHandling: rule.incomplete_key_handling,
-      priority: rule.priority,
-    },
-  });
+  return reconcile({ rowsA, rowsB, rule: plan.engineRule });
 }
 
 router.post('/run', async (req, res) => {
@@ -375,9 +389,9 @@ router.post('/run', async (req, res) => {
 router.get('/runs', async (req, res) => {
   try {
     const [runs, rules] = await Promise.all([repo.listRuns({}), repo.listRules()]);
-    res.render('reconciliation/runs', { title: 'Reconciliation Runs', user: req.user, runs, rules, error: null });
+    view(res, 'reconciliation/runs', { title: 'Reconciliation Runs', user: req.user, runs, rules, error: null });
   } catch (err) {
-    res.render('reconciliation/runs', { title: 'Reconciliation Runs', user: req.user, runs: [], rules: [], error: err.message });
+    view(res, 'reconciliation/runs', { title: 'Reconciliation Runs', user: req.user, runs: [], rules: [], error: err.message });
   }
 });
 
@@ -387,7 +401,7 @@ router.get('/runs/:id', async (req, res) => {
     const run = await repo.getRunById(id);
     if (!run) return res.render('error', { title: 'Error', user: req.user, message: 'Run not found.' });
     const exceptions = await repo.listExceptions({ runId: id });
-    res.render('reconciliation/run-detail', {
+    view(res, 'reconciliation/run-detail', {
       title: 'Run #' + id, user: req.user, run, exceptions, outcomeDefs: OUTCOME_DEFS,
     });
   } catch (err) {
@@ -406,13 +420,13 @@ router.get('/exceptions', async (req, res) => {
       openOnly: req.query.status ? false : req.query.all !== '1',
     };
     const [exceptions, rules] = await Promise.all([repo.listExceptions(filters), repo.listRules()]);
-    res.render('reconciliation/exceptions', {
+    view(res, 'reconciliation/exceptions', {
       title: 'Reconciliation Exceptions', user: req.user, exceptions, rules,
       filters: { ...filters, all: req.query.all === '1' },
       outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, error: null,
     });
   } catch (err) {
-    res.render('reconciliation/exceptions', {
+    view(res, 'reconciliation/exceptions', {
       title: 'Reconciliation Exceptions', user: req.user, exceptions: [], rules: [],
       filters: {}, outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, error: err.message,
     });
@@ -425,7 +439,7 @@ router.get('/exceptions/:id', async (req, res) => {
     const [exception, events] = await Promise.all([repo.getExceptionById(id), repo.getExceptionEvents(id)]);
     if (!exception) return res.render('error', { title: 'Error', user: req.user, message: 'Exception not found.' });
     const current = STATUS_BY_KEY.get(exception.status);
-    res.render('reconciliation/exception-detail', {
+    view(res, 'reconciliation/exception-detail', {
       title: 'Exception #' + id, user: req.user, exception, events,
       statusDefs: STATUS_DEFS,
       allowedNext: current ? current.next : [EXCEPTION_STATUS.OPEN],

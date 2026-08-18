@@ -139,6 +139,8 @@ Verifies that records representing the same business event exist and agree acros
 
 Sources are Fabric SQL analytics endpoints (lakehouses and warehouses). Their schema comes from the artifact details already collected by an analysis run, so browsing available fields costs no extra API calls.
 
+Each side of a comparison can be a **field**, a **SQL expression** evaluated by that source (`TRIM(Customer)`, `CASE WHEN Status = 1 THEN 'Posted' ELSE 'Draft' END`), or a **fixed value** to check a column against. Expressions are validated when the rule is saved — statement separators, comments and anything that writes are refused — but they are author-written SQL running against the source, so rule authoring should be treated as a privileged capability.
+
 Outcomes are match, missing from source A, missing from source B, value mismatch, duplicate record, and invalid or incomplete key. Numeric and date comparisons support tolerances so agreed-immaterial differences do not raise exceptions.
 
 Exceptions follow a controlled lifecycle — open, acknowledged, in investigation, resolved, ignored/accepted — and unsupported transitions are refused. Closing one requires a recorded reason. Every rule change, run, assignment, comment and decision is retained for audit, and an exception seen again after being closed is reopened with a note rather than silently staying closed.

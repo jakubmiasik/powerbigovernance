@@ -1369,3 +1369,104 @@ test('a rule without a business key is refused rather than matching everything',
     /business key/i
   );
 });
+
+// ── Comparison operands: fields, SQL expressions and fixed values ──
+
+test('a rule can compare a column against a fixed value', () => {
+  const rule = {
+    keyFieldA: 'InvoiceNumber', keyFieldB: 'Invoice_No',
+    compareFields: [{ label: 'Currency', a: { kind: 'field', value: 'Currency' }, b: { kind: 'constant', value: 'EUR' }, type: 'string' }],
+  };
+  const plan = recon.planRule(rule);
+  // A constant is never selected from the source.
+  assert.deepEqual(plan.selectionsB.map(s => s.alias), [recon.KEY_ALIAS]);
+  assert.equal(plan.engineRule.compareFields[0].constantB, 'EUR');
+
+  const result = recon.reconcile({
+    rowsA: [
+      { [recon.KEY_ALIAS]: 'INV-1', recon_c0a: 'EUR' },
+      { [recon.KEY_ALIAS]: 'INV-2', recon_c0a: 'USD' },
+    ],
+    rowsB: [{ [recon.KEY_ALIAS]: 'INV-1' }, { [recon.KEY_ALIAS]: 'INV-2' }],
+    rule: plan.engineRule,
+  });
+  assert.equal(result.summary.matched, 1);
+  assert.equal(result.exceptions.length, 1);
+  assert.equal(result.exceptions[0].businessKey, 'INV-2');
+  assert.deepEqual(result.exceptions[0].valuesB, { Currency: 'EUR' });
+});
+
+test('a SQL expression becomes an aliased selection on its own side', () => {
+  const plan = recon.planRule({
+    keyFieldA: 'Id', keyFieldB: 'Id',
+    compareFields: [{
+      label: 'Customer',
+      a: { kind: 'expression', value: 'TRIM(Customer)' },
+      b: { kind: 'field', value: 'CustomerName' },
+      type: 'string',
+    }],
+  });
+  const expression = plan.selectionsA.find(s => s.kind === 'expression');
+  assert.equal(expression.value, 'TRIM(Customer)');
+  assert.equal(expression.alias, plan.engineRule.compareFields[0].fieldA);
+  // Source B still selects a plain column.
+  assert.equal(plan.selectionsB[1].kind, 'field');
+  assert.equal(plan.selectionsB[1].value, 'CustomerName');
+});
+
+test('expressions are checked for anything beyond a read-only expression', () => {
+  assert.equal(recon.validateSqlExpression('TRIM(Customer)'), null);
+  assert.equal(recon.validateSqlExpression("CASE WHEN Status = 1 THEN 'Posted' ELSE 'Draft' END"), null);
+  assert.equal(recon.validateSqlExpression('CAST(Amount AS decimal(18,2))'), null);
+
+  assert.match(recon.validateSqlExpression('Amount; DROP TABLE Invoices'), /statement separators/);
+  assert.match(recon.validateSqlExpression('Amount -- comment'), /comments/);
+  assert.match(recon.validateSqlExpression('Amount /* x */'), /comments/);
+  assert.match(recon.validateSqlExpression('(SELECT 1 FROM t WHERE 1=1'), /parentheses/);
+  assert.match(recon.validateSqlExpression("(SELECT x FROM y) + (DELETE FROM z)"), /read-only/);
+  assert.match(recon.validateSqlExpression('   '), /empty/);
+});
+
+test('rule validation reports every operand problem at once', () => {
+  const problems = recon.validateCompareFields([
+    { label: 'Bad expression', a: { kind: 'expression', value: 'Amount;' }, b: { kind: 'field', value: 'Net' } },
+    { label: 'Empty field', a: { kind: 'field', value: '' }, b: { kind: 'field', value: 'Net' } },
+    { label: 'Two constants', a: { kind: 'constant', value: '1' }, b: { kind: 'constant', value: '1' } },
+  ]);
+  assert.equal(problems.length, 3);
+  assert.match(problems[0], /Bad expression.*source A/i);
+  assert.match(problems[1], /Empty field.*source A/i);
+  assert.match(problems[2], /both sides are constants/i);
+});
+
+test('rules written before operands existed still plan and run', () => {
+  // Legacy shape: plain fieldA/fieldB with no operand descriptors.
+  const plan = recon.planRule({
+    keyFieldA: 'InvoiceNumber', keyFieldB: 'Invoice_No',
+    compareFields: [{ label: 'Net', fieldA: 'NetAmount', fieldB: 'Net', type: 'number' }],
+  });
+  assert.equal(plan.selectionsA[1].kind, 'field');
+  assert.equal(plan.selectionsA[1].value, 'NetAmount');
+  assert.equal(plan.selectionsB[1].value, 'Net');
+
+  const result = recon.reconcile({
+    rowsA: [{ [recon.KEY_ALIAS]: 'INV-1', recon_c0a: 100 }],
+    rowsB: [{ [recon.KEY_ALIAS]: 'INV-1', recon_c0b: 100 }],
+    rule: plan.engineRule,
+  });
+  assert.equal(result.summary.matched, 1);
+});
+
+test('a constant on the missing side is still reported in the exception values', () => {
+  const plan = recon.planRule({
+    keyFieldA: 'Id', keyFieldB: 'Id',
+    compareFields: [{ label: 'Expected status', a: { kind: 'field', value: 'Status' }, b: { kind: 'constant', value: 'Posted' }, type: 'string' }],
+  });
+  const result = recon.reconcile({
+    rowsA: [{ [recon.KEY_ALIAS]: 'INV-9', recon_c0a: 'Draft' }],
+    rowsB: [],
+    rule: plan.engineRule,
+  });
+  assert.equal(result.exceptions[0].outcome, recon.OUTCOME.MISSING_FROM_B);
+  assert.deepEqual(result.exceptions[0].valuesA, { 'Expected status': 'Draft' });
+});

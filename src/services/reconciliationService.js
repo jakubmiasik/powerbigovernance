@@ -55,6 +55,143 @@ function isStatusTransitionAllowed(from, to) {
   return !!def && def.next.includes(to);
 }
 
+// ── Comparison operands ──
+//
+// Each side of a comparison is one of:
+//   field       a column in that source
+//   expression  raw SQL evaluated by the source, e.g. TRIM(Customer) or CASE WHEN…
+//   constant    a fixed value, for checking a column against an expected value
+const OPERAND_KINDS = ['field', 'expression', 'constant'];
+
+// Statement terminators, comment markers and anything that writes. A rule author
+// is trusted to write SQL, but a single expression should not be able to become
+// several statements or modify data — this is a guardrail on an intentionally
+// powerful feature, not a sandbox.
+const FORBIDDEN_EXPRESSION_PATTERNS = [
+  { pattern: /;/, reason: 'statement separators are not allowed' },
+  { pattern: /--/, reason: 'SQL comments are not allowed' },
+  { pattern: /\/\*|\*\//, reason: 'block comments are not allowed' },
+  { pattern: /\b(insert|update|delete|drop|alter|create|truncate|merge|exec|execute|grant|revoke|backup|shutdown|waitfor|openrowset|openquery|xp_\w+|sp_\w+)\b/i, reason: 'only read-only expressions are allowed' },
+];
+
+function validateSqlExpression(expression) {
+  const text = String(expression || '').trim();
+  if (!text) return 'The expression is empty.';
+  if (text.length > 1000) return 'The expression is too long (limit 1000 characters).';
+  for (const rule of FORBIDDEN_EXPRESSION_PATTERNS) {
+    if (rule.pattern.test(text)) return 'Cannot use this expression: ' + rule.reason + '.';
+  }
+  // Unbalanced brackets would break the surrounding SELECT.
+  let depth = 0;
+  for (const char of text) {
+    if (char === '(') depth += 1;
+    if (char === ')') depth -= 1;
+    if (depth < 0) return 'The expression has unbalanced parentheses.';
+  }
+  if (depth !== 0) return 'The expression has unbalanced parentheses.';
+  return null;
+}
+
+function normalizeOperand(operand, legacyField) {
+  if (operand && OPERAND_KINDS.includes(operand.kind)) {
+    return { kind: operand.kind, value: operand.value === undefined ? '' : operand.value };
+  }
+  // Rules written before expressions and constants existed stored a plain column.
+  return { kind: 'field', value: legacyField || '' };
+}
+
+function normalizeCompareField(field, index) {
+  const a = normalizeOperand(field.a, field.fieldA);
+  const b = normalizeOperand(field.b, field.fieldB);
+  return {
+    label: field.label || a.value || b.value || ('Value ' + (index + 1)),
+    a,
+    b,
+    type: field.type || 'string',
+    tolerance: field.tolerance || null,
+    caseInsensitive: field.caseInsensitive,
+    trim: field.trim,
+  };
+}
+
+function describeOperand(operand) {
+  if (operand.kind === 'constant') return 'constant "' + operand.value + '"';
+  if (operand.kind === 'expression') return 'expression ' + operand.value;
+  return operand.value;
+}
+
+const KEY_ALIAS = 'recon_key';
+function compareAlias(index, side) { return 'recon_c' + index + side; }
+
+/**
+ * Work out what each source must return, and rewrite the rule to read those
+ * results by alias.
+ *
+ * Aliasing matters for more than tidiness: the two systems name the same business
+ * value differently, expressions have no natural name at all, and a constant is
+ * never selected. Planning it once here keeps the engine reading plain row keys.
+ */
+function planRule(rule) {
+  const fields = (rule.compareFields || []).map(normalizeCompareField);
+  const selectionsA = [{ alias: KEY_ALIAS, kind: 'field', value: rule.keyFieldA || rule.keyField }];
+  const selectionsB = [{ alias: KEY_ALIAS, kind: 'field', value: rule.keyFieldB || rule.keyField }];
+
+  const engineFields = fields.map((field, index) => {
+    const aliasA = compareAlias(index, 'a');
+    const aliasB = compareAlias(index, 'b');
+    if (field.a.kind !== 'constant') selectionsA.push({ alias: aliasA, kind: field.a.kind, value: field.a.value });
+    if (field.b.kind !== 'constant') selectionsB.push({ alias: aliasB, kind: field.b.kind, value: field.b.value });
+
+    const planned = {
+      label: field.label,
+      type: field.type,
+      tolerance: field.tolerance,
+      caseInsensitive: field.caseInsensitive,
+      trim: field.trim,
+      fieldA: aliasA,
+      fieldB: aliasB,
+      describeA: describeOperand(field.a),
+      describeB: describeOperand(field.b),
+    };
+    if (field.a.kind === 'constant') planned.constantA = field.a.value;
+    if (field.b.kind === 'constant') planned.constantB = field.b.value;
+    return planned;
+  });
+
+  return {
+    selectionsA,
+    selectionsB,
+    engineRule: { ...rule, keyFieldA: KEY_ALIAS, keyFieldB: KEY_ALIAS, compareFields: engineFields },
+  };
+}
+
+// Every problem with a rule's comparison definition, so the author sees them all
+// at once rather than one per save.
+function validateCompareFields(compareFields) {
+  const problems = [];
+  (compareFields || []).forEach((raw, index) => {
+    const field = normalizeCompareField(raw, index);
+    const position = 'Value ' + (index + 1) + ' (' + field.label + ')';
+    ['a', 'b'].forEach(side => {
+      const operand = field[side];
+      const label = position + ' — source ' + side.toUpperCase();
+      if (!String(operand.value || '').trim() && operand.kind !== 'constant') {
+        problems.push(label + ': choose a field or write an expression.');
+        return;
+      }
+      if (operand.kind === 'expression') {
+        const problem = validateSqlExpression(operand.value);
+        if (problem) problems.push(label + ': ' + problem);
+      }
+    });
+    // Comparing one fixed value with another proves nothing about the data.
+    if (field.a.kind === 'constant' && field.b.kind === 'constant') {
+      problems.push(position + ': both sides are constants, so nothing from either system is checked.');
+    }
+  });
+  return problems;
+}
+
 function normalizeKey(value, options = {}) {
   if (value === null || value === undefined) return '';
   let text = String(value);
@@ -150,11 +287,19 @@ function indexRows(rows, keyField, keyOptions) {
   return { byKey, invalid };
 }
 
+// A constant operand has no column to read: its value is the same for every row.
+function operandValueOf(row, field, side) {
+  const constant = side === 'a' ? field.constantA : field.constantB;
+  if (constant !== undefined) return constant;
+  const name = side === 'a' ? field.fieldA : field.fieldB;
+  return row ? row[name] : null;
+}
+
 function pickFields(row, fields, side) {
   const picked = {};
   for (const field of fields) {
     const name = side === 'a' ? field.fieldA : field.fieldB;
-    picked[field.label || name] = row ? row[name] : null;
+    picked[field.label || name] = operandValueOf(row, field, side);
   }
   return picked;
 }
@@ -276,12 +421,14 @@ function reconcile({ rowsA = [], rowsB = [], rule = {} }) {
     const rowB = groupB.rows[0];
     const differences = [];
     for (const field of compareFields) {
-      const result = compareValues(rowA[field.fieldA], rowB[field.fieldB], field);
+      const valueA = operandValueOf(rowA, field, 'a');
+      const valueB = operandValueOf(rowB, field, 'b');
+      const result = compareValues(valueA, valueB, field);
       if (!result.equal) {
         differences.push({
           field: field.label || field.fieldA,
-          valueA: rowA[field.fieldA],
-          valueB: rowB[field.fieldB],
+          valueA,
+          valueB,
           difference: result.difference,
           reason: result.reason || null,
         });
@@ -323,6 +470,12 @@ function exceptionFingerprint(ruleId, exception) {
 }
 
 module.exports = {
+  OPERAND_KINDS,
+  KEY_ALIAS,
+  validateSqlExpression,
+  normalizeCompareField,
+  validateCompareFields,
+  planRule,
   OUTCOME,
   OUTCOME_DEFS,
   OUTCOME_BY_KEY,
