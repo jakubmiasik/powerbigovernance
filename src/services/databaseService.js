@@ -302,16 +302,135 @@ async function getAnalysisRunById(id) {
 async function deleteAnalysisRun(id) {
   const conn = await getConnection();
   try {
-    try {
-      await execSql(conn, 'DELETE FROM analysis_run_totals WHERE run_id=@id', [
-        { name: 'id', type: TYPES.Int, value: id },
-      ]);
-    } catch (err) {
-      if (!(err.message || '').includes('Invalid object name')) throw err;
+    for (const table of ['analysis_run_totals', 'analysis_run_progress']) {
+      try {
+        await execSql(conn, `DELETE FROM ${table} WHERE run_id=@id`, [
+          { name: 'id', type: TYPES.Int, value: id },
+        ]);
+      } catch (err) {
+        if (!(err.message || '').includes('Invalid object name')) throw err;
+      }
     }
     await execSql(conn, 'DELETE FROM analysis_runs WHERE id=@id', [
       { name: 'id', type: TYPES.Int, value: id },
     ]);
+  } finally {
+    conn.close();
+  }
+}
+
+// ── Run progress ──
+// A run outlives the browser tab that started it, so its progress is written to the
+// database rather than kept only in the worker's memory. That is what lets the user
+// close the modal, come back later — possibly to a different worker, or after a
+// restart — and still be told where the run got to.
+
+async function saveRunProgress(runId, snapshot) {
+  const conn = await getConnection();
+  try {
+    const payload = JSON.stringify(snapshot);
+    const params = [
+      { name: 'runId', type: TYPES.Int, value: runId },
+      { name: 'status', type: TYPES.NVarChar, value: snapshot.status || 'running' },
+      { name: 'phase', type: TYPES.NVarChar, value: (snapshot.phase || '').slice(0, 100) },
+      { name: 'percent', type: TYPES.Int, value: Number(snapshot.percent) || 0 },
+      { name: 'message', type: TYPES.NVarChar, value: (snapshot.message || '').slice(0, 1000) },
+      { name: 'payload', type: TYPES.NVarChar, value: payload },
+    ];
+    // One row per run, upserted. MERGE would be a single round trip but needs a
+    // unique index to be safe; the two-statement form works on drifted schemas too.
+    const updated = await execSql(
+      conn,
+      `UPDATE analysis_run_progress SET status=@status, phase=@phase, percent=@percent, message=@message, payload=@payload, updated_at=SYSUTCDATETIME() OUTPUT INSERTED.run_id WHERE run_id=@runId`,
+      params
+    );
+    if (!updated.length) {
+      await execSql(
+        conn,
+        `INSERT INTO analysis_run_progress (run_id, status, phase, percent, message, payload) VALUES (@runId, @status, @phase, @percent, @message, @payload)`,
+        params
+      );
+    }
+  } finally {
+    conn.close();
+  }
+}
+
+function parseProgressRow(row) {
+  if (!row) return null;
+  let snapshot = null;
+  try { snapshot = JSON.parse(row.payload); } catch { snapshot = null; }
+  if (!snapshot) return null;
+  return {
+    ...snapshot,
+    runId: row.run_id,
+    // The server clock owns staleness. Trusting the worker-written `updatedAt`
+    // inside the payload would let a worker with a skewed clock look alive forever.
+    updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : snapshot.updatedAt,
+  };
+}
+
+async function getRunProgress(runId) {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(conn, 'SELECT run_id, payload, updated_at FROM analysis_run_progress WHERE run_id=@runId', [
+      { name: 'runId', type: TYPES.Int, value: runId },
+    ]);
+    return parseProgressRow(rows[0]);
+  } catch (err) {
+    if ((err.message || '').includes('Invalid object name')) return null;
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+/** Snapshots for every run that has not reached a terminal state. */
+async function getLiveRunProgress() {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(
+      conn,
+      `SELECT run_id, payload, updated_at FROM analysis_run_progress WHERE status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')`
+    );
+    return rows.map(parseProgressRow).filter(Boolean);
+  } catch (err) {
+    if ((err.message || '').includes('Invalid object name')) return [];
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+/**
+ * Closes off runs whose worker died. Called at startup, where an orphan is
+ * expected: the process that owned the run is by definition gone. The heartbeat
+ * threshold keeps this from touching a run another worker is still executing.
+ */
+async function markInterruptedRuns(staleSeconds) {
+  const conn = await getConnection();
+  try {
+    const cutoffParam = { name: 'stale', type: TYPES.Int, value: Math.max(60, Number(staleSeconds) || 900) };
+    const orphans = await execSql(
+      conn,
+      `SELECT r.id FROM analysis_runs r
+       LEFT JOIN analysis_run_progress p ON p.run_id = r.id
+       WHERE r.status IN ('running', 'cancelling')
+         AND DATEDIFF(second, COALESCE(p.updated_at, r.started_at), SYSUTCDATETIME()) >= @stale`,
+      [cutoffParam]
+    );
+    if (!orphans.length) return [];
+
+    const ids = orphans.map(row => row.id);
+    for (const id of ids) {
+      const idParam = { name: 'id', type: TYPES.Int, value: id };
+      await execSql(conn, `UPDATE analysis_runs SET status='interrupted', completed_at=GETUTCDATE() WHERE id=@id`, [idParam]);
+      await execSql(conn, `UPDATE analysis_run_progress SET status='interrupted', updated_at=SYSUTCDATETIME() WHERE run_id=@id`, [idParam]);
+    }
+    return ids;
+  } catch (err) {
+    if ((err.message || '').includes('Invalid object name')) return [];
+    throw err;
   } finally {
     conn.close();
   }
@@ -757,6 +876,25 @@ async function runMigrations() {
       await runStatement(conn, `add analysis_run_totals.${def.column}`, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_run_totals') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'analysis_run_totals') AND name = N'${def.column}') ALTER TABLE analysis_run_totals ADD ${def.column} BIGINT NOT NULL DEFAULT 0`);
     }
 
+    // Live progress for a run, so a run sent to the background can be checked on
+    // later from any worker — and so an abandoned run can be recognised as such
+    // instead of appearing to run forever.
+    await runStatement(conn, 'create analysis_run_progress', `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_run_progress') AND type = 'U')
+      BEGIN
+        CREATE TABLE analysis_run_progress (
+          run_id INT NOT NULL PRIMARY KEY,
+          status NVARCHAR(20) NOT NULL DEFAULT 'running',
+          phase NVARCHAR(100) NULL,
+          percent INT NOT NULL DEFAULT 0,
+          message NVARCHAR(1000) NULL,
+          payload NVARCHAR(MAX) NOT NULL,
+          updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+        );
+        CREATE INDEX IX_analysis_run_progress_status ON analysis_run_progress (status, updated_at DESC);
+      END
+    `);
+
     // Cached artifact details, so opening an artifact does not re-read the APIs
     // every time. Refreshed on demand from the details modal.
     await runStatement(conn, 'create item_details_cache', `
@@ -972,6 +1110,10 @@ module.exports = {
   getAnalysisRuns,
   getAnalysisRunById,
   deleteAnalysisRun,
+  saveRunProgress,
+  getRunProgress,
+  getLiveRunProgress,
+  markInterruptedRuns,
   saveRunTotals,
   getRunTotals,
   getComparableRuns,

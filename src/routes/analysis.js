@@ -7,12 +7,17 @@ const {
 } = require('../services/runMetricsService');
 const { buildItemDetails } = require('../services/itemDetailsService');
 const { buildWorkspaceAssignments, lookupAssignment } = require('../services/deploymentPipelineService');
+const runProgress = require('../services/runProgressService');
 
 const activeAnalyses = new Map();
 
 const MAX_PROGRESS_EVENTS = 25;
 // How long without a progress update before the UI calls the run stalled.
 const STALL_SECONDS = Number.parseInt(process.env.ANALYSIS_STALL_SECONDS || '90', 10);
+// Progress is written to the database so a backgrounded run can be checked on from
+// anywhere, but the storage and details phases tick once per item — writing every
+// tick would put more load on the database than on the API being scanned.
+const PROGRESS_PERSIST_MS = Math.max(1000, Number.parseInt(process.env.ANALYSIS_PROGRESS_PERSIST_MS || '4000', 10) || 4000);
 
 // Artifact details are collected during the run so the UI never has to call the
 // APIs when an artifact is opened. This is the second-longest phase of a run, so
@@ -26,12 +31,62 @@ const DETAIL_MAX_ITEMS = Math.max(0, Number.parseInt(process.env.ANALYSIS_DETAIL
 function setProgress(progress, patch) {
   Object.assign(progress, patch);
   progress.updatedAt = Date.now();
+  persistProgress(progress);
 }
 
 function addProgressEvent(progress, level, message) {
   progress.events.push({ at: Date.now(), level, message });
   if (progress.events.length > MAX_PROGRESS_EVENTS) progress.events.shift();
   progress.updatedAt = Date.now();
+  persistProgress(progress);
+}
+
+/**
+ * Writes the run's progress to the database, rate-limited, never awaited and never
+ * able to fail the run. A run whose progress cannot be stored is still a valid run;
+ * the only thing lost is the ability to check on it from elsewhere.
+ */
+function persistProgress(progress, { force = false } = {}) {
+  const now = Date.now();
+  if (!progress.runId) return Promise.resolve();
+  if (!force && progress.persistPending) return Promise.resolve();
+  if (!force && progress.lastPersistedAt && now - progress.lastPersistedAt < PROGRESS_PERSIST_MS) return Promise.resolve();
+
+  progress.persistPending = true;
+  progress.lastPersistedAt = now;
+  const snapshot = { ...runProgress.toSnapshot(progress), percent: runProgress.overallPercent(progress) };
+  return db.saveRunProgress(progress.runId, snapshot)
+    .catch(err => {
+      // Once per run is enough; a database that is refusing writes would otherwise
+      // fill the log with one line per scanned item.
+      if (!progress.persistWarned) {
+        progress.persistWarned = true;
+        console.warn('[Analysis] Could not store progress for run', progress.runId, err.message);
+      }
+    })
+    .finally(() => { progress.persistPending = false; });
+}
+
+// Phase helpers that keep the persistence rule in one place: every mutation of the
+// phase model is a progress update, so every one of them may trigger a write.
+function beginPhase(progress, key, options) {
+  runProgress.beginPhase(progress, key, options);
+  persistProgress(progress);
+}
+
+function advancePhase(progress, key, options) {
+  runProgress.advancePhase(progress, key, options);
+  persistProgress(progress);
+}
+
+function completePhase(progress, key, options) {
+  runProgress.completePhase(progress, key, options);
+  persistProgress(progress);
+}
+
+function skipPhase(progress, key, options) {
+  runProgress.skipPhase(progress, key, options);
+  persistProgress(progress);
 }
 
 // Turns raw API telemetry into counters plus a readable event log, so a run that
@@ -84,11 +139,28 @@ router.get('/', async (req, res) => {
       db.getAnalysisRuns(),
       db.getServicePrincipals(),
     ]);
+
+    // Live percentages are rendered with the table rather than waiting for the first
+    // poll, so a page opened on a run in flight is informative immediately.
+    const liveProgress = {};
+    try {
+      for (const snapshot of await db.getLiveRunProgress()) {
+        const summary = runProgress.fromSnapshot(snapshot, { stallSeconds: STALL_SECONDS });
+        if (summary) liveProgress[summary.runId] = summary;
+      }
+    } catch (err) {
+      console.warn('[Analysis] Could not read live progress for the run list:', err.message);
+    }
+    for (const [runId, progress] of activeAnalyses) {
+      liveProgress[runId] = runProgress.summarize(progress, { stallSeconds: STALL_SECONDS });
+    }
+
     res.render('analysis/index', {
       title: 'Run Analysis',
       user: req.user,
       runs,
       servicePrincipals,
+      liveProgress,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -126,7 +198,14 @@ router.post('/cancel/:runId', async (req, res) => {
   const runId = parseInt(req.params.runId);
   const progress = activeAnalyses.get(runId);
   if (!progress || progress.status !== 'running') {
-    return res.json({ success: false, message: 'Analysis is not currently running.' });
+    // Cancellation is cooperative, so only the worker executing the run can honour
+    // it. Say that plainly rather than reporting a generic failure.
+    return res.json({
+      success: false,
+      message: activeAnalyses.has(runId)
+        ? 'Analysis is not currently running.'
+        : 'This run is not being executed by this application instance, so it cannot be cancelled from here.',
+    });
   }
 
   progress.cancelRequested = true;
@@ -135,29 +214,73 @@ router.post('/cancel/:runId', async (req, res) => {
   res.json({ success: true });
 });
 
-router.get('/progress/:runId', (req, res) => {
+/**
+ * Progress for one run. Answers from memory when this worker owns the run, and from
+ * the stored snapshot otherwise — which is what makes "send it to the background and
+ * check the status later" work across page loads, workers and restarts.
+ */
+router.get('/progress/:runId', async (req, res) => {
   const runId = parseInt(req.params.runId);
   const progress = activeAnalyses.get(runId);
-  if (!progress) {
-    return res.json({ status: 'unknown', progress: 0, message: '', events: [], counters: null });
+  if (progress) {
+    return res.json(runProgress.summarize(progress, { stallSeconds: STALL_SECONDS }));
   }
 
-  const now = Date.now();
-  const secondsSinceUpdate = Math.floor((now - (progress.updatedAt || now)) / 1000);
-  const throttleRemaining = progress.throttledUntil && progress.throttledUntil > now
-    ? Math.ceil((progress.throttledUntil - now) / 1000)
-    : 0;
+  try {
+    const snapshot = await db.getRunProgress(runId);
+    const summary = runProgress.fromSnapshot(snapshot, { stallSeconds: STALL_SECONDS });
+    if (summary) return res.json(summary);
+  } catch (err) {
+    console.warn('[Analysis] Could not read stored progress for run', runId, err.message);
+  }
 
-  res.json({
-    ...progress,
-    elapsedSeconds: Math.floor((now - (progress.startedAt || now)) / 1000),
-    secondsSinceUpdate,
-    throttleRemainingSeconds: throttleRemaining,
-    // "Stalled" means nothing has moved, not even an API call — a run that is merely
-    // waiting out a documented throttle is reported as throttled, not stalled.
-    stalled: progress.status === 'running' && !throttleRemaining && secondsSinceUpdate >= STALL_SECONDS,
-    stallThresholdSeconds: STALL_SECONDS,
-  });
+  // No snapshot at all: either a run from before progress was stored, or one whose
+  // row has been deleted. Fall back to whatever the run record itself says.
+  try {
+    const run = await db.getAnalysisRunById(runId);
+    if (run) {
+      const finished = runProgress.isTerminal(run.status);
+      return res.json({
+        runId,
+        status: finished ? run.status : 'unknown',
+        progress: run.status === 'completed' ? 100 : 0,
+        phase: finished ? run.status : 'Unknown',
+        message: finished
+          ? 'This run finished with status "' + run.status + '".'
+          : 'No live progress is being reported for this run. It was most likely started before progress tracking, or by an application instance that has since stopped.',
+        detail: '',
+        phases: [],
+        events: [],
+        counters: null,
+        live: false,
+      });
+    }
+  } catch (err) {
+    console.warn('[Analysis] Could not read run', runId, err.message);
+  }
+
+  res.json({ runId, status: 'unknown', progress: 0, message: '', detail: '', phases: [], events: [], counters: null, live: false });
+});
+
+/**
+ * Progress for every run still in flight, so the runs table can show live status
+ * without opening each run. Runs this worker owns are reported from memory; the rest
+ * come from their stored snapshots.
+ */
+router.get('/progress', async (req, res) => {
+  const byRunId = new Map();
+  try {
+    for (const snapshot of await db.getLiveRunProgress()) {
+      const summary = runProgress.fromSnapshot(snapshot, { stallSeconds: STALL_SECONDS });
+      if (summary) byRunId.set(summary.runId, summary);
+    }
+  } catch (err) {
+    console.warn('[Analysis] Could not read live progress:', err.message);
+  }
+  for (const [runId, progress] of activeAnalyses) {
+    byRunId.set(runId, runProgress.summarize(progress, { stallSeconds: STALL_SECONDS }));
+  }
+  res.json({ runs: [...byRunId.values()] });
 });
 
 router.get('/results/:runId', async (req, res) => {
@@ -327,23 +450,10 @@ router.post('/delete/:runId', async (req, res) => {
 });
 
 async function runAnalysis(runId, sp, authOptions = {}) {
-  const progress = {
-    status: 'running',
-    progress: 0,
-    phase: 'Starting',
-    message: 'Starting analysis...',
-    detail: '',
-    current: 0,
-    total: 0,
-    cancelRequested: false,
-    startedAt: Date.now(),
-    updatedAt: Date.now(),
-    throttledUntil: null,
-    counters: { apiCalls: 0, retries: 0, throttled: 0, failures: 0, waitedMs: 0, skippedItems: 0 },
-    events: [],
-  };
+  const progress = runProgress.createProgress({ runId, spName: sp.name || null });
   activeAnalyses.set(runId, progress);
   addProgressEvent(progress, 'info', 'Analysis started for ' + (sp.name || 'service principal'));
+  await persistProgress(progress, { force: true });
 
   // Everything below runs inside the reporter, so retries and throttling anywhere in
   // the Power BI client surface as run progress instead of silent delay.
@@ -351,25 +461,24 @@ async function runAnalysis(runId, sp, authOptions = {}) {
   try {
     const pbi = createPowerBIService(sp, authOptions);
 
-    setProgress(progress, { phase: 'Workspaces', message: 'Fetching workspaces...' });
+    beginPhase(progress, 'workspaces', { message: 'Fetching workspaces...' });
     const workspaces = await pbi.getWorkspaces();
     ensureNotCancelled(progress);
-    setProgress(progress, {
-      total: workspaces.length,
-      progress: 10,
-      message: 'Found ' + workspaces.length + ' workspaces. Fetching all items...',
-    });
+    setProgress(progress, { total: workspaces.length });
+    completePhase(progress, 'workspaces', { note: workspaces.length + ' found' });
     addProgressEvent(progress, 'info', 'Found ' + workspaces.length + ' workspaces');
 
-    setProgress(progress, { phase: 'Items', message: 'Fetching all items via Fabric Admin API...' });
+    beginPhase(progress, 'items', { message: 'Fetching all items via Fabric Admin API...' });
     const allItems = await pbi.getAllItems();
     ensureNotCancelled(progress);
-    setProgress(progress, { progress: 40, message: 'Found ' + allItems.length + ' items. Processing...' });
+    completePhase(progress, 'items', { note: allItems.length + ' found' });
+    setProgress(progress, { message: 'Found ' + allItems.length + ' items. Processing...' });
     addProgressEvent(progress, 'info', 'Found ' + allItems.length + ' items');
 
-    setProgress(progress, { phase: 'Capacities', message: 'Fetching capacities...' });
+    beginPhase(progress, 'capacities', { message: 'Fetching capacities...' });
     const capacities = await pbi.getCapacities().catch(() => []);
     ensureNotCancelled(progress);
+    completePhase(progress, 'capacities', { note: capacities.length + ' found' });
 
     // Build capacity lookup: id (lowercase) -> capacity details
     const capacityMap = new Map();
@@ -417,21 +526,22 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       }
     }
 
-    setProgress(progress, { phase: 'Workspace details', message: 'Building workspace details...', progress: 60 });
     ensureNotCancelled(progress);
 
     // ── Deployment pipelines ──
     // Fetched once for the whole tenant and then mapped onto each workspace, so a
     // workspace can show which pipeline and stage it belongs to. A failure here is
     // not fatal: pipelines are supplementary metadata, not the point of the scan.
-    setProgress(progress, { phase: 'Deployment pipelines', progress: 72, message: 'Fetching deployment pipelines...' });
+    beginPhase(progress, 'pipelines', { message: 'Fetching deployment pipelines...' });
     let deploymentPipelines = [];
     let deploymentPipelineError = null;
     try {
       deploymentPipelines = await pbi.getDeploymentPipelines();
+      completePhase(progress, 'pipelines', { note: deploymentPipelines.length + ' found' });
       addProgressEvent(progress, 'info', 'Found ' + deploymentPipelines.length + ' deployment pipeline(s).');
     } catch (err) {
       deploymentPipelineError = err.message;
+      skipPhase(progress, 'pipelines', { note: 'not readable' });
       addProgressEvent(progress, 'warning', 'Could not read deployment pipelines: ' + err.message);
     }
     const pipelineAssignments = buildWorkspaceAssignments(deploymentPipelines);
@@ -446,6 +556,8 @@ async function runAnalysis(runId, sp, authOptions = {}) {
     let totalPipelines = 0;
     let totalWarehouses = 0;
 
+    beginPhase(progress, 'workspaceDetails', { total: workspaces.length, message: 'Building workspace details...' });
+    let workspacesBuilt = 0;
     for (const ws of workspaces) {
       ensureNotCancelled(progress);
       const wsItems = itemsByWorkspace.get(ws.id) || [];
@@ -504,9 +616,16 @@ async function runAnalysis(runId, sp, authOptions = {}) {
           description: item.description,
         })),
       });
-    }
 
-    setProgress(progress, { phase: 'Workspace access', progress: 80, message: 'Fetching workspace users...' });
+      workspacesBuilt += 1;
+      advancePhase(progress, 'workspaceDetails', {
+        done: workspacesBuilt,
+        message: 'Building workspace details: ' + workspacesBuilt + ' / ' + workspaces.length + '...',
+      });
+    }
+    completePhase(progress, 'workspaceDetails');
+
+    beginPhase(progress, 'access', { total: workspaces.length, message: 'Fetching workspace users...' });
     const batchSize = 10;
     let usersFetched = 0;
     let userFetchFailures = 0;
@@ -534,12 +653,13 @@ async function runAnalysis(runId, sp, authOptions = {}) {
         }
       }
       usersFetched = Math.min(i + batchSize, workspaces.length);
-      setProgress(progress, {
-        current: usersFetched,
-        progress: 80 + Math.round((usersFetched / Math.max(workspaces.length, 1)) * 10),
+      setProgress(progress, { current: usersFetched });
+      advancePhase(progress, 'access', {
+        done: usersFetched,
         message: 'Fetching users: ' + usersFetched + ' / ' + workspaces.length + ' workspaces...',
       });
     }
+    completePhase(progress, 'access', { note: userFetchFailures ? userFetchFailures + ' not readable' : null });
     if (userFetchFailures) {
       addProgressEvent(progress, 'warning', userFetchFailures + ' workspace(s) would not return their access list — usually missing permission');
     }
@@ -547,7 +667,7 @@ async function runAnalysis(runId, sp, authOptions = {}) {
     // ── OneLake Storage Scan ──
     // The longest phase by far: one call per storage item. It reports the workspace
     // and item being read so a slow tenant looks slow rather than frozen.
-    setProgress(progress, { phase: 'OneLake storage', progress: 90, message: 'Scanning OneLake storage sizes...' });
+    beginPhase(progress, 'storage', { message: 'Scanning OneLake storage sizes...' });
     let totalStorageSize = 0;
     let totalStorageFiles = 0;
     let storageScannedCount = 0;
@@ -564,6 +684,9 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       (sum, wsDetail) => sum + (wsDetail.items || []).filter(it => storageTypes.has(it.type)).length,
       0
     );
+    // The item count, not the workspace count, is what this phase actually costs —
+    // one API call each — so it is what the remaining-work figure is built from.
+    runProgress.setPhaseTotal(progress, 'storage', totalStorageItems);
     addProgressEvent(progress, 'info', 'Scanning storage for ' + totalStorageItems + ' item(s) across ' + workspaceDetails.length + ' workspaces');
 
     for (let i = 0; i < workspaceDetails.length; i++) {
@@ -578,8 +701,9 @@ async function runAnalysis(runId, sp, authOptions = {}) {
 
       for (const item of storageItems) {
         ensureNotCancelled(progress);
-        setProgress(progress, {
-          detail: wsDetail.name + ' → ' + (item.name || item.type || 'item') + ' (' + (storageItemsScanned + 1) + ' of ~' + totalStorageItems + ')',
+        advancePhase(progress, 'storage', {
+          done: storageItemsScanned,
+          detail: wsDetail.name + ' → ' + (item.name || item.type || 'item') + ' (' + (storageItemsScanned + 1) + ' of ' + totalStorageItems + ')',
         });
         try {
           const result = await pbi.getItemStorageSize(wsDetail.id, item.id);
@@ -606,11 +730,12 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       totalStorageSize += wsStorageSize;
       totalStorageFiles += wsStorageFiles;
 
-      setProgress(progress, {
-        progress: 90 + Math.round(((i + 1) / workspaceDetails.length) * 10),
+      advancePhase(progress, 'storage', {
+        done: storageItemsScanned,
         message: 'Scanning storage: ' + (i + 1) + ' / ' + workspaceDetails.length + ' workspaces...',
       });
     }
+    completePhase(progress, 'storage', { note: storageItemsSkipped ? storageItemsSkipped + ' skipped' : null });
     if (storageItemsSkipped) {
       addProgressEvent(progress, 'info', storageItemsSkipped + ' item(s) had no readable OneLake storage and were skipped');
     }
@@ -682,7 +807,7 @@ async function runAnalysis(runId, sp, authOptions = {}) {
     // burst of API calls. This is the second-longest phase, so it is bounded and
     // can be switched off.
     if (COLLECT_DETAILS) {
-      setProgress(progress, { phase: 'Artifact details', message: 'Collecting artifact details...', detail: '' });
+      beginPhase(progress, 'details', { message: 'Collecting artifact details...' });
 
       const nameIndex = new Map();
       for (const wsDetail of workspaceDetails) {
@@ -700,6 +825,7 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       }
       const limited = DETAIL_MAX_ITEMS > 0 && targets.length > DETAIL_MAX_ITEMS;
       const scoped = limited ? targets.slice(0, DETAIL_MAX_ITEMS) : targets;
+      runProgress.setPhaseTotal(progress, 'details', scoped.length);
       if (limited) {
         addProgressEvent(progress, 'warning',
           'Collecting details for the first ' + DETAIL_MAX_ITEMS + ' of ' + targets.length + ' items (ANALYSIS_DETAIL_MAX_ITEMS). The rest load on first view.');
@@ -711,7 +837,8 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       for (let i = 0; i < scoped.length; i += DETAIL_CONCURRENCY) {
         ensureNotCancelled(progress);
         const batch = scoped.slice(i, i + DETAIL_CONCURRENCY);
-        setProgress(progress, {
+        advancePhase(progress, 'details', {
+          done: i,
           detail: batch[0].workspace.name + ' → ' + (batch[0].item.name || batch[0].item.type) +
             ' (' + (i + 1) + ' of ' + scoped.length + ')',
         });
@@ -744,28 +871,35 @@ async function runAnalysis(runId, sp, authOptions = {}) {
           }
         }));
 
-        setProgress(progress, {
+        advancePhase(progress, 'details', {
+          done: Math.min(i + DETAIL_CONCURRENCY, scoped.length),
           message: 'Collecting artifact details: ' + Math.min(i + DETAIL_CONCURRENCY, scoped.length) + ' / ' + scoped.length + '...',
         });
       }
+      completePhase(progress, 'details', { note: detailsFailed ? detailsFailed + ' not readable' : null });
       addProgressEvent(progress, detailsFailed ? 'warning' : 'info',
         'Stored details for ' + detailsCollected + ' artifact(s)' + (detailsFailed ? ', ' + detailsFailed + ' could not be read' : ''));
+    } else {
+      skipPhase(progress, 'details', { note: 'disabled' });
     }
 
     // Snapshot tenant settings with the run so they can be compared over time.
     // A service principal without Tenant.Read.All still produces a valid run; the
     // snapshot is simply absent, and comparisons say so rather than reporting the
     // settings as deleted.
-    setProgress(progress, { phase: 'Tenant settings', message: 'Capturing tenant settings...', detail: '' });
+    beginPhase(progress, 'tenantSettings', { message: 'Capturing tenant settings...' });
     let tenantSettings = null;
     try {
       tenantSettings = await pbi.getTenantSettings();
+      completePhase(progress, 'tenantSettings', { note: tenantSettings.length + ' captured' });
       addProgressEvent(progress, 'info', 'Captured ' + tenantSettings.length + ' tenant setting(s)');
     } catch (tenantErr) {
       console.warn('[Analysis] Tenant settings not captured for run', runId, tenantErr.message);
+      skipPhase(progress, 'tenantSettings', { note: 'not readable' });
       addProgressEvent(progress, 'warning', 'Tenant settings not captured: ' + tenantErr.message);
     }
 
+    beginPhase(progress, 'save', { message: 'Saving results...' });
     const analysisResults = { summary, workspaces: workspaceDetails };
     if (tenantSettings) analysisResults.tenantSettings = tenantSettings;
     const resultsJson = JSON.stringify(analysisResults);
@@ -793,10 +927,11 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       console.warn('[Analysis] Could not store run totals for run', runId, totalsErr.message);
     }
 
+    completePhase(progress, 'save');
     setProgress(progress, {
       status: 'completed',
-      progress: 100,
       phase: 'Complete',
+      phaseKey: null,
       detail: '',
       message: 'Analysis complete!',
     });
@@ -807,6 +942,8 @@ async function runAnalysis(runId, sp, authOptions = {}) {
     setProgress(progress, {
       status: cancelled ? 'cancelled' : 'failed',
       phase: cancelled ? 'Cancelled' : 'Failed',
+      phaseKey: null,
+      detail: '',
       message: cancelled ? 'Analysis cancelled.' : 'Error: ' + err.message,
     });
     addProgressEvent(progress, cancelled ? 'info' : 'error',
@@ -828,7 +965,14 @@ async function runAnalysis(runId, sp, authOptions = {}) {
   }
   });
 
-  setTimeout(() => activeAnalyses.delete(runId), 5 * 60 * 1000);
+  // The final state is the one that matters most to someone coming back later, so
+  // it is written unconditionally rather than left to the rate limiter to skip.
+  await persistProgress(progress, { force: true });
+
+  // Dropping the in-memory copy no longer loses the run's outcome — the stored
+  // snapshot answers for it from here on.
+  const evict = setTimeout(() => activeAnalyses.delete(runId), 5 * 60 * 1000);
+  if (typeof evict.unref === 'function') evict.unref();
 }
 
 // Get workspace list for grant-access modal (from latest completed run)
