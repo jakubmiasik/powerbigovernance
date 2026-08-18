@@ -34,6 +34,12 @@
       </div>
     </div>
 
+    <div class="alert alert-info alert-dismissible d-none" id="backgroundNote">
+      <i class="bi bi-box-arrow-down me-2"></i><span id="backgroundNoteText"></span>
+      <button type="button" class="btn-close" aria-label="Dismiss"
+              onclick="document.getElementById('backgroundNote').classList.add('d-none')"></button>
+    </div>
+
     <div class="card">
       <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <span><i class="bi bi-clock-history me-2"></i>Previous Runs (<%= runs.length %>)</span>
@@ -60,21 +66,35 @@
             <% if (!runs.length) { %>
               <tr data-filter="no runs"><td colspan="11" class="text-center text-muted py-3">No analysis runs yet</td></tr>
             <% } %>
-            <% runs.forEach(function(runItem) { var statusColor = runItem.status === 'completed' ? 'success' : runItem.status === 'running' ? 'primary' : runItem.status === 'cancelled' ? 'secondary' : 'danger'; %>
-              <tr data-filter="<%= [runItem.id, runItem.sp_name || '', runItem.status || '', runItem.run_by || '', runItem.tenant_id || ''].join(' ').toLowerCase() %>">
+            <% runs.forEach(function(runItem) {
+                 var live = (typeof liveProgress !== 'undefined' && liveProgress) ? liveProgress[runItem.id] : null;
+                 // A run the process no longer heartbeats is shown as interrupted even
+                 // if its row still says running — the row is only updated by the
+                 // worker that owned it.
+                 var effectiveStatus = live && live.status ? live.status : runItem.status;
+                 var statusColor = effectiveStatus === 'completed' ? 'success'
+                   : effectiveStatus === 'running' || effectiveStatus === 'cancelling' ? 'primary'
+                   : effectiveStatus === 'cancelled' ? 'secondary'
+                   : effectiveStatus === 'interrupted' ? 'warning' : 'danger';
+                 var isLive = effectiveStatus === 'running' || effectiveStatus === 'cancelling';
+            %>
+              <tr data-filter="<%= [runItem.id, runItem.sp_name || '', runItem.status || '', runItem.run_by || '', runItem.tenant_id || ''].join(' ').toLowerCase() %>" data-run-id="<%= runItem.id %>">
                 <td><%= runItem.id %></td>
                 <td><strong><%= runItem.sp_name || '-' %></strong></td>
-                <td>
-                  <% var isLive = runItem.status === 'running' || runItem.status === 'cancelling'; %>
-                  <% if (isLive) { %>
-                    <button class="badge bg-<%= statusColor %> border-0"
-                            title="Show live progress for this run"
-                            onclick="showRunProgress(<%= runItem.id %>)">
-                      <span class="spinner-border spinner-border-sm me-1" style="width:.6rem;height:.6rem;"></span><%= runItem.status %>
-                    </button>
-                  <% } else { %>
-                    <span class="badge bg-<%= statusColor %>"><%= runItem.status %></span>
-                  <% } %>
+                <td style="min-width: 190px;">
+                  <button class="badge bg-<%= statusColor %> border-0 run-status-badge"
+                          data-run-status-for="<%= runItem.id %>"
+                          data-run-last-status="<%= effectiveStatus %>"
+                          title="Show progress for this run"
+                          onclick="showRunProgress(<%= runItem.id %>)">
+                    <% if (isLive) { %><span class="spinner-border spinner-border-sm me-1" style="width:.6rem;height:.6rem;"></span><% } %><%= effectiveStatus %><% if (isLive && live) { %> <%= live.progress %>%<% } %>
+                  </button>
+                  <div class="progress mt-1 run-status-bar<%= isLive ? '' : ' d-none' %>" data-run-bar-for="<%= runItem.id %>" style="height: 4px;">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: <%= live ? live.progress : 0 %>%"></div>
+                  </div>
+                  <div class="text-muted run-status-note<%= isLive ? '' : ' d-none' %>" data-run-note-for="<%= runItem.id %>" style="font-size: 0.7rem;">
+                    <%= live && live.phase ? live.phase : '' %>
+                  </div>
                 </td>
                 <td><%= runItem.total_workspaces || 0 %></td>
                 <td><%= runItem.total_reports || 0 %></td>
@@ -98,8 +118,8 @@
   </div>
 </div>
 
-<div class="modal fade" id="progressModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
-  <div class="modal-dialog modal-dialog-centered">
+<div class="modal fade" id="progressModal" tabindex="-1" data-bs-keyboard="false">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
     <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title"><i class="bi bi-hourglass-split me-2"></i>Analysis in Progress</h5>
@@ -117,8 +137,20 @@
         <div class="progress mb-2" style="height: 25px;">
           <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" id="progressBar" style="width: 0%">0%</div>
         </div>
+        <div class="d-flex justify-content-between align-items-center small mb-2">
+          <span id="progressWork" class="text-muted"></span>
+          <span id="progressEta" class="text-muted"></span>
+        </div>
         <p class="text-muted mb-1" id="progressMessage">Starting analysis...</p>
         <p class="small text-muted mb-2" id="progressDetail"></p>
+
+        <!-- What has been finished and what is still to come -->
+        <div class="mb-2" id="phaseListWrap" style="display:none;">
+          <div class="small text-muted mb-1">Steps</div>
+          <div class="table-responsive" style="max-height: 220px; overflow-y: auto;">
+            <table class="table table-sm mb-0" id="phaseList"><tbody></tbody></table>
+          </div>
+        </div>
 
         <!-- Why nothing appears to be happening -->
         <div class="alert alert-warning py-2 px-3 small d-none" id="throttleAlert">
@@ -130,6 +162,11 @@
           <i class="bi bi-exclamation-triangle me-1"></i>
           <strong>No progress for <span id="stallSeconds"></span>s.</strong>
           The run may be blocked on a slow request. Check the activity log below, or cancel and retry.
+        </div>
+        <div class="alert alert-warning py-2 px-3 small d-none" id="remoteAlert">
+          <i class="bi bi-hdd-network me-1"></i>
+          This run is being executed by another application instance. Progress is read from its last saved
+          checkpoint, so it may be a few seconds behind, and it cannot be cancelled from here.
         </div>
 
         <div class="row g-2 text-center mb-2" id="progressCounters" style="display:none;">
@@ -146,9 +183,9 @@
       </div>
       <div class="modal-footer justify-content-between flex-wrap gap-2">
         <button class="btn btn-outline-danger" id="cancelAnalysisBtn" style="display:none;" onclick="cancelAnalysis()"><i class="bi bi-x-circle me-1"></i>Cancel</button>
-        <button class="btn btn-outline-secondary" id="hideProgressBtn" style="display:none;" data-bs-dismiss="modal"
-                title="The run continues on the server. Click the Running badge to come back.">
-          <i class="bi bi-box-arrow-down me-1"></i>Run in background
+        <button class="btn btn-primary" id="hideProgressBtn" style="display:none;" onclick="sendToBackground()"
+                title="The scan keeps running on the server. Come back to it by clicking its Status in the table.">
+          <i class="bi bi-box-arrow-down me-1"></i>Continue in background
         </button>
         <div class="ms-auto d-flex gap-2" id="progressFooterActions" style="display:none;">
           <a href="#" class="btn btn-primary" id="viewResultsBtn"><i class="bi bi-eye me-1"></i>View Results</a>
@@ -163,12 +200,46 @@
 var progressInterval = null;
 var activeRunId = null;
 var progressModal = null;
+// Ticks whether or not the modal is open, so the Status column stays live for runs
+// that were sent to the background.
+var runListInterval = null;
 
 function getProgressModal() {
   if (!progressModal) {
     progressModal = new bootstrap.Modal(document.getElementById('progressModal'));
+    // Dismissing the modal by any route — the button, Escape, the backdrop — only
+    // stops watching. The scan itself is server-side and carries on.
+    document.getElementById('progressModal').addEventListener('hidden.bs.modal', stopWatching);
   }
   return progressModal;
+}
+
+function stopWatching() {
+  if (progressInterval) clearInterval(progressInterval);
+  progressInterval = null;
+  activeRunId = null;
+}
+
+function sendToBackground() {
+  var runId = activeRunId;
+  getProgressModal().hide();
+  if (!runId) return;
+
+  // A run started from this page has no row in the table yet, so there would be
+  // nothing to click. Reload so it appears — already showing its live progress.
+  if (!document.querySelector('[data-run-status-for="' + runId + '"]')) {
+    reloadPageWithMessage('Run #' + runId + ' continues in the background. Reloading...');
+    return;
+  }
+  showBackgroundNote('Run #' + runId + ' is still running. Click its Status in the table below to come back to it.');
+  pollRunList();
+}
+
+function showBackgroundNote(text) {
+  var note = document.getElementById('backgroundNote');
+  if (!note) return;
+  document.getElementById('backgroundNoteText').textContent = text;
+  note.classList.remove('d-none');
 }
 
 // Put the modal back into its "in flight" state. Shared by a new run and by
@@ -179,6 +250,10 @@ function resetProgressUi(message) {
   document.getElementById('progressBar').classList.add('progress-bar-animated');
   document.getElementById('progressMessage').textContent = message;
   document.getElementById('progressDetail').textContent = '';
+  document.getElementById('progressWork').textContent = '';
+  document.getElementById('progressEta').textContent = '';
+  document.getElementById('phaseListWrap').style.display = 'none';
+  document.getElementById('remoteAlert').classList.add('d-none');
   document.getElementById('progressFooterActions').style.display = 'none';
   document.getElementById('cancelAnalysisBtn').style.display = 'none';
   document.getElementById('cancelAnalysisBtn').disabled = false;
@@ -191,6 +266,7 @@ function startPolling(runId) {
   activeRunId = runId;
   pollProgress(runId);
   progressInterval = setInterval(function() { pollProgress(runId); }, 2000);
+  startRunListPolling();
 }
 
 /**
@@ -200,10 +276,10 @@ function startPolling(runId) {
  */
 function showRunProgress(runId) {
   if (!runId) return;
-  resetProgressUi('Reconnecting to run #' + runId + '...');
-  document.getElementById('cancelAnalysisBtn').style.display = '';
-  document.getElementById('hideProgressBtn').style.display = '';
+  resetProgressUi('Reading progress for run #' + runId + '...');
   getProgressModal().show();
+  // The buttons that only make sense for a run in flight are revealed by the first
+  // poll, so opening a finished run does not flash a Cancel it cannot honour.
   startPolling(runId);
 }
 
@@ -247,6 +323,43 @@ function formatDuration(totalSeconds) {
   return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
 }
 
+var PHASE_STATE_ICON = {
+  done: '<i class="bi bi-check-circle-fill text-success"></i>',
+  active: '<span class="spinner-border spinner-border-sm text-primary" style="width:.75rem;height:.75rem;"></span>',
+  skipped: '<i class="bi bi-dash-circle text-muted"></i>',
+  pending: '<i class="bi bi-circle text-muted"></i>'
+};
+
+// The step list is what answers "how much is done and how much is left" in terms a
+// person can act on — a percentage alone does not say which part is slow.
+function renderPhases(phases) {
+  var wrap = document.getElementById('phaseListWrap');
+  if (!phases || !phases.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+
+  var body = document.querySelector('#phaseList tbody');
+  body.innerHTML = phases.map(function(phase) {
+    var counts = '';
+    if (phase.total === null || phase.total === undefined) {
+      counts = phase.state === 'done' ? 'done' : phase.state === 'skipped' ? 'skipped' : '';
+    } else if (phase.state === 'skipped') {
+      counts = 'skipped';
+    } else {
+      counts = phase.done + ' / ' + phase.total;
+      if (phase.state === 'active' && phase.total > phase.done) {
+        counts += ' <span class="text-muted">(' + (phase.total - phase.done) + ' left)</span>';
+      }
+    }
+    var note = phase.note ? ' <span class="text-muted">— ' + escapeHtml(phase.note) + '</span>' : '';
+    var muted = phase.state === 'pending' || phase.state === 'skipped' ? ' text-muted' : '';
+    return '<tr class="' + (phase.state === 'active' ? 'table-active' : '') + '">' +
+      '<td style="width:1.5rem;">' + (PHASE_STATE_ICON[phase.state] || '') + '</td>' +
+      '<td class="small' + muted + '">' + escapeHtml(phase.label) + note + '</td>' +
+      '<td class="small text-end' + muted + '">' + counts + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
 function renderActivityLog(events) {
   var wrap = document.getElementById('activityLogWrap');
   var log = document.getElementById('activityLog');
@@ -268,21 +381,24 @@ async function pollProgress(runId) {
     var response = await fetch('/analysis/progress/' + runId);
     var data = await response.json();
 
-    document.getElementById('progressBar').style.width = data.progress + '%';
-    document.getElementById('progressBar').textContent = data.progress + '%';
-    document.getElementById('progressMessage').textContent = data.message;
+    var percent = Number(data.progress) || 0;
+    document.getElementById('progressBar').style.width = percent + '%';
+    document.getElementById('progressBar').textContent = percent + '%';
+    document.getElementById('progressMessage').textContent = data.message || '';
 
     if (data.phase) document.getElementById('progressPhase').textContent = data.phase;
     if (typeof data.elapsedSeconds === 'number') {
       document.getElementById('progressElapsed').textContent = 'Elapsed ' + formatDuration(data.elapsedSeconds);
     }
 
-    // Prefer the live detail (which workspace/item is being read) over the coarse count.
+    // Prefer the live detail (which workspace/item is being read) over the phase count.
     var detailEl = document.getElementById('progressDetail');
     if (data.detail) {
       detailEl.textContent = data.detail;
-    } else if (data.current && data.total) {
-      detailEl.textContent = data.current + ' / ' + data.total + ' workspaces';
+    } else if (data.phaseTotal) {
+      detailEl.textContent = data.phaseDone + ' / ' + data.phaseTotal + ' in this step';
+    } else {
+      detailEl.textContent = '';
     }
 
     // Throttling and stalling are the two reasons a run looks frozen; say which.
@@ -303,6 +419,31 @@ async function pollProgress(runId) {
       stallAlert.classList.add('d-none');
     }
 
+    // How much of the run's countable work is done, and what is left of it.
+    var workEl = document.getElementById('progressWork');
+    if (data.unitsTotal) {
+      workEl.textContent = data.unitsDone + ' of ' + data.unitsTotal + ' steps done · ' +
+        data.unitsRemaining + ' remaining';
+    } else {
+      workEl.textContent = '';
+    }
+    document.getElementById('progressEta').textContent =
+      typeof data.etaSeconds === 'number' ? 'About ' + formatDuration(data.etaSeconds) + ' left' : '';
+
+    renderPhases(data.phases);
+
+    // A run executed by another worker is answered from its saved checkpoint, which
+    // changes what this modal can offer — say so rather than showing a Cancel button
+    // that would not work.
+    var remoteAlert = document.getElementById('remoteAlert');
+    if (data.live) {
+      document.getElementById('hideProgressBtn').style.display = '';
+      document.getElementById('cancelAnalysisBtn').style.display = data.fromSnapshot ? 'none' : '';
+      remoteAlert.classList.toggle('d-none', !data.fromSnapshot);
+    } else {
+      remoteAlert.classList.add('d-none');
+    }
+
     if (data.counters) {
       document.getElementById('progressCounters').style.display = '';
       document.getElementById('counterApiCalls').textContent = data.counters.apiCalls;
@@ -313,43 +454,117 @@ async function pollProgress(runId) {
 
     renderActivityLog(data.events || []);
 
-    // A run the server no longer holds in memory (for example after a restart)
-    // would otherwise be polled forever with an empty progress bar.
-    if (data.status === 'unknown') {
-      clearInterval(progressInterval);
-      progressInterval = null;
-      document.getElementById('analysisSpinner').style.display = 'none';
-      document.getElementById('cancelAnalysisBtn').style.display = 'none';
-      document.getElementById('hideProgressBtn').style.display = 'none';
-      document.getElementById('progressFooterActions').style.display = '';
-      document.getElementById('progressBar').classList.remove('progress-bar-animated');
-      document.getElementById('progressMessage').textContent =
-        'Live progress for run #' + runId + ' is no longer available.';
-      document.getElementById('progressDetail').textContent =
-        'The application restarted while this run was in flight, so its progress is no longer tracked. Check the run status in the table below.';
-      return;
-    }
-
-    if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
-      clearInterval(progressInterval);
-      progressInterval = null;
-      document.getElementById('analysisSpinner').style.display = 'none';
-      document.getElementById('cancelAnalysisBtn').style.display = 'none';
-      document.getElementById('hideProgressBtn').style.display = 'none';
-      document.getElementById('progressFooterActions').style.display = '';
-      document.getElementById('progressBar').classList.remove('progress-bar-animated');
-
-      if (data.status === 'completed') {
-        document.getElementById('viewResultsBtn').style.display = '';
-        document.getElementById('viewResultsBtn').href = '/analysis/results/' + runId;
-      } else {
-        document.getElementById('viewResultsBtn').style.display = 'none';
-      }
+    if (!data.live) {
+      finishWatching(runId, data);
     }
   } catch (err) {
     document.getElementById('progressDetail').textContent = err.message;
   }
 }
+
+// Puts the modal into its resting state once the run is no longer in flight — done,
+// failed, cancelled, abandoned, or simply not tracked.
+function finishWatching(runId, data) {
+  if (progressInterval) clearInterval(progressInterval);
+  progressInterval = null;
+  document.getElementById('analysisSpinner').style.display = 'none';
+  document.getElementById('cancelAnalysisBtn').style.display = 'none';
+  document.getElementById('hideProgressBtn').style.display = 'none';
+  document.getElementById('progressFooterActions').style.display = '';
+  document.getElementById('progressBar').classList.remove('progress-bar-animated');
+  document.getElementById('progressEta').textContent = '';
+
+  var showResults = data.status === 'completed';
+  document.getElementById('viewResultsBtn').style.display = showResults ? '' : 'none';
+  if (showResults) document.getElementById('viewResultsBtn').href = '/analysis/results/' + runId;
+
+  if (data.status === 'unknown') {
+    document.getElementById('progressMessage').textContent =
+      'No progress is being reported for run #' + runId + '.';
+  }
+  pollRunList();
+}
+
+// ── Runs table ──
+// Keeps the Status column current for every run still going, whether or not the
+// modal is open, so a backgrounded scan is visible at a glance.
+async function pollRunList() {
+  var badges = document.querySelectorAll('[data-run-status-for]');
+  if (!badges.length) return;
+
+  try {
+    var response = await fetch('/analysis/progress');
+    var data = await response.json();
+    var live = {};
+    (data.runs || []).forEach(function(run) { live[run.runId] = run; });
+
+    var anyLive = false;
+    badges.forEach(function(badge) {
+      var runId = Number(badge.getAttribute('data-run-status-for'));
+      var run = live[runId];
+      if (!run) return;
+
+      var bar = document.querySelector('[data-run-bar-for="' + runId + '"]');
+      var note = document.querySelector('[data-run-note-for="' + runId + '"]');
+      var isLive = !!run.live;
+      var wasLive = ['running', 'cancelling'].indexOf(badge.getAttribute('data-run-last-status')) !== -1;
+      badge.setAttribute('data-run-last-status', run.status);
+      if (isLive) anyLive = true;
+
+      badge.className = 'badge border-0 run-status-badge bg-' + statusColorFor(run.status);
+      badge.innerHTML = (isLive
+        ? '<span class="spinner-border spinner-border-sm me-1" style="width:.6rem;height:.6rem;"></span>'
+        : '') + escapeHtml(run.status) + (isLive ? ' ' + run.progress + '%' : '');
+
+      if (bar) {
+        bar.classList.toggle('d-none', !isLive);
+        bar.firstElementChild.style.width = run.progress + '%';
+      }
+      if (note) {
+        note.classList.toggle('d-none', !isLive);
+        note.textContent = isLive
+          ? run.phase + (run.phaseTotal ? ' ' + run.phaseDone + '/' + run.phaseTotal : '')
+          : '';
+      }
+
+      // A run that finished while the page was open leaves stale zeroes in the
+      // totals columns, so the page is reloaded once — only on the transition out
+      // of a live state, and never while the user is reading the modal.
+      if (wasLive && !isLive && !isProgressModalOpen()) {
+        reloadPageWithMessage('Analysis run #' + runId + ' finished (' + run.status + '). Reloading...');
+      }
+    });
+
+    // Nothing left to watch: stop asking.
+    if (!anyLive && runListInterval) {
+      clearInterval(runListInterval);
+      runListInterval = null;
+    }
+  } catch (err) {
+    // A transient failure here is not worth surfacing — the next tick retries.
+  }
+}
+
+function isProgressModalOpen() {
+  var el = document.getElementById('progressModal');
+  return !!el && el.classList.contains('show');
+}
+
+function statusColorFor(status) {
+  if (status === 'completed') return 'success';
+  if (status === 'running' || status === 'cancelling') return 'primary';
+  if (status === 'cancelled') return 'secondary';
+  if (status === 'interrupted') return 'warning';
+  return 'danger';
+}
+
+function startRunListPolling() {
+  if (runListInterval) return;
+  pollRunList();
+  runListInterval = setInterval(pollRunList, 5000);
+}
+
+if (document.querySelector('.run-status-bar:not(.d-none)')) startRunListPolling();
 
 async function cancelAnalysis() {
   if (!activeRunId) return;

@@ -1470,3 +1470,228 @@ test('a constant on the missing side is still reported in the exception values',
   assert.equal(result.exceptions[0].outcome, recon.OUTCOME.MISSING_FROM_B);
   assert.deepEqual(result.exceptions[0].valuesA, { 'Expected status': 'Draft' });
 });
+
+// ── Analysis run progress ──
+const runProgress = require('../src/services/runProgressService');
+
+// Drives a progress state through the phases a real run goes through, up to the
+// point named by `stopAfter`.
+function progressThrough(stopAfter, { startedAt = 0 } = {}) {
+  const state = runProgress.createProgress({ runId: 7, startedAt });
+  const steps = [
+    ['workspaces', 12],
+    ['items', 400],
+    ['capacities', 3],
+    ['pipelines', 1],
+    ['workspaceDetails', 12],
+    ['access', 12],
+    ['storage', 90],
+    ['details', 300],
+    ['tenantSettings', 200],
+    ['save', 1],
+  ];
+  for (const [key, total] of steps) {
+    runProgress.beginPhase(state, key, { total, now: startedAt });
+    runProgress.advancePhase(state, key, { done: total, now: startedAt });
+    runProgress.completePhase(state, key, { now: startedAt });
+    if (key === stopAfter) break;
+  }
+  return state;
+}
+
+test('progress is weighted by phase, so finishing a cheap phase is not most of the run', () => {
+  const early = progressThrough('capacities');
+  const late = progressThrough('storage');
+  assert.ok(runProgress.overallPercent(early) < 15,
+    'three list calls should not read as a large share of the run');
+  assert.ok(runProgress.overallPercent(late) > 55);
+  assert.ok(runProgress.overallPercent(late) < runProgress.overallPercent(progressThrough('details')));
+});
+
+test('a run still going never reports 100 percent', () => {
+  // Regression: storage used to drive the bar to 100 while artifact details — the
+  // second-longest phase — had not started, so "nearly done" and "done" looked alike.
+  const state = progressThrough('storage');
+  runProgress.beginPhase(state, 'details', { total: 300 });
+  runProgress.advancePhase(state, 'details', { done: 300 });
+  runProgress.completePhase(state, 'details');
+  runProgress.completePhase(state, 'tenantSettings');
+  runProgress.completePhase(state, 'save');
+  assert.equal(runProgress.overallPercent(state), 99);
+
+  state.status = 'completed';
+  assert.equal(runProgress.overallPercent(state), 100);
+});
+
+test('the storage phase moves the bar item by item, not workspace by workspace', () => {
+  const state = progressThrough('access');
+  const before = runProgress.overallPercent(state);
+  runProgress.beginPhase(state, 'storage', { total: 200 });
+  runProgress.advancePhase(state, 'storage', { done: 100 });
+  const half = runProgress.overallPercent(state);
+  runProgress.advancePhase(state, 'storage', { done: 200 });
+  assert.ok(half > before, 'half of the storage items should show as progress');
+  assert.ok(runProgress.overallPercent(state) > half);
+});
+
+test('work done and work remaining are counted from the sized phases', () => {
+  const state = runProgress.createProgress({ runId: 1 });
+  runProgress.beginPhase(state, 'workspaces', { total: 10 });
+  runProgress.completePhase(state, 'workspaces');
+  runProgress.beginPhase(state, 'storage', { total: 40 });
+  runProgress.advancePhase(state, 'storage', { done: 15 });
+
+  const units = runProgress.unitTotals(state);
+  assert.equal(units.total, 50);
+  assert.equal(units.done, 25);
+  assert.equal(units.remaining, 25);
+});
+
+test('a phase left active is closed when the next one starts', () => {
+  // Phases that end in a swallowed error never call completePhase; without this the
+  // run would look permanently stuck on whichever one failed.
+  const state = runProgress.createProgress({ runId: 1 });
+  runProgress.beginPhase(state, 'pipelines', { total: 1 });
+  runProgress.beginPhase(state, 'storage', { total: 5 });
+  assert.equal(runProgress.findPhase(state, 'pipelines').state, 'done');
+  assert.equal(runProgress.findPhase(state, 'workspaces').state, 'skipped');
+});
+
+test('remaining time is withheld until the estimate means something', () => {
+  const startedAt = 1000000;
+  const state = progressThrough('access', { startedAt });
+  // Ten seconds in, an extrapolation from a couple of list calls is noise.
+  assert.equal(runProgress.estimateRemainingSeconds(state, startedAt + 10000), null);
+
+  const eta = runProgress.estimateRemainingSeconds(state, startedAt + 120000);
+  assert.ok(typeof eta === 'number' && eta > 0);
+});
+
+test('throttling is reported as waiting, not as a stall', () => {
+  const now = 5000000;
+  const state = runProgress.createProgress({ runId: 3, startedAt: now - 600000 });
+  state.updatedAt = now - 300000;
+  state.throttledUntil = now + 45000;
+
+  const summary = runProgress.summarize(state, { now, stallSeconds: 90 });
+  assert.equal(summary.stalled, false);
+  assert.equal(summary.throttleRemainingSeconds, 45);
+
+  state.throttledUntil = null;
+  assert.equal(runProgress.summarize(state, { now, stallSeconds: 90 }).stalled, true);
+});
+
+test('a stored snapshot rebuilds the phase counts for another worker to read', () => {
+  const state = progressThrough('access');
+  runProgress.beginPhase(state, 'storage', { total: 120 });
+  runProgress.advancePhase(state, 'storage', { done: 30, detail: 'Finance → Sales lakehouse' });
+
+  const now = state.updatedAt + 1000;
+  const summary = runProgress.fromSnapshot(runProgress.toSnapshot(state), { now });
+  assert.equal(summary.status, 'running');
+  assert.equal(summary.fromSnapshot, true);
+  assert.equal(summary.phaseDone, 30);
+  assert.equal(summary.phaseTotal, 120);
+  assert.equal(summary.detail, 'Finance → Sales lakehouse');
+  assert.equal(summary.progress, runProgress.overallPercent(state));
+});
+
+test('a snapshot that stopped being written is reported as interrupted', () => {
+  // The worker that owned the run is gone. Reporting it as still running would
+  // leave the user watching a run that will never move again.
+  const state = progressThrough('access');
+  const snapshot = runProgress.toSnapshot(state);
+  const now = snapshot.updatedAt + 3600000;
+
+  const summary = runProgress.fromSnapshot(snapshot, { now, staleSeconds: 900 });
+  assert.equal(summary.status, 'interrupted');
+  assert.equal(summary.live, false);
+  assert.match(summary.message, /stopped reporting progress/i);
+
+  const fresh = runProgress.fromSnapshot(snapshot, { now: snapshot.updatedAt + 5000, staleSeconds: 900 });
+  assert.equal(fresh.status, 'running');
+  assert.equal(fresh.live, true);
+});
+
+test('a finished snapshot is left alone however old it is', () => {
+  const state = progressThrough('save');
+  state.status = 'completed';
+  const snapshot = runProgress.toSnapshot(state);
+  const summary = runProgress.fromSnapshot(snapshot, { now: snapshot.updatedAt + 86400000 });
+  assert.equal(summary.status, 'completed');
+  assert.equal(summary.progress, 100);
+});
+
+test('checking a backgrounded run answers from the stored snapshot', async () => {
+  // No in-memory run: this stands in for a different worker, or the same one after
+  // a restart — the case the in-memory-only version could not answer at all.
+  const state = progressThrough('access');
+  runProgress.beginPhase(state, 'storage', { total: 60 });
+  runProgress.advancePhase(state, 'storage', { done: 20 });
+  const snapshot = runProgress.toSnapshot(state);
+  snapshot.updatedAt = Date.now() - 2000;
+
+  const original = dbService.getRunProgress;
+  dbService.getRunProgress = async runId => (runId === 42 ? { ...snapshot, runId } : null);
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const response = await request(server, '/analysis/progress/42');
+    const body = JSON.parse(response.body);
+    assert.equal(body.status, 'running');
+    assert.equal(body.live, true);
+    assert.equal(body.fromSnapshot, true);
+    assert.equal(body.phaseTotal, 60);
+    assert.equal(body.phaseDone, 20);
+    assert.ok(body.unitsRemaining > 0);
+  } finally {
+    dbService.getRunProgress = original;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('a run whose worker died is reported as interrupted, not as running forever', async () => {
+  const snapshot = runProgress.toSnapshot(progressThrough('items'));
+  snapshot.updatedAt = Date.now() - 3600000;
+
+  const original = dbService.getRunProgress;
+  dbService.getRunProgress = async () => snapshot;
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = JSON.parse((await request(server, '/analysis/progress/99')).body);
+    assert.equal(body.status, 'interrupted');
+    assert.equal(body.live, false);
+  } finally {
+    dbService.getRunProgress = original;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('the runs table can read every in-flight run in one call', async () => {
+  const first = runProgress.toSnapshot(progressThrough('access'));
+  first.runId = 11;
+  first.updatedAt = Date.now() - 1000;
+  const second = runProgress.toSnapshot(progressThrough('items'));
+  second.runId = 12;
+  second.updatedAt = Date.now() - 1000;
+
+  const original = dbService.getLiveRunProgress;
+  dbService.getLiveRunProgress = async () => [first, second];
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = JSON.parse((await request(server, '/analysis/progress')).body);
+    assert.deepEqual(body.runs.map(run => run.runId).sort(), [11, 12]);
+    assert.ok(body.runs.every(run => run.live));
+  } finally {
+    dbService.getLiveRunProgress = original;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
