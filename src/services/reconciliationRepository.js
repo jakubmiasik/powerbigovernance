@@ -7,7 +7,14 @@
 const { _sql } = require('./databaseService');
 const { exceptionFingerprint, CLOSED_STATUSES, EXCEPTION_STATUS } = require('./reconciliationService');
 
-const { getConnection, execSql, TYPES } = _sql;
+const { TYPES } = _sql;
+
+// Looked up on each call rather than destructured once, so a test can substitute
+// the SQL primitives. That matters here: a tedious connection carries one request
+// at a time, and issuing two together fails in a way that is easy to swallow and
+// hard to notice — which is exactly what happened to the dashboard.
+const getConnection = (...args) => _sql.getConnection(...args);
+const execSql = (...args) => _sql.execSql(...args);
 
 async function withConnection(fn) {
   const conn = await getConnection();
@@ -43,36 +50,73 @@ async function getSourceById(id) {
   });
 }
 
+// Columns written for every source, whatever kind it is. Grouped so the insert and
+// the update cannot drift apart.
+function sourceColumns(source) {
+  return [
+    { column: 'name', param: str('name', source.name) },
+    { column: 'system_label', param: str('label', source.systemLabel) },
+    { column: 'kind', param: str('kind', source.kind) },
+    { column: 'workspace_id', param: str('ws', source.workspaceId || null) },
+    { column: 'workspace_name', param: str('wsName', source.workspaceName || null) },
+    { column: 'item_id', param: str('item', source.itemId || null) },
+    { column: 'item_type', param: str('itemType', source.itemType || null) },
+    { column: 'sp_id', param: int('spId', source.spId) },
+    { column: 'sp_name', param: str('spName', source.spName || null) },
+    { column: 'tenant_id', param: str('tenantId', source.tenantId || null) },
+    { column: 'connection_string', param: str('conn', source.connectionString || null) },
+    { column: 'database_name', param: str('db', source.databaseName || null) },
+    { column: 'auth_mode', param: str('auth', source.authMode || null) },
+    { column: 'sql_port', param: int('port', source.sqlPort) },
+    { column: 'sql_username', param: str('user', source.sqlUsername || null) },
+    { column: 'schema_json', param: str('schema', source.schemaJson || null) },
+  ];
+}
+
 async function saveSource(source) {
   return withConnection(async conn => {
     // Registering the same Fabric item twice should update it, not duplicate it.
-    const existing = source.workspaceId && source.itemId
-      ? await execSql(conn, 'SELECT id FROM recon_sources WHERE workspace_id=@ws AND item_id=@item', [
+    // External databases have no item identity, so they are matched by id instead.
+    let existingId = source.id ? Number.parseInt(source.id, 10) : null;
+    if (!existingId && source.workspaceId && source.itemId) {
+      const found = await execSql(conn, 'SELECT id FROM recon_sources WHERE workspace_id=@ws AND item_id=@item', [
         str('ws', source.workspaceId), str('item', source.itemId),
-      ])
-      : [];
-
-    if (existing.length) {
-      await execSql(conn, `UPDATE recon_sources SET name=@name, system_label=@label, kind=@kind,
-        workspace_name=@wsName, item_type=@itemType, connection_string=@conn, database_name=@db WHERE id=@id`, [
-        int('id', existing[0].id), str('name', source.name), str('label', source.systemLabel), str('kind', source.kind),
-        str('wsName', source.workspaceName), str('itemType', source.itemType),
-        str('conn', source.connectionString), str('db', source.databaseName),
       ]);
-      return existing[0].id;
+      existingId = found.length ? found[0].id : null;
     }
 
-    const rows = await execSql(conn, `INSERT INTO recon_sources
-      (name, system_label, kind, workspace_id, workspace_name, item_id, item_type, connection_string, database_name, created_by)
-      OUTPUT INSERTED.id
-      VALUES (@name, @label, @kind, @ws, @wsName, @item, @itemType, @conn, @db, @by)`, [
-      str('name', source.name), str('label', source.systemLabel), str('kind', source.kind),
-      str('ws', source.workspaceId), str('wsName', source.workspaceName), str('item', source.itemId),
-      str('itemType', source.itemType), str('conn', source.connectionString), str('db', source.databaseName),
-      str('by', source.createdBy),
-    ]);
+    const columns = sourceColumns(source);
+    // A password is only written when a new one was supplied, so editing a source's
+    // name does not silently clear its stored credential.
+    if (source.sqlPassword !== undefined) {
+      columns.push({ column: 'sql_password', param: str('pwd', source.sqlPassword) });
+    }
+    if (source.schemaJson !== undefined && source.schemaJson !== null) {
+      columns.push({ column: 'schema_read_at', param: null, raw: 'SYSUTCDATETIME()' });
+    }
+
+    const params = columns.filter(c => c.param).map(c => c.param);
+    const assignment = c => c.column + '=' + (c.raw || '@' + c.param.name);
+
+    if (existingId) {
+      await execSql(conn, 'UPDATE recon_sources SET ' + columns.map(assignment).join(', ') + ' WHERE id=@id',
+        [...params, int('id', existingId)]);
+      return existingId;
+    }
+
+    const rows = await execSql(conn,
+      'INSERT INTO recon_sources (' + columns.map(c => c.column).concat('created_by').join(', ') + ')'
+      + ' OUTPUT INSERTED.id VALUES (' + columns.map(c => c.raw || '@' + c.param.name).concat('@by').join(', ') + ')',
+      [...params, str('by', source.createdBy)]);
     return rows[0] ? rows[0].id : null;
   });
+}
+
+/** Stores a freshly read schema without touching the rest of the source. */
+async function saveSourceSchema(id, schemaJson) {
+  return withConnection(conn => execSql(conn,
+    'UPDATE recon_sources SET schema_json=@schema, schema_read_at=SYSUTCDATETIME() WHERE id=@id',
+    [int('id', id), str('schema', schemaJson)]));
 }
 
 async function deleteSource(id) {
@@ -174,8 +218,68 @@ async function setRuleStatus(id, status, actor) {
   });
 }
 
+/**
+ * Applies a status change and/or an owner to one rule, on a connection the caller
+ * owns. Every change is still versioned individually — a batch is a convenience for
+ * the operator, not a reason for the audit trail to lose detail about what happened
+ * to each control.
+ */
+async function applyRuleChange(conn, id, { status, owner, assignOwner }, actor) {
+  const assignments = [];
+  const params = [int('id', id)];
+  if (status) { assignments.push('status=@status'); params.push(str('status', status)); }
+  if (assignOwner) { assignments.push('owner=@owner'); params.push(str('owner', owner || null)); }
+  if (!assignments.length) return null;
+
+  assignments.push('updated_at=SYSUTCDATETIME()', 'updated_by=@by');
+  params.push(str('by', actor));
+  await execSql(conn, 'UPDATE recon_rules SET ' + assignments.join(', ') + ' WHERE id=@id', params);
+
+  const current = await execSql(conn, 'SELECT version FROM recon_rules WHERE id=@id', [int('id', id)]);
+  const version = current[0] ? Number(current[0].version) : 1;
+  const notes = [];
+  if (status) notes.push('Status changed to ' + status);
+  if (assignOwner) notes.push(owner ? 'Assigned to ' + owner : 'Owner cleared');
+  await recordRuleVersion(conn, id, version, actor, notes.join('; '));
+  return version;
+}
+
+async function setRuleStatusAndOwner(id, change, actor) {
+  return withConnection(conn => applyRuleChange(conn, id, change, actor));
+}
+
+/**
+ * Applies the same change to several rules on one connection. Each rule is written
+ * separately so one failure does not discard the rest; the caller is told which
+ * ones went through.
+ */
+async function batchUpdateRules(ids, change, actor) {
+  return withConnection(async conn => {
+    const results = [];
+    for (const id of ids) {
+      try {
+        await applyRuleChange(conn, id, change, actor);
+        results.push({ id, success: true });
+      } catch (err) {
+        results.push({ id, success: false, message: err.message });
+      }
+    }
+    return results;
+  });
+}
+
 async function deleteRule(id) {
   return withConnection(conn => execSql(conn, 'DELETE FROM recon_rules WHERE id=@id', [int('id', id)]));
+}
+
+/** Distinct owners already in use, so assignment offers real names before free text. */
+async function listOwners() {
+  return withConnection(async conn => {
+    const rows = await execSql(conn, `
+      SELECT owner FROM recon_rules WHERE owner IS NOT NULL AND LTRIM(RTRIM(owner)) <> ''
+      UNION SELECT owner FROM recon_exceptions WHERE owner IS NOT NULL AND LTRIM(RTRIM(owner)) <> ''`);
+    return rows.map(row => row.owner).sort((a, b) => a.localeCompare(b));
+  });
 }
 
 async function getRuleVersions(ruleId) {
@@ -230,6 +334,11 @@ async function getRunById(id) {
  * owner, status and history are preserved. Only genuinely new items are created,
  * and one that had been resolved but has recurred is reopened with a note, because
  * silently leaving it closed would hide a returning problem.
+ *
+ * Alongside that standing list, each run's findings are recorded as they were at
+ * the time. The standing list only ever holds the current state of an item, so
+ * without this there would be no way to ask what a particular run saw — which is
+ * what comparing two runs, and summarising one, both need.
  */
 async function recordExceptions(runId, rule, exceptions) {
   const created = [];
@@ -237,6 +346,14 @@ async function recordExceptions(runId, rule, exceptions) {
   const reopened = [];
 
   await withConnection(async conn => {
+    const recordFinding = (exceptionId, fingerprint, exception, isNew) => execSql(conn,
+      `INSERT INTO recon_run_findings (run_id, rule_id, exception_id, fingerprint, business_key, outcome, severity, is_new)
+       VALUES (@run, @rule, @exception, @fp, @key, @outcome, @severity, @isNew)`, [
+        int('run', runId), int('rule', rule.id), int('exception', exceptionId), str('fp', fingerprint),
+        str('key', String(exception.businessKey)), str('outcome', exception.outcome),
+        str('severity', exception.severity), int('isNew', isNew ? 1 : 0),
+      ]);
+
     for (const exception of exceptions) {
       const fingerprint = exceptionFingerprint(rule.id, exception);
       const existing = await execSql(conn, 'SELECT id, status, occurrence_count FROM recon_exceptions WHERE fingerprint=@fp', [
@@ -265,6 +382,7 @@ async function recordExceptions(runId, rule, exceptions) {
             comment: 'Identified by run #' + runId,
           });
         }
+        await recordFinding(id, fingerprint, exception, true);
         continue;
       }
 
@@ -286,10 +404,39 @@ async function recordExceptions(runId, rule, exceptions) {
       } else {
         updated.push(row.id);
       }
+      await recordFinding(row.id, fingerprint, exception, false);
     }
   });
 
   return { created: created.length, updated: updated.length, reopened: reopened.length };
+}
+
+/** What one run found, in the shape the comparison and per-run summary read. */
+async function listRunFindings(runId) {
+  return withConnection(async conn => {
+    try {
+      return await execSql(conn,
+        'SELECT run_id, rule_id, exception_id, fingerprint, business_key, outcome, severity, is_new FROM recon_run_findings WHERE run_id=@run',
+        [int('run', runId)]);
+    } catch (err) {
+      // Runs recorded before findings were kept have none; that is not an error,
+      // but it must not be presented as "this run found nothing".
+      if ((err.message || '').includes('Invalid object name')) return [];
+      throw err;
+    }
+  });
+}
+
+/** True when this run predates per-run findings, so its detail cannot be shown. */
+async function hasRunFindings(runId) {
+  return withConnection(async conn => {
+    try {
+      const rows = await execSql(conn, 'SELECT TOP 1 id FROM recon_run_findings WHERE run_id=@run', [int('run', runId)]);
+      return rows.length > 0;
+    } catch {
+      return false;
+    }
+  });
 }
 
 async function addExceptionEvent(conn, exceptionId, { action, fromStatus, toStatus, comment, actor }) {
@@ -377,44 +524,106 @@ async function commentOnException(id, comment, actor) {
 }
 
 // ── Oversight ──
-async function getDashboardData() {
+
+/**
+ * The dashboard aggregates.
+ *
+ * The queries run one after another. A tedious connection carries a single request
+ * at a time, so issuing them together — as this used to — meant the first one
+ * answered and every other was rejected with an invalid-state error. Those errors
+ * were swallowed, so the panels rendered empty and looked like data that had not
+ * refreshed after a run rather than queries that never ran at all.
+ *
+ * Failures are still tolerated, because a missing table must not take the whole
+ * page down, but they are now logged and reported so the next one cannot hide.
+ */
+async function getDashboardData({ runId = null } = {}) {
   return withConnection(async conn => {
-    const safe = async (sql) => {
-      try { return await execSql(conn, sql); } catch { return []; }
+    const problems = [];
+    const safe = async (label, sql, params = []) => {
+      try {
+        return await execSql(conn, sql, params);
+      } catch (err) {
+        console.warn('[Reconciliation] Dashboard query "' + label + '" failed:', err.message);
+        problems.push(label);
+        return [];
+      }
     };
-    const [rules, exceptionsByStatus, exceptionsByOutcome, exceptionsBySeverity, byRule, recentRuns, byOwner] = await Promise.all([
-      safe("SELECT status, COUNT(*) AS total FROM recon_rules GROUP BY status"),
-      safe('SELECT status, COUNT(*) AS total FROM recon_exceptions GROUP BY status'),
-      safe("SELECT outcome, COUNT(*) AS total FROM recon_exceptions WHERE status NOT IN ('resolved','accepted') GROUP BY outcome"),
-      safe("SELECT severity, COUNT(*) AS total FROM recon_exceptions WHERE status NOT IN ('resolved','accepted') GROUP BY severity"),
-      safe(`SELECT TOP 20 rule_id, rule_name, business_area,
-              COUNT(*) AS open_count, MAX(occurrence_count) AS worst_recurrence, MAX(last_seen_at) AS last_seen
-            FROM recon_exceptions WHERE status NOT IN ('resolved','accepted')
-            GROUP BY rule_id, rule_name, business_area ORDER BY COUNT(*) DESC`),
-      safe('SELECT TOP 15 * FROM recon_runs ORDER BY started_at DESC'),
-      safe(`SELECT ISNULL(owner, '(unassigned)') AS owner, COUNT(*) AS total
-            FROM recon_exceptions WHERE status NOT IN ('resolved','accepted') GROUP BY owner ORDER BY COUNT(*) DESC`),
-    ]);
+
+    const rules = await safe('rules by status', 'SELECT status, COUNT(*) AS total FROM recon_rules GROUP BY status');
+
+    // Scoped to one run, the panels describe what that run found. Unscoped, they
+    // describe the standing exception list — the current state of the control.
+    const scoped = Number.isFinite(Number.parseInt(runId, 10));
+    const runParam = () => [int('run', runId)];
+
+    const exceptionsByStatus = scoped
+      ? await safe('run findings by status', `SELECT e.status, COUNT(*) AS total
+          FROM recon_run_findings f JOIN recon_exceptions e ON e.id = f.exception_id
+          WHERE f.run_id=@run GROUP BY e.status`, runParam())
+      : await safe('exceptions by status', 'SELECT status, COUNT(*) AS total FROM recon_exceptions GROUP BY status');
+
+    const exceptionsByOutcome = scoped
+      ? await safe('run findings by outcome',
+        'SELECT outcome, COUNT(*) AS total FROM recon_run_findings WHERE run_id=@run GROUP BY outcome', runParam())
+      : await safe('open exceptions by outcome',
+        "SELECT outcome, COUNT(*) AS total FROM recon_exceptions WHERE status NOT IN ('resolved','accepted') GROUP BY outcome");
+
+    const exceptionsBySeverity = scoped
+      ? await safe('run findings by severity',
+        'SELECT severity, COUNT(*) AS total FROM recon_run_findings WHERE run_id=@run GROUP BY severity', runParam())
+      : await safe('open exceptions by severity',
+        "SELECT severity, COUNT(*) AS total FROM recon_exceptions WHERE status NOT IN ('resolved','accepted') GROUP BY severity");
+
+    const byRule = scoped
+      ? await safe('run findings by rule', `SELECT TOP 20 f.rule_id, MAX(r.rule_name) AS rule_name, NULL AS business_area,
+            COUNT(*) AS open_count, MAX(CAST(f.is_new AS INT)) AS worst_recurrence, MAX(f.recorded_at) AS last_seen
+          FROM recon_run_findings f LEFT JOIN recon_runs r ON r.id = f.run_id
+          WHERE f.run_id=@run GROUP BY f.rule_id ORDER BY COUNT(*) DESC`, runParam())
+      : await safe('rules with open exceptions', `SELECT TOP 20 rule_id, rule_name, business_area,
+            COUNT(*) AS open_count, MAX(occurrence_count) AS worst_recurrence, MAX(last_seen_at) AS last_seen
+          FROM recon_exceptions WHERE status NOT IN ('resolved','accepted')
+          GROUP BY rule_id, rule_name, business_area ORDER BY COUNT(*) DESC`);
+
+    const byOwner = scoped
+      ? await safe('run findings by owner', `SELECT ISNULL(e.owner, '(unassigned)') AS owner, COUNT(*) AS total
+          FROM recon_run_findings f JOIN recon_exceptions e ON e.id = f.exception_id
+          WHERE f.run_id=@run GROUP BY e.owner ORDER BY COUNT(*) DESC`, runParam())
+      : await safe('open exceptions by owner', `SELECT ISNULL(owner, '(unassigned)') AS owner, COUNT(*) AS total
+          FROM recon_exceptions WHERE status NOT IN ('resolved','accepted') GROUP BY owner ORDER BY COUNT(*) DESC`);
+
+    const recentRuns = await safe('recent runs', 'SELECT TOP 15 * FROM recon_runs ORDER BY started_at DESC');
+
     // Ageing buckets make "how long has this been ignored" visible at a glance.
-    const ageing = await safe(`
+    // They describe the standing list, so they are not scoped to a single run.
+    const ageing = await safe('exception ageing', `
       SELECT
         SUM(CASE WHEN DATEDIFF(day, first_seen_at, SYSUTCDATETIME()) <= 7 THEN 1 ELSE 0 END) AS week1,
         SUM(CASE WHEN DATEDIFF(day, first_seen_at, SYSUTCDATETIME()) BETWEEN 8 AND 30 THEN 1 ELSE 0 END) AS month1,
         SUM(CASE WHEN DATEDIFF(day, first_seen_at, SYSUTCDATETIME()) > 30 THEN 1 ELSE 0 END) AS older
       FROM recon_exceptions WHERE status NOT IN ('resolved','accepted')`);
 
+    const run = scoped
+      ? (await safe('selected run', 'SELECT * FROM recon_runs WHERE id=@run', runParam()))[0] || null
+      : null;
+
     return {
       rules, exceptionsByStatus, exceptionsByOutcome, exceptionsBySeverity,
       byRule, recentRuns, byOwner, ageing: ageing[0] || { week1: 0, month1: 0, older: 0 },
+      scopedRun: run,
+      scoped,
+      problems,
     };
   });
 }
 
 module.exports = {
-  listSources, getSourceById, saveSource, deleteSource,
+  listSources, getSourceById, saveSource, saveSourceSchema, deleteSource,
   listRules, getRuleById, createRule, updateRule, setRuleStatus, deleteRule, getRuleVersions,
+  setRuleStatusAndOwner, batchUpdateRules, listOwners,
   createRun, completeRun, listRuns, getRunById,
-  recordExceptions, listExceptions, getExceptionById, getExceptionEvents,
+  recordExceptions, listRunFindings, hasRunFindings,
+  listExceptions, getExceptionById, getExceptionEvents,
   updateExceptionStatus, assignException, commentOnException,
   getDashboardData,
   EXCEPTION_STATUS,

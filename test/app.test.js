@@ -20,6 +20,26 @@ function request(server, path) {
   });
 }
 
+function postJson(server, path, payload) {
+  const { port } = server.address();
+  const body = JSON.stringify(payload);
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1', port, path, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { text += chunk; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(text)); } catch (err) { reject(new Error('Non-JSON response: ' + text.slice(0, 200))); }
+      });
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
 test('health endpoint responds without database access', async () => {
   const server = await new Promise(resolve => {
     const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
@@ -1692,6 +1712,342 @@ test('the runs table can read every in-flight run in one call', async () => {
     assert.ok(body.runs.every(run => run.live));
   } finally {
     dbService.getLiveRunProgress = original;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+// ── Reconciliation: shared SQL projection ──
+test('both kinds of source read the same projection for a planned rule', () => {
+  // A Fabric endpoint and a registered database must return identically shaped rows,
+  // or the two sides of a comparison would not line up.
+  const plan = recon.planRule({
+    keyFieldA: 'InvoiceNumber', keyFieldB: 'Invoice_No',
+    compareFields: [
+      { label: 'Net', a: { kind: 'expression', value: 'ROUND(NetAmount, 2)' }, b: { kind: 'field', value: 'Net' }, type: 'number' },
+      { label: 'Currency', a: { kind: 'field', value: 'Ccy' }, b: { kind: 'constant', value: 'EUR' }, type: 'string' },
+    ],
+  });
+
+  const sqlA = recon.buildSelectSql({ dataset: 'dbo.Invoices', selections: plan.selectionsA, rowLimit: 500 });
+  assert.match(sqlA, /^SELECT TOP \(500\) /);
+  assert.match(sqlA, /\[InvoiceNumber\] AS \[recon_key\]/);
+  assert.match(sqlA, /\(ROUND\(NetAmount, 2\)\) AS \[recon_c0a\]/);
+  assert.match(sqlA, /FROM \[dbo\]\.\[Invoices\]$/);
+
+  // The constant is never selected from either source.
+  const sqlB = recon.buildSelectSql({ dataset: 'Sales', selections: plan.selectionsB });
+  assert.ok(!/EUR/.test(sqlB), 'a fixed value must not be read from the source');
+  assert.match(sqlB, /\[Net\] AS \[recon_c0b\]/);
+});
+
+test('an identifier that is not a plain name is refused rather than concatenated', () => {
+  assert.throws(
+    () => recon.buildSelectSql({ dataset: 'Invoices; DROP TABLE x', selections: [{ alias: 'a', kind: 'field', value: 'Id' }] }),
+    /Unsupported identifier/
+  );
+});
+
+// ── Reconciliation: external database sources ──
+const sqlSource = require('../src/services/sqlSourceService');
+
+test('external source schema is reshaped into datasets and fields', () => {
+  const datasets = sqlSource.shapeSchemaRows([
+    { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'Invoices', TABLE_TYPE: 'BASE TABLE', COLUMN_NAME: 'Id', DATA_TYPE: 'int', IS_NULLABLE: 'NO' },
+    { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'Invoices', TABLE_TYPE: 'BASE TABLE', COLUMN_NAME: 'Customer', DATA_TYPE: 'nvarchar', IS_NULLABLE: 'YES', CHARACTER_MAXIMUM_LENGTH: 200 },
+    { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'InvoiceView', TABLE_TYPE: 'VIEW', COLUMN_NAME: 'Total', DATA_TYPE: 'decimal', NUMERIC_PRECISION: 18, NUMERIC_SCALE: 2 },
+    // A table with no columns readable by this identity still appears, so an
+    // access problem does not look like a missing table.
+    { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'Locked', TABLE_TYPE: 'BASE TABLE', COLUMN_NAME: null },
+  ]);
+
+  assert.equal(datasets.length, 3);
+  assert.deepEqual(datasets[0].fields.map(f => f.name), ['Id', 'Customer']);
+  assert.equal(datasets[0].fields[1].dataType, 'nvarchar(200)');
+  assert.equal(datasets[0].fields[1].nullable, true);
+  assert.equal(datasets[1].kind, 'View');
+  assert.equal(datasets[1].fields[0].dataType, 'decimal(18,2)');
+  assert.equal(datasets[2].fields.length, 0);
+});
+
+test('a SQL login source builds a password connection, an Entra one builds a token connection', () => {
+  const { connectionConfig } = sqlSource._private;
+
+  const entra = connectionConfig({ connection_string: 'srv.database.windows.net', database_name: 'ERP', auth_mode: 'entra' }, 'a-token');
+  assert.equal(entra.server, 'srv.database.windows.net');
+  assert.equal(entra.authentication.type, 'azure-active-directory-access-token');
+  assert.equal(entra.authentication.options.token, 'a-token');
+  assert.equal(entra.options.encrypt, true);
+
+  const sql = connectionConfig({
+    connection_string: 'onprem', database_name: 'ERP', auth_mode: 'sql',
+    sql_username: 'svc', sql_password: 'plaintext-legacy', sql_port: '1444',
+  }, null);
+  assert.equal(sql.authentication.type, 'default');
+  assert.equal(sql.authentication.options.userName, 'svc');
+  assert.equal(sql.options.port, 1444);
+});
+
+test('a SQL login with no stored password is refused rather than attempted anonymously', () => {
+  assert.throws(
+    () => sqlSource._private.connectionConfig({ connection_string: 's', auth_mode: 'sql', sql_username: 'svc' }, null),
+    /no username or password is stored/
+  );
+});
+
+test('connection failures are explained rather than passed through raw', () => {
+  const source = { connection_string: 'srv.database.windows.net', database_name: 'ERP', auth_mode: 'entra' };
+  assert.match(sqlSource.explainSqlFailure(new Error('getaddrinfo ENOTFOUND srv'), source), /Cannot resolve/);
+  assert.match(sqlSource.explainSqlFailure(new Error('Login failed for user'), source), /Grant it read access/);
+  assert.match(
+    sqlSource.explainSqlFailure(new Error('Login failed for user'), { ...source, auth_mode: 'sql' }),
+    /username and password/
+  );
+  assert.match(sqlSource.explainSqlFailure(new Error('Cannot open database "ERP"'), source), /not available to this identity/);
+});
+
+// ── Reconciliation: comparing runs ──
+const reconCompare = require('../src/services/reconciliationComparisonService');
+
+const RUN_A = { id: 1, rule_id: 9, rule_version: 1, started_at: '2026-08-01T10:00:00Z', records_a: 100, records_b: 98, keys_compared: 100, matched: 90, exception_count: 10 };
+const RUN_B = { id: 2, rule_id: 9, rule_version: 1, started_at: '2026-08-10T10:00:00Z', records_a: 120, records_b: 120, keys_compared: 120, matched: 114, exception_count: 6 };
+
+function finding(fingerprint, key, outcome, severity = 'medium') {
+  return { fingerprint, business_key: key, outcome, severity, exception_id: null };
+}
+
+test('run comparison reports which items were fixed, which are new and which persist', () => {
+  const comparison = reconCompare.compareRuns({
+    fromRun: RUN_A, toRun: RUN_B,
+    findingsFrom: [finding('f1', 'INV-1', 'value_mismatch'), finding('f2', 'INV-2', 'missing_from_b'), finding('f3', 'INV-3', 'duplicate')],
+    findingsTo: [finding('f2', 'INV-2', 'missing_from_b'), finding('f4', 'INV-4', 'duplicate')],
+  });
+
+  assert.equal(comparison.findings.resolved.total, 2);
+  assert.equal(comparison.findings.introduced.total, 1);
+  assert.equal(comparison.findings.persisting.total, 1);
+  assert.equal(comparison.summary.verdict, 'churn');
+  assert.deepEqual(comparison.findings.introduced.sample[0].businessKey, 'INV-4');
+});
+
+test('an item that starts failing for a different reason is reported as changed, not as fixed and new', () => {
+  const comparison = reconCompare.compareRuns({
+    fromRun: RUN_A, toRun: RUN_B,
+    findingsFrom: [finding('f1', 'INV-1', 'value_mismatch')],
+    findingsTo: [finding('f1', 'INV-1', 'missing_from_b')],
+  });
+  assert.equal(comparison.findings.changed.total, 1);
+  assert.equal(comparison.findings.resolved.total, 0);
+  assert.equal(comparison.findings.introduced.total, 0);
+  assert.equal(comparison.findings.changed.sample[0].fromOutcomeLabel, 'Value mismatch');
+});
+
+test('equal exception counts are not reported as no change when the items moved', () => {
+  // The reason this works from findings rather than totals: ten before and ten after
+  // can mean nothing happened, or that ten were fixed and ten new ones appeared.
+  const comparison = reconCompare.compareRuns({
+    fromRun: { ...RUN_A, exception_count: 2 }, toRun: { ...RUN_B, exception_count: 2 },
+    findingsFrom: [finding('f1', 'A', 'duplicate'), finding('f2', 'B', 'duplicate')],
+    findingsTo: [finding('f3', 'C', 'duplicate'), finding('f4', 'D', 'duplicate')],
+  });
+  assert.equal(comparison.summary.verdict, 'churn');
+  assert.equal(comparison.summary.netChange, 0);
+  assert.equal(comparison.findings.persisting.total, 0);
+});
+
+test('runs given in the wrong order are compared by date, not by argument position', () => {
+  const comparison = reconCompare.compareRuns({
+    fromRun: RUN_B, toRun: RUN_A,
+    findingsFrom: [finding('f2', 'INV-2', 'duplicate')],
+    findingsTo: [finding('f1', 'INV-1', 'duplicate')],
+  });
+  assert.equal(comparison.earlier.id, RUN_A.id);
+  assert.equal(comparison.later.id, RUN_B.id);
+  assert.equal(comparison.reversed, true);
+  assert.equal(comparison.findings.introduced.sample[0].businessKey, 'INV-2');
+});
+
+test('runs of different rules are refused', () => {
+  assert.throws(
+    () => reconCompare.compareRuns({ fromRun: RUN_A, toRun: { ...RUN_B, rule_id: 42 }, findingsFrom: [], findingsTo: [] }),
+    /same rule/
+  );
+  assert.throws(
+    () => reconCompare.compareRuns({ fromRun: RUN_A, toRun: RUN_A, findingsFrom: [], findingsTo: [] }),
+    /two different runs/
+  );
+});
+
+test('a rule redefined between runs is flagged, because movement may not be the data', () => {
+  const comparison = reconCompare.compareRuns({
+    fromRun: RUN_A, toRun: { ...RUN_B, rule_version: 3 }, findingsFrom: [], findingsTo: [],
+  });
+  assert.equal(comparison.versionChanged, true);
+  assert.equal(comparison.summary.verdict, 'clean');
+});
+
+test('metric deltas know which direction is an improvement', () => {
+  const metrics = reconCompare.diffRunMetrics(RUN_A, RUN_B);
+  const byKey = Object.fromEntries(metrics.map(metric => [metric.key, metric]));
+  assert.equal(byKey.matched.direction, 'improved');
+  assert.equal(byKey.exception_count.direction, 'improved');
+  assert.equal(byKey.exception_count.delta, -4);
+  assert.equal(byKey.records_a.direction, 'changed');
+
+  const worse = reconCompare.diffRunMetrics(RUN_B, RUN_A);
+  assert.equal(worse.find(m => m.key === 'exception_count').direction, 'worsened');
+});
+
+test('item lists are capped but their counts stay exact', () => {
+  const many = Array.from({ length: 250 }, (_, i) => finding('f' + i, 'KEY-' + i, 'duplicate'));
+  const diff = reconCompare.diffFindings([], many, { sampleLimit: 10 });
+  assert.equal(diff.introduced.total, 250);
+  assert.equal(diff.introduced.sample.length, 10);
+});
+
+// ── Reconciliation: the dashboard's connection discipline ──
+const reconRepo = require('../src/services/reconciliationRepository');
+
+/**
+ * Stands in for a tedious connection, which carries exactly one request at a time.
+ * A second request issued while the first is in flight is rejected — the real
+ * driver's behaviour, and the fault that left the dashboard panels empty.
+ */
+function fakeSqlPrimitives(rowsFor) {
+  let inFlight = false;
+  const executed = [];
+  return {
+    executed,
+    getConnection: async () => ({ close() {} }),
+    execSql: async (conn, sql, params) => {
+      if (inFlight) throw new Error('Requests can only be made in the LoggedIn state, not the SentClientRequest state');
+      inFlight = true;
+      executed.push({ sql, params });
+      await new Promise(resolve => setImmediate(resolve));
+      inFlight = false;
+      return rowsFor(sql);
+    },
+  };
+}
+
+async function withFakeSql(rowsFor, fn) {
+  const real = { getConnection: dbService._sql.getConnection, execSql: dbService._sql.execSql };
+  const fake = fakeSqlPrimitives(rowsFor);
+  dbService._sql.getConnection = fake.getConnection;
+  dbService._sql.execSql = fake.execSql;
+  try {
+    return { result: await fn(), executed: fake.executed };
+  } finally {
+    Object.assign(dbService._sql, real);
+  }
+}
+
+test('every dashboard panel is populated, not just the first one', async () => {
+  // Regression: the queries used to be issued together on one connection, so the
+  // first answered and the rest were rejected. The errors were swallowed, so the
+  // panels rendered empty and looked like data that had not refreshed after a run.
+  const { result, executed } = await withFakeSql(sql => {
+    if (/FROM recon_rules/.test(sql)) return [{ status: 'active', total: 3 }];
+    if (/GROUP BY status/.test(sql)) return [{ status: 'open', total: 7 }];
+    if (/GROUP BY outcome/.test(sql)) return [{ outcome: 'duplicate', total: 2 }];
+    if (/GROUP BY severity/.test(sql)) return [{ severity: 'high', total: 1 }];
+    if (/GROUP BY rule_id/.test(sql)) return [{ rule_id: 9, rule_name: 'R', open_count: 4 }];
+    if (/FROM recon_runs/.test(sql)) return [{ id: 3 }];
+    if (/GROUP BY owner/.test(sql)) return [{ owner: 'Ann', total: 5 }];
+    if (/DATEDIFF/.test(sql)) return [{ week1: 1, month1: 2, older: 3 }];
+    return [];
+  }, () => reconRepo.getDashboardData());
+
+  assert.deepEqual(result.problems, [], 'no panel should fail');
+  assert.equal(result.rules[0].total, 3);
+  assert.equal(result.exceptionsByStatus[0].total, 7);
+  assert.equal(result.exceptionsByOutcome[0].total, 2);
+  assert.equal(result.byOwner[0].owner, 'Ann');
+  assert.equal(result.byRule[0].open_count, 4);
+  assert.equal(result.recentRuns.length, 1);
+  assert.equal(result.ageing.older, 3);
+  assert.ok(executed.length >= 8);
+});
+
+test('scoping the dashboard to one run asks what that run found', async () => {
+  const { result, executed } = await withFakeSql(sql => {
+    if (/FROM recon_run_findings/.test(sql) && /GROUP BY outcome/.test(sql)) return [{ outcome: 'value_mismatch', total: 4 }];
+    if (/WHERE id=@run/.test(sql)) return [{ id: 12, rule_id: 9, matched: 80 }];
+    return [];
+  }, () => reconRepo.getDashboardData({ runId: 12 }));
+
+  assert.equal(result.scoped, true);
+  assert.equal(result.scopedRun.id, 12);
+  assert.equal(result.exceptionsByOutcome[0].total, 4);
+  assert.ok(executed.some(entry => /recon_run_findings/.test(entry.sql)),
+    'a scoped dashboard must read the run\'s findings, not the standing exception list');
+  assert.deepEqual(result.problems, []);
+});
+
+test('one unreadable panel is reported rather than silently blanking the page', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/GROUP BY owner/.test(sql)) throw new Error("Invalid object name 'recon_exceptions'");
+    return [];
+  }, () => reconRepo.getDashboardData());
+
+  assert.deepEqual(result.byOwner, []);
+  assert.ok(result.problems.length, 'a failed panel must be named so it cannot hide');
+});
+
+test('a batch rule change writes each rule separately and keeps going after a failure', async () => {
+  const { result, executed } = await withFakeSql(sql => {
+    if (/UPDATE recon_rules/.test(sql) && /@id/.test(sql)) return [];
+    if (/SELECT version/.test(sql)) return [{ version: 4 }];
+    if (/SELECT \* FROM recon_rules/.test(sql)) return [{ id: 1, name: 'R' }];
+    return [];
+  }, () => reconRepo.batchUpdateRules([1, 2, 3], { status: 'retired' }, 'tester'));
+
+  assert.equal(result.length, 3);
+  assert.ok(result.every(entry => entry.success));
+  // Each rule gets its own version row: a batch is a convenience for the operator,
+  // not a reason for the audit trail to lose track of what happened to each control.
+  const versionWrites = executed.filter(entry => /INSERT INTO recon_rule_versions/.test(entry.sql));
+  assert.equal(versionWrites.length, 3);
+});
+
+test('a batch that changes nothing is refused before it touches the database', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateRules([1], {}, 'tester'));
+  assert.equal(executed.length, 0);
+});
+
+test('a batch activation moves the valid rules and names the ones it could not activate', async () => {
+  // An incomplete control must never be presented to operators as active, but one
+  // bad rule in a selection should not block the rest.
+  const complete = {
+    id: 1, name: 'Complete', status: 'draft', source_a_id: 1, source_b_id: 2,
+    dataset_a: 'A', dataset_b: 'B', key_field_a: 'Id', key_field_b: 'Id',
+    compareFields: [{ label: 'Net', a: { kind: 'field', value: 'Net' }, b: { kind: 'field', value: 'Net' }, type: 'number' }],
+  };
+  const incomplete = { id: 2, name: 'No key yet', status: 'draft', source_a_id: 1, source_b_id: 2, dataset_a: 'A', dataset_b: 'B', compareFields: [] };
+
+  const original = {
+    listRules: reconRepo.listRules, getRuleById: reconRepo.getRuleById, batchUpdateRules: reconRepo.batchUpdateRules,
+  };
+  reconRepo.listRules = async () => [complete, incomplete];
+  reconRepo.getRuleById = async id => (Number(id) === 1 ? complete : incomplete);
+  let applied = null;
+  reconRepo.batchUpdateRules = async (ids, change) => { applied = { ids, change }; return ids.map(id => ({ id, success: true })); };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/reconciliation/rules/batch', {
+      ruleIds: [1, 2], status: 'active', assignOwner: true, owner: 'Ann',
+    });
+    assert.equal(body.success, true);
+    assert.equal(body.updated, 1);
+    assert.deepEqual(applied.ids, [1]);
+    assert.equal(applied.change.owner, 'Ann');
+    assert.equal(body.skipped.length, 1);
+    assert.equal(body.skipped[0].name, 'No key yet');
+    assert.match(body.skipped[0].message, /business key/i);
+  } finally {
+    Object.assign(reconRepo, original);
     await new Promise(resolve => server.close(resolve));
   }
 });

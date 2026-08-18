@@ -9,11 +9,15 @@
   var activeRules = total(rules, 'status', 'active');
   var draftRules = total(rules, 'status', 'draft');
   var retiredRules = total(rules, 'status', 'retired');
+  // Scoped to a run, every finding counts: the run found it, whatever has since
+  // been done about it. Unscoped, only what is still open is interesting.
   var openExceptions = (d.exceptionsByStatus || []).filter(function(r) {
-    return ['resolved', 'accepted'].indexOf(String(r.status)) === -1;
+    return d.scoped || ['resolved', 'accepted'].indexOf(String(r.status)) === -1;
   }).reduce(function(sum, r) { return sum + Number(r.total); }, 0);
   var severity = d.exceptionsBySeverity || [];
   var ageing = d.ageing || {};
+  var scoped = !!d.scoped;
+  var scopedRun = d.scopedRun || null;
 %>
 
 <div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
@@ -25,6 +29,7 @@
     <a href="/reconciliation/sources" class="btn btn-sm btn-outline-secondary"><i class="bi bi-database me-1"></i>Sources</a>
     <a href="/reconciliation/rules" class="btn btn-sm btn-outline-primary"><i class="bi bi-list-check me-1"></i>Rules</a>
     <a href="/reconciliation/runs" class="btn btn-sm btn-outline-primary"><i class="bi bi-play-circle me-1"></i>Runs</a>
+    <a href="/reconciliation/compare" class="btn btn-sm btn-outline-primary"><i class="bi bi-arrow-left-right me-1"></i>Compare runs</a>
     <a href="/reconciliation/exceptions" class="btn btn-sm btn-primary"><i class="bi bi-exclamation-triangle me-1"></i>Exceptions</a>
   </div>
 </div>
@@ -32,6 +37,48 @@
 <% if (error) { %>
   <div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div>
 <% } %>
+<% if (d.problems && d.problems.length) { %>
+  <div class="alert alert-warning small">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    Some panels could not be read (<%= d.problems.join(', ') %>) and are showing as empty. The application log has the reason.
+  </div>
+<% } %>
+
+<!-- Scope: the whole control state, or what one run found. -->
+<div class="card mb-4">
+  <div class="card-body py-2">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-6">
+        <label class="form-label small mb-1" for="runScope">Show</label>
+        <select class="form-select form-select-sm" id="runScope"
+                onchange="window.location = this.value ? '/reconciliation?runId=' + this.value : '/reconciliation'">
+          <option value="">Current state — every open exception across all runs</option>
+          <% (runs || []).forEach(function(run) { %>
+            <option value="<%= run.id %>" <%= String(selectedRunId) === String(run.id) ? 'selected' : '' %>>
+              Run #<%= run.id %> — <%= run.rule_name || ('Rule #' + run.rule_id) %>
+              (<%= run.started_at ? new Date(run.started_at).toLocaleString() : 'unknown date' %>)
+            </option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-md-6 small text-muted">
+        <% if (scoped && scopedRun) { %>
+          <i class="bi bi-funnel me-1"></i>Showing what <strong>run #<%= scopedRun.id %></strong> found:
+          <%= scopedRun.keys_compared === null || scopedRun.keys_compared === undefined ? '-' : scopedRun.keys_compared %> key(s) compared,
+          <%= scopedRun.matched === null || scopedRun.matched === undefined ? '-' : scopedRun.matched %> matched.
+          <a href="/reconciliation/runs/<%= scopedRun.id %>">Open the run</a> ·
+          <a href="/reconciliation/compare?to=<%= scopedRun.id %>">compare it with another</a> ·
+          <a href="/reconciliation">back to current state</a>.
+        <% } else if (scoped) { %>
+          <i class="bi bi-exclamation-triangle me-1"></i>That run no longer exists.
+        <% } else { %>
+          <i class="bi bi-info-circle me-1"></i>Ageing and the rule counts always describe the current state — pick a run to see what that
+          run found instead of what is still open now.
+        <% } %>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="row g-3 mb-4">
   <div class="col-sm-6 col-xl-2">
@@ -49,7 +96,7 @@
       <div class="card text-center h-100 stat-card"><div class="card-body py-3">
         <div class="text-danger mb-2"><i class="bi bi-exclamation-triangle"></i></div>
         <div class="fs-3 fw-bold text-danger"><%= openExceptions %></div>
-        <div class="small">Open Exceptions</div>
+        <div class="small"><%= scoped ? 'Findings in Run' : 'Open Exceptions' %></div>
       </div></div>
     </a>
   </div>
@@ -88,7 +135,7 @@
 <div class="row g-4 mb-4">
   <div class="col-lg-4">
     <div class="card h-100">
-      <div class="card-header"><i class="bi bi-pie-chart me-2"></i>Open Exceptions by Type</div>
+      <div class="card-header"><i class="bi bi-pie-chart me-2"></i><%= scoped ? 'Findings by Type' : 'Open Exceptions by Type' %></div>
       <div class="table-responsive">
         <table class="table table-sm mb-0">
           <thead><tr><th>Outcome</th><th>Count</th></tr></thead>
@@ -108,7 +155,7 @@
 
   <div class="col-lg-4">
     <div class="card h-100">
-      <div class="card-header"><i class="bi bi-diagram-2 me-2"></i>Exceptions by Status</div>
+      <div class="card-header"><i class="bi bi-diagram-2 me-2"></i><%= scoped ? 'This Run\'s Findings by Current Status' : 'Exceptions by Status' %></div>
       <div class="table-responsive">
         <table class="table table-sm mb-0">
           <thead><tr><th>Status</th><th>Count</th></tr></thead>
@@ -127,7 +174,7 @@
 
   <div class="col-lg-4">
     <div class="card h-100">
-      <div class="card-header"><i class="bi bi-person-badge me-2"></i>Open Exceptions by Owner</div>
+      <div class="card-header"><i class="bi bi-person-badge me-2"></i><%= scoped ? 'Findings by Owner' : 'Open Exceptions by Owner' %></div>
       <div class="table-responsive" style="max-height:280px;">
         <table class="table table-sm mb-0">
           <thead><tr><th>Owner</th><th>Count</th></tr></thead>
@@ -146,13 +193,13 @@
 </div>
 
 <div class="card mb-4">
-  <div class="card-header"><i class="bi bi-graph-up-arrow me-2"></i>Rules with Open Exceptions</div>
+  <div class="card-header"><i class="bi bi-graph-up-arrow me-2"></i><%= scoped ? 'Rules in This Run' : 'Rules with Open Exceptions' %></div>
   <div class="table-responsive">
     <table class="table table-sm table-hover mb-0">
-      <thead><tr><th>Rule</th><th>Business area</th><th>Open</th><th>Worst recurrence</th><th>Last seen</th></tr></thead>
+      <thead><tr><th>Rule</th><th>Business area</th><th><%= scoped ? 'Found' : 'Open' %></th><th><%= scoped ? 'Included new items' : 'Worst recurrence' %></th><th>Last seen</th></tr></thead>
       <tbody>
         <% if (!(d.byRule || []).length) { %>
-          <tr><td colspan="5" class="text-muted small py-3">No open exceptions. Every control that has run is clean.</td></tr>
+          <tr><td colspan="5" class="text-muted small py-3"><%= scoped ? 'This run found no exceptions.' : 'No open exceptions. Every control that has run is clean.' %></td></tr>
         <% } %>
         <% (d.byRule || []).forEach(function(row) { %>
           <tr>
@@ -160,9 +207,13 @@
             <td><%= row.business_area || '-' %></td>
             <td><span class="badge bg-danger"><%= row.open_count %></span></td>
             <td>
-              <%= row.worst_recurrence %>×
-              <% if (Number(row.worst_recurrence) > 2) { %>
-                <span class="badge bg-warning text-dark ms-1" title="Seen in several runs — likely a systemic issue">recurring</span>
+              <% if (scoped) { %>
+                <%= Number(row.worst_recurrence) ? 'yes' : 'no' %>
+              <% } else { %>
+                <%= row.worst_recurrence %>×
+                <% if (Number(row.worst_recurrence) > 2) { %>
+                  <span class="badge bg-warning text-dark ms-1" title="Seen in several runs — likely a systemic issue">recurring</span>
+                <% } %>
               <% } %>
             </td>
             <td class="small"><%= row.last_seen ? new Date(row.last_seen).toLocaleString() : '-' %></td>

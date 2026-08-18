@@ -1,0 +1,249 @@
+<%- include('../partials/header') %>
+<%
+  // Runs are grouped by rule because only runs of the same rule can be compared.
+  var runsByRule = {};
+  (runs || []).forEach(function(run) {
+    var key = run.rule_id;
+    if (!runsByRule[key]) runsByRule[key] = { name: run.rule_name || ('Rule #' + run.rule_id), runs: [] };
+    runsByRule[key].runs.push(run);
+  });
+  function runLabel(run) {
+    return '#' + run.id + ' — ' + (run.started_at ? new Date(run.started_at).toLocaleString() : 'unknown date')
+      + ' (v' + run.rule_version + ', ' + (run.exception_count || 0) + ' exception(s))';
+  }
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-arrow-left-right me-2"></i>Compare Reconciliation Runs</h2>
+    <p class="text-muted mb-0">Two runs of the same control, side by side: what moved, what was fixed, and what is still failing.</p>
+  </div>
+  <a href="/reconciliation" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<% if (error) { %><div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div><% } %>
+<% if (notice) { %><div class="alert alert-info small"><i class="bi bi-info-circle me-2"></i><%= notice %></div><% } %>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-sliders me-2"></i>Select Two Runs</div>
+  <div class="card-body py-3">
+    <% if (!runs.length) { %>
+      <p class="text-muted small mb-0">No completed runs yet. Run a rule from the <a href="/reconciliation/rules">Rules</a> page first.</p>
+    <% } else { %>
+      <form method="get" action="/reconciliation/compare" class="row g-2 align-items-end">
+        <div class="col-md-5">
+          <label class="form-label small" for="fromSelect">Earlier run</label>
+          <select class="form-select form-select-sm" id="fromSelect" name="from" onchange="syncRule(this)">
+            <option value="">Select...</option>
+            <% Object.keys(runsByRule).forEach(function(ruleId) { %>
+              <optgroup label="<%= runsByRule[ruleId].name %>">
+                <% runsByRule[ruleId].runs.forEach(function(run) { %>
+                  <option value="<%= run.id %>" data-rule="<%= run.rule_id %>" <%= String(fromId) === String(run.id) ? 'selected' : '' %>><%= runLabel(run) %></option>
+                <% }) %>
+              </optgroup>
+            <% }) %>
+          </select>
+        </div>
+        <div class="col-md-5">
+          <label class="form-label small" for="toSelect">Later run</label>
+          <select class="form-select form-select-sm" id="toSelect" name="to" onchange="syncRule(this)">
+            <option value="">Select...</option>
+            <% Object.keys(runsByRule).forEach(function(ruleId) { %>
+              <optgroup label="<%= runsByRule[ruleId].name %>">
+                <% runsByRule[ruleId].runs.forEach(function(run) { %>
+                  <option value="<%= run.id %>" data-rule="<%= run.rule_id %>" <%= String(toId) === String(run.id) ? 'selected' : '' %>><%= runLabel(run) %></option>
+                <% }) %>
+              </optgroup>
+            <% }) %>
+          </select>
+        </div>
+        <div class="col-md-2">
+          <button class="btn btn-sm btn-primary w-100" type="submit"><i class="bi bi-arrow-left-right me-1"></i>Compare</button>
+        </div>
+      </form>
+      <div class="form-text mt-2" id="pairNote">
+        <i class="bi bi-info-circle me-1"></i>Pick two runs of the same rule. Different rules check different records, so their findings have nothing in common.
+      </div>
+    <% } %>
+  </div>
+</div>
+
+<% if (comparison) {
+     var verdict = verdictDefs[comparison.summary.verdict] || { label: comparison.summary.verdict, color: 'secondary' };
+%>
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span><i class="bi bi-flag me-2"></i>Verdict</span>
+      <span class="badge bg-<%= verdict.color %>"><%= verdict.label %></span>
+    </div>
+    <div class="card-body py-3">
+      <div class="row text-center g-3">
+        <div class="col-6 col-md-3">
+          <div class="fs-4 fw-bold text-danger"><%= comparison.summary.introduced %></div>
+          <div class="small text-muted">Newly failing</div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="fs-4 fw-bold text-success"><%= comparison.summary.resolved %></div>
+          <div class="small text-muted">No longer failing</div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="fs-4 fw-bold text-warning"><%= comparison.summary.persisting %></div>
+          <div class="small text-muted">Still failing</div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="fs-4 fw-bold"><%= comparison.summary.changed %></div>
+          <div class="small text-muted">Failing differently</div>
+        </div>
+      </div>
+      <p class="small text-muted mt-3 mb-0">
+        Comparing run <strong>#<%= comparison.earlier.id %></strong>
+        (<%= comparison.earlier.started_at ? new Date(comparison.earlier.started_at).toLocaleString() : '-' %>)
+        with run <strong>#<%= comparison.later.id %></strong>
+        (<%= comparison.later.started_at ? new Date(comparison.later.started_at).toLocaleString() : '-' %>).
+        <% if (comparison.reversed) { %>The pair was ordered by date, so the earlier run is on the left whichever way you picked them.<% } %>
+        <% if (comparison.versionChanged) { %>
+          <br><span class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>The rule changed between these runs
+          (v<%= comparison.earlier.rule_version %> → v<%= comparison.later.rule_version %>), so some of the movement may come from the
+          control being redefined rather than from the data changing.</span>
+        <% } %>
+      </p>
+    </div>
+  </div>
+
+  <div class="row g-4 mb-4">
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header"><i class="bi bi-bar-chart me-2"></i>Totals</div>
+        <div class="table-responsive">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Measure</th><th class="text-end">#<%= comparison.earlier.id %></th><th class="text-end">#<%= comparison.later.id %></th><th class="text-end">Change</th></tr></thead>
+            <tbody>
+              <% comparison.metrics.forEach(function(metric) {
+                   var color = metric.direction === 'improved' ? 'text-success'
+                     : metric.direction === 'worsened' ? 'text-danger' : 'text-muted'; %>
+                <tr>
+                  <td class="small"><%= metric.label %></td>
+                  <td class="text-end small"><%= metric.from === null ? '-' : metric.from %></td>
+                  <td class="text-end small"><%= metric.to === null ? '-' : metric.to %></td>
+                  <td class="text-end small <%= color %>">
+                    <% if (metric.delta === null) { %>-
+                    <% } else { %>
+                      <%= metric.delta > 0 ? '+' : '' %><%= metric.delta %>
+                      <% if (metric.percentChange !== null && metric.delta !== 0) { %>
+                        <span class="text-muted">(<%= metric.percentChange > 0 ? '+' : '' %><%= metric.percentChange %>%)</span>
+                      <% } %>
+                    <% } %>
+                  </td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header"><i class="bi bi-pie-chart me-2"></i>Findings by Type</div>
+        <div class="table-responsive">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Outcome</th><th class="text-end">#<%= comparison.earlier.id %></th><th class="text-end">#<%= comparison.later.id %></th><th class="text-end">Change</th></tr></thead>
+            <tbody>
+              <% if (!comparison.outcomes.length) { %>
+                <tr><td colspan="4" class="text-muted small py-3">Neither run raised an exception.</td></tr>
+              <% } %>
+              <% comparison.outcomes.forEach(function(row) { %>
+                <tr>
+                  <td class="small" title="<%= row.description || '' %>"><%= row.label %></td>
+                  <td class="text-end small"><%= row.from %></td>
+                  <td class="text-end small"><%= row.to %></td>
+                  <td class="text-end small <%= row.delta > 0 ? 'text-danger' : row.delta < 0 ? 'text-success' : 'text-muted' %>">
+                    <%= row.delta > 0 ? '+' : '' %><%= row.delta %>
+                  </td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <%
+    var sections = [
+      { key: 'introduced', title: 'Newly failing in run #' + comparison.later.id, color: 'danger', note: 'Present in the later run only.' },
+      { key: 'resolved', title: 'No longer failing', color: 'success', note: 'Present in the earlier run only — fixed, or no longer covered.' },
+      { key: 'changed', title: 'Failing differently', color: 'warning', note: 'In both runs, but the outcome moved.' },
+      { key: 'persisting', title: 'Still failing', color: 'secondary', note: 'Unchanged in both runs.' }
+    ];
+  %>
+  <% sections.forEach(function(section) { var group = comparison.findings[section.key]; %>
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span><i class="bi bi-list-ul me-2"></i><%= section.title %></span>
+        <span class="badge bg-<%= section.color %>"><%= group.total %></span>
+      </div>
+      <% if (!group.total) { %>
+        <div class="card-body text-muted small py-2">None. <%= section.note %></div>
+      <% } else { %>
+        <div class="table-responsive" style="max-height:320px;">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Business key</th><th>Outcome</th><th>Severity</th><th></th></tr></thead>
+            <tbody>
+              <% group.sample.forEach(function(item) { %>
+                <tr>
+                  <td class="small"><code><%= item.businessKey %></code></td>
+                  <td class="small">
+                    <% if (item.fromOutcomeLabel) { %>
+                      <span class="text-muted"><%= item.fromOutcomeLabel %></span> → <%= item.outcomeLabel %>
+                    <% } else { %><%= item.outcomeLabel %><% } %>
+                  </td>
+                  <td><span class="badge bg-<%= item.severity === 'high' ? 'danger' : item.severity === 'low' ? 'secondary' : 'warning' %>"><%= item.severity %></span></td>
+                  <td class="text-end">
+                    <% if (item.exceptionId) { %>
+                      <a href="/reconciliation/exceptions/<%= item.exceptionId %>" class="btn btn-sm btn-outline-primary p-0 px-1">Open</a>
+                    <% } %>
+                  </td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+        <% if (group.total > group.sample.length) { %>
+          <div class="card-footer small text-muted">
+            Showing <%= group.sample.length %> of <%= group.total %>. The count is exact; the list is capped so the page stays readable.
+          </div>
+        <% } %>
+      <% } %>
+    </div>
+  <% }) %>
+<% } %>
+
+<script>
+// Comparing runs of different rules is meaningless, so choosing on one side narrows
+// the other rather than letting an invalid pair be submitted.
+function syncRule(changed) {
+  var ruleId = changed.selectedOptions[0] ? changed.selectedOptions[0].getAttribute('data-rule') : null;
+  var other = document.getElementById(changed.id === 'fromSelect' ? 'toSelect' : 'fromSelect');
+  var hidden = 0;
+
+  Array.from(other.querySelectorAll('optgroup')).forEach(function(group) {
+    var option = group.querySelector('option');
+    var groupRule = option ? option.getAttribute('data-rule') : null;
+    var show = !ruleId || groupRule === ruleId;
+    group.style.display = show ? '' : 'none';
+    if (!show) hidden += 1;
+  });
+
+  var selected = other.selectedOptions[0];
+  if (ruleId && selected && selected.value && selected.getAttribute('data-rule') !== ruleId) {
+    other.value = '';
+  }
+  document.getElementById('pairNote').innerHTML = ruleId && hidden
+    ? '<i class="bi bi-funnel me-1"></i>Showing only the other runs of the same rule.'
+    : '<i class="bi bi-info-circle me-1"></i>Pick two runs of the same rule. Different rules check different records, so their findings have nothing in common.';
+}
+
+var initial = document.getElementById('fromSelect');
+if (initial && initial.value) syncRule(initial);
+</script>
+<%- include('../partials/footer') %>

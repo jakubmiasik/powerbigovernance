@@ -123,6 +123,44 @@ function describeOperand(operand) {
 const KEY_ALIAS = 'recon_key';
 function compareAlias(index, side) { return 'recon_c' + index + side; }
 
+// Identifiers reach the query as text, so they are checked against a conservative
+// pattern and bracket-quoted rather than concatenated in raw.
+function quoteIdentifier(identifier) {
+  const text = String(identifier || '').trim();
+  if (!text || !/^[A-Za-z0-9_ .$#@-]+$/.test(text)) {
+    throw new Error('Unsupported identifier in rule definition: "' + identifier + '"');
+  }
+  return text.split('.').map(part => '[' + part.trim() + ']').join('.');
+}
+
+/**
+ * The SELECT a planned rule needs from one source.
+ *
+ * Shared by every kind of source — a Fabric SQL analytics endpoint and a registered
+ * external database must read the same shape, or the two sides of a comparison
+ * would not line up. Pure text, so it can be asserted on directly.
+ */
+function buildSelectSql({ dataset, selections, columns, rowLimit }) {
+  const list = selections && selections.length
+    ? selections
+    : (columns || []).filter(Boolean).map(name => ({ alias: name, kind: 'field', value: name }));
+  if (!list.length) throw new Error('No columns selected to read.');
+
+  const projection = list.map(selection => {
+    const alias = quoteIdentifier(selection.alias || selection.value);
+    if (selection.kind === 'expression') {
+      // Validated by validateSqlExpression when the rule was saved; wrapping keeps
+      // it a single value within the SELECT list.
+      return '(' + String(selection.value).trim() + ') AS ' + alias;
+    }
+    return quoteIdentifier(selection.value) + ' AS ' + alias;
+  });
+
+  const top = Number.parseInt(rowLimit, 10);
+  const topClause = Number.isFinite(top) && top > 0 ? 'TOP (' + Math.min(top, 200000) + ') ' : '';
+  return 'SELECT ' + topClause + projection.join(', ') + ' FROM ' + quoteIdentifier(dataset);
+}
+
 /**
  * Work out what each source must return, and rewrite the rule to read those
  * results by alias.
@@ -472,6 +510,8 @@ function exceptionFingerprint(ruleId, exception) {
 module.exports = {
   OPERAND_KINDS,
   KEY_ALIAS,
+  quoteIdentifier,
+  buildSelectSql,
   validateSqlExpression,
   normalizeCompareField,
   validateCompareFields,
