@@ -1,0 +1,102 @@
+<%- include('../partials/header') %>
+<%
+  function sevColor(s) { return s === 'high' ? 'danger' : s === 'medium' ? 'warning' : 'secondary'; }
+  var statusColors = {};
+  statusDefs.forEach(function(s) { statusColors[s.key] = s.color; });
+  function ageDays(value) {
+    if (!value) return null;
+    return Math.floor((Date.now() - new Date(value).getTime()) / 86400000);
+  }
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-exclamation-triangle me-2"></i>Reconciliation Exceptions</h2>
+    <p class="text-muted mb-0">Business items that need attention, rather than every record that reconciled cleanly.</p>
+  </div>
+  <a href="/reconciliation" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+<% if (error) { %><div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div><% } %>
+
+<div class="card mb-4">
+  <div class="card-body py-3">
+    <form method="get" action="/reconciliation/exceptions" class="row g-2 align-items-end">
+      <div class="col-auto">
+        <label class="form-label small" for="statusFilter">Status</label>
+        <select class="form-select form-select-sm" id="statusFilter" name="status">
+          <option value="">Open (all unresolved)</option>
+          <% statusDefs.forEach(function(s) { %>
+            <option value="<%= s.key %>" <%= filters.status === s.key ? 'selected' : '' %>><%= s.label %></option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small" for="severityFilter">Severity</label>
+        <select class="form-select form-select-sm" id="severityFilter" name="severity">
+          <option value="">Any</option>
+          <% ['high','medium','low'].forEach(function(s) { %>
+            <option value="<%= s %>" <%= filters.severity === s ? 'selected' : '' %>><%= s %></option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small" for="outcomeFilter">Type</label>
+        <select class="form-select form-select-sm" id="outcomeFilter" name="outcome">
+          <option value="">Any</option>
+          <% outcomeDefs.filter(function(o) { return o.key !== 'match'; }).forEach(function(o) { %>
+            <option value="<%= o.key %>" <%= filters.outcome === o.key ? 'selected' : '' %>><%= o.label %></option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small" for="ruleFilter">Rule</label>
+        <select class="form-select form-select-sm" id="ruleFilter" name="ruleId">
+          <option value="">Any</option>
+          <% rules.forEach(function(rule) { %>
+            <option value="<%= rule.id %>" <%= String(filters.ruleId) === String(rule.id) ? 'selected' : '' %>><%= rule.name %></option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-auto">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="allFilter" name="all" value="1" <%= filters.all ? 'checked' : '' %>>
+          <label class="form-check-label small" for="allFilter">Include closed</label>
+        </div>
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-sm btn-primary"><i class="bi bi-funnel me-1"></i>Apply</button>
+        <a href="/reconciliation/exceptions" class="btn btn-sm btn-outline-secondary">Reset</a>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-list-task me-2"></i>Exceptions (<%= exceptions.length %>)</span>
+    <input type="text" class="form-control form-control-sm" style="max-width:260px;" placeholder="Filter by key or rule..." oninput="filterTable(this, 'recon-exceptions-table')">
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0" id="recon-exceptions-table">
+      <thead><tr><th>Business key</th><th>Rule</th><th>Type</th><th>Severity</th><th>Status</th><th>Owner</th><th>Age</th><th>Seen</th></tr></thead>
+      <tbody>
+        <% if (!exceptions.length) { %>
+          <tr data-filter="none"><td colspan="8" class="text-muted small py-3">Nothing matches. Either the controls are clean or the filters are too narrow.</td></tr>
+        <% } %>
+        <% exceptions.forEach(function(ex) { var age = ageDays(ex.first_seen_at); %>
+          <tr data-filter="<%= [ex.business_key || '', ex.rule_name || '', ex.outcome, ex.status, ex.owner || ''].join(' ').toLowerCase() %>">
+            <td><a href="/reconciliation/exceptions/<%= ex.id %>"><strong><%= ex.business_key %></strong></a></td>
+            <td class="small"><%= ex.rule_name || ('Rule #' + ex.rule_id) %><% if (ex.business_area) { %><div class="text-muted" style="font-size:0.7rem;"><%= ex.business_area %></div><% } %></td>
+            <td class="small"><%= ex.outcome %></td>
+            <td><span class="badge bg-<%= sevColor(ex.severity) %>"><%= ex.severity %></span></td>
+            <td><span class="badge bg-<%= statusColors[ex.status] || 'secondary' %>"><%= ex.status %></span></td>
+            <td class="small"><%- ex.owner ? ex.owner : '<span class="text-muted">unassigned</span>' %></td>
+            <td class="small"><%= age === null ? '-' : age + 'd' %><% if (age !== null && age > 30) { %> <span class="badge bg-danger">aged</span><% } %></td>
+            <td class="small"><%= ex.occurrence_count %>×</td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+  <div class="card-footer small text-muted">An exception seen many times is the same item failing run after run — usually a systemic problem rather than a record to fix once.</div>
+</div>
+<%- include('../partials/footer') %>

@@ -3,6 +3,7 @@ const { DefaultAzureCredential } = require('@azure/identity');
 const { convertScheduleToUtc, normalizeTimezone } = require('./scheduleTimeService');
 const { METRIC_DEFS } = require('./runMetricsService');
 const { getConfig } = require('../config/settings');
+const { RECONCILIATION_MIGRATIONS } = require('./reconciliationSchema');
 const { encryptSecret, isEncryptionConfigured } = require('./secretCryptoService');
 
 const cfg = getConfig();
@@ -943,6 +944,11 @@ async function runMigrations() {
     await runStatement(conn, 'add service_principals.key_vault_secret_name', `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'key_vault_secret_name') ALTER TABLE service_principals ADD key_vault_secret_name NVARCHAR(255) NULL`);
     // Make client_secret nullable (it may already be)
     await runStatement(conn, 'relax service_principals.client_secret', `IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'client_secret' AND is_nullable = 0) ALTER TABLE service_principals ALTER COLUMN client_secret NVARCHAR(MAX) NULL`);
+    // Reconciliation engine tables
+    for (const migration of RECONCILIATION_MIGRATIONS) {
+      await runStatement(conn, migration.label, migration.sql);
+    }
+
     console.log('[DB] Migrations complete.');
   } catch (err) {
     console.warn('[DB] Migration warning:', err.message);
@@ -980,4 +986,6 @@ module.exports = {
   getScheduleHistory,
   getLastScheduleExecutions,
   _private: { buildInsert, buildUpdate, extractProblemColumns },
+  // SQL primitives shared with feature-specific repositories.
+  _sql: { getConnection, execSql, TYPES, execWithColumnFallback, buildInsert, buildUpdate },
 };

@@ -1,0 +1,207 @@
+<%- include('../partials/header') %>
+<%
+  var d = data || {};
+  function total(rows, key, value) {
+    var row = (rows || []).find(function(r) { return String(r[key]) === value; });
+    return row ? Number(row.total) : 0;
+  }
+  var rules = d.rules || [];
+  var activeRules = total(rules, 'status', 'active');
+  var draftRules = total(rules, 'status', 'draft');
+  var retiredRules = total(rules, 'status', 'retired');
+  var openExceptions = (d.exceptionsByStatus || []).filter(function(r) {
+    return ['resolved', 'accepted'].indexOf(String(r.status)) === -1;
+  }).reduce(function(sum, r) { return sum + Number(r.total); }, 0);
+  var severity = d.exceptionsBySeverity || [];
+  var ageing = d.ageing || {};
+%>
+
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-clipboard2-check me-2"></i>Data Reconciliation</h2>
+    <p class="text-muted mb-0">Verify that critical records are complete, accurate and consistent across business systems.</p>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    <a href="/reconciliation/sources" class="btn btn-sm btn-outline-secondary"><i class="bi bi-database me-1"></i>Sources</a>
+    <a href="/reconciliation/rules" class="btn btn-sm btn-outline-primary"><i class="bi bi-list-check me-1"></i>Rules</a>
+    <a href="/reconciliation/runs" class="btn btn-sm btn-outline-primary"><i class="bi bi-play-circle me-1"></i>Runs</a>
+    <a href="/reconciliation/exceptions" class="btn btn-sm btn-primary"><i class="bi bi-exclamation-triangle me-1"></i>Exceptions</a>
+  </div>
+</div>
+
+<% if (error) { %>
+  <div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div>
+<% } %>
+
+<div class="row g-3 mb-4">
+  <div class="col-sm-6 col-xl-2">
+    <a href="/reconciliation/rules" class="text-decoration-none text-reset">
+      <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+        <div class="text-primary mb-2"><i class="bi bi-list-check"></i></div>
+        <div class="fs-3 fw-bold text-primary"><%= activeRules %></div>
+        <div class="small">Active Rules</div>
+        <div class="text-muted" style="font-size:0.7rem;"><%= draftRules %> draft / <%= retiredRules %> retired</div>
+      </div></div>
+    </a>
+  </div>
+  <div class="col-sm-6 col-xl-2">
+    <a href="/reconciliation/exceptions" class="text-decoration-none text-reset">
+      <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+        <div class="text-danger mb-2"><i class="bi bi-exclamation-triangle"></i></div>
+        <div class="fs-3 fw-bold text-danger"><%= openExceptions %></div>
+        <div class="small">Open Exceptions</div>
+      </div></div>
+    </a>
+  </div>
+  <div class="col-sm-6 col-xl-2">
+    <a href="/reconciliation/exceptions?severity=high" class="text-decoration-none text-reset">
+      <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+        <div class="text-danger mb-2"><i class="bi bi-fire"></i></div>
+        <div class="fs-3 fw-bold text-danger"><%= total(severity, 'severity', 'high') %></div>
+        <div class="small">High Severity</div>
+      </div></div>
+    </a>
+  </div>
+  <div class="col-sm-6 col-xl-2">
+    <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+      <div class="text-success mb-2"><i class="bi bi-hourglass-top"></i></div>
+      <div class="fs-3 fw-bold text-success"><%= ageing.week1 || 0 %></div>
+      <div class="small">Aged ≤ 7 days</div>
+    </div></div>
+  </div>
+  <div class="col-sm-6 col-xl-2">
+    <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+      <div class="text-warning mb-2"><i class="bi bi-hourglass-split"></i></div>
+      <div class="fs-3 fw-bold text-warning"><%= ageing.month1 || 0 %></div>
+      <div class="small">8–30 days</div>
+    </div></div>
+  </div>
+  <div class="col-sm-6 col-xl-2">
+    <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+      <div class="text-danger mb-2"><i class="bi bi-hourglass-bottom"></i></div>
+      <div class="fs-3 fw-bold text-danger"><%= ageing.older || 0 %></div>
+      <div class="small">Over 30 days</div>
+    </div></div>
+  </div>
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-lg-4">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-pie-chart me-2"></i>Open Exceptions by Type</div>
+      <div class="table-responsive">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Outcome</th><th>Count</th></tr></thead>
+          <tbody>
+            <% (outcomeDefs || []).filter(function(o) { return o.key !== 'match'; }).forEach(function(o) {
+                 var count = total(d.exceptionsByOutcome, 'outcome', o.key); %>
+              <tr class="<%= count ? '' : 'text-muted' %>">
+                <td><a href="/reconciliation/exceptions?outcome=<%= o.key %>" title="<%= o.description %>"><%= o.label %></a></td>
+                <td><strong><%= count %></strong></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-diagram-2 me-2"></i>Exceptions by Status</div>
+      <div class="table-responsive">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Status</th><th>Count</th></tr></thead>
+          <tbody>
+            <% (statusDefs || []).forEach(function(s) { var count = total(d.exceptionsByStatus, 'status', s.key); %>
+              <tr class="<%= count ? '' : 'text-muted' %>">
+                <td><span class="badge bg-<%= s.color %>"><%= s.label %></span></td>
+                <td><strong><%= count %></strong></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-person-badge me-2"></i>Open Exceptions by Owner</div>
+      <div class="table-responsive" style="max-height:280px;">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Owner</th><th>Count</th></tr></thead>
+          <tbody>
+            <% if (!(d.byOwner || []).length) { %>
+              <tr><td colspan="2" class="text-muted small">Nothing open.</td></tr>
+            <% } %>
+            <% (d.byOwner || []).forEach(function(row) { %>
+              <tr><td><%= row.owner %></td><td><strong><%= row.total %></strong></td></tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-graph-up-arrow me-2"></i>Rules with Open Exceptions</div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead><tr><th>Rule</th><th>Business area</th><th>Open</th><th>Worst recurrence</th><th>Last seen</th></tr></thead>
+      <tbody>
+        <% if (!(d.byRule || []).length) { %>
+          <tr><td colspan="5" class="text-muted small py-3">No open exceptions. Every control that has run is clean.</td></tr>
+        <% } %>
+        <% (d.byRule || []).forEach(function(row) { %>
+          <tr>
+            <td><a href="/reconciliation/exceptions?ruleId=<%= row.rule_id %>"><%= row.rule_name || ('Rule #' + row.rule_id) %></a></td>
+            <td><%= row.business_area || '-' %></td>
+            <td><span class="badge bg-danger"><%= row.open_count %></span></td>
+            <td>
+              <%= row.worst_recurrence %>×
+              <% if (Number(row.worst_recurrence) > 2) { %>
+                <span class="badge bg-warning text-dark ms-1" title="Seen in several runs — likely a systemic issue">recurring</span>
+              <% } %>
+            </td>
+            <td class="small"><%= row.last_seen ? new Date(row.last_seen).toLocaleString() : '-' %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+  <div class="card-footer small text-muted">
+    A high recurrence count means the same item keeps failing across runs — usually a process or integration problem rather than a one-off record to correct.
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span><i class="bi bi-clock-history me-2"></i>Recent Runs</span>
+    <a href="/reconciliation/runs" class="btn btn-sm btn-outline-primary">All runs</a>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead><tr><th>Run</th><th>Rule</th><th>Status</th><th>Checked</th><th>Matched</th><th>Exceptions</th><th>When</th></tr></thead>
+      <tbody>
+        <% if (!(d.recentRuns || []).length) { %>
+          <tr><td colspan="7" class="text-muted small py-3">No reconciliation runs yet.</td></tr>
+        <% } %>
+        <% (d.recentRuns || []).forEach(function(run) { %>
+          <tr>
+            <td><a href="/reconciliation/runs/<%= run.id %>">#<%= run.id %></a></td>
+            <td><%= run.rule_name || ('Rule #' + run.rule_id) %><span class="text-muted small"> v<%= run.rule_version %></span></td>
+            <td><span class="badge bg-<%= run.status === 'completed' ? 'success' : run.status === 'failed' ? 'danger' : 'secondary' %>"><%= run.status %></span></td>
+            <td><%= (run.keys_compared === null || run.keys_compared === undefined) ? '-' : run.keys_compared %></td>
+            <td><%= (run.matched === null || run.matched === undefined) ? '-' : run.matched %></td>
+            <td><%- run.exception_count ? '<span class="badge bg-danger">' + run.exception_count + '</span>' : (run.status === 'completed' ? '<span class="badge bg-success">0</span>' : '-') %></td>
+            <td class="small"><%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<%- include('../partials/footer') %>

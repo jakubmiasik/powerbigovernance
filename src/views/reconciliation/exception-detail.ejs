@@ -1,0 +1,192 @@
+<%- include('../partials/header') %>
+<%
+  var statusColors = {}; var statusLabels = {};
+  statusDefs.forEach(function(s) { statusColors[s.key] = s.color; statusLabels[s.key] = s.label; });
+  var outcome = outcomeDefs.find(function(o) { return o.key === exception.outcome; }) || { label: exception.outcome, description: '' };
+  var valueKeys = Object.keys(Object.assign({}, exception.valuesA || {}, exception.valuesB || {}));
+  var diffByField = {};
+  (exception.differences || []).forEach(function(d) { diffByField[d.field] = d; });
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-exclamation-triangle me-2"></i><%= exception.business_key %></h2>
+    <p class="text-muted mb-0">
+      <%= exception.rule_name || ('Rule #' + exception.rule_id) %>
+      <% if (exception.business_area) { %> · <%= exception.business_area %><% } %>
+      · first seen <%= exception.first_seen_at ? new Date(exception.first_seen_at).toLocaleString() : '-' %>
+      · seen <%= exception.occurrence_count %>×
+    </p>
+  </div>
+  <a href="/reconciliation/exceptions" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-sm-6 col-xl-3"><div class="card h-100 stat-card"><div class="card-body py-3 text-center">
+    <div class="small text-muted mb-1">Discrepancy</div>
+    <div class="fw-bold"><%= outcome.label %></div>
+    <div class="text-muted" style="font-size:0.7rem;"><%= outcome.description %></div></div></div></div>
+  <div class="col-sm-6 col-xl-3"><div class="card h-100 stat-card"><div class="card-body py-3 text-center">
+    <div class="small text-muted mb-1">Severity</div>
+    <span class="badge bg-<%= exception.severity === 'high' ? 'danger' : exception.severity === 'medium' ? 'warning' : 'secondary' %> fs-6"><%= exception.severity %></span></div></div></div>
+  <div class="col-sm-6 col-xl-3"><div class="card h-100 stat-card"><div class="card-body py-3 text-center">
+    <div class="small text-muted mb-1">Status</div>
+    <span class="badge bg-<%= statusColors[exception.status] || 'secondary' %> fs-6"><%= statusLabels[exception.status] || exception.status %></span></div></div></div>
+  <div class="col-sm-6 col-xl-3"><div class="card h-100 stat-card"><div class="card-body py-3 text-center">
+    <div class="small text-muted mb-1">Owner</div>
+    <div class="fw-bold"><%= exception.owner || 'Unassigned' %></div></div></div></div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-arrow-left-right me-2"></i>Values in Each System</div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0">
+      <thead><tr><th>Value</th><th>Source A</th><th>Source B</th><th>Difference</th></tr></thead>
+      <tbody>
+        <% if (!valueKeys.length) { %>
+          <tr><td colspan="4" class="text-muted small">No comparable values were captured — the record is missing from one side.</td></tr>
+        <% } %>
+        <% valueKeys.forEach(function(key) {
+             var a = exception.valuesA ? exception.valuesA[key] : null;
+             var b = exception.valuesB ? exception.valuesB[key] : null;
+             var diff = diffByField[key]; %>
+          <tr class="<%= diff ? 'table-warning' : '' %>">
+            <td><strong><%= key %></strong></td>
+            <td class="small"><%= a === null || a === undefined ? '—' : a %></td>
+            <td class="small"><%= b === null || b === undefined ? '—' : b %></td>
+            <td class="small">
+              <% if (!diff) { %><span class="text-success">aligned</span>
+              <% } else if (diff.difference !== null && diff.difference !== undefined) { %>
+                <span class="text-danger"><%= diff.difference > 0 ? '+' : '' %><%= diff.difference %></span>
+              <% } else { %><span class="text-danger"><%= diff.reason || 'differs' %></span><% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+  <% if ((exception.differences || []).length) { %>
+    <div class="card-footer small">
+      <strong>Why this was raised:</strong>
+      <ul class="mb-0 mt-1">
+        <% exception.differences.forEach(function(d) { %>
+          <li><%= d.field %><%= d.reason ? ' — ' + d.reason : '' %></li>
+        <% }) %>
+      </ul>
+    </div>
+  <% } %>
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-lg-5">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-check2-square me-2"></i>Take Action</div>
+      <div class="card-body py-3">
+        <label class="form-label small" for="assignOwner">Assign owner</label>
+        <div class="input-group input-group-sm mb-3">
+          <input type="text" class="form-control" id="assignOwner" value="<%= exception.owner || '' %>" placeholder="name@company.com">
+          <button class="btn btn-outline-primary" onclick="assignOwner()">Assign</button>
+        </div>
+
+        <label class="form-label small" for="newStatus">Move to status</label>
+        <select class="form-select form-select-sm mb-2" id="newStatus" onchange="toggleReason()">
+          <option value="">Select...</option>
+          <% allowedNext.forEach(function(next) { %>
+            <option value="<%= next %>"><%= statusLabels[next] || next %></option>
+          <% }) %>
+        </select>
+        <div id="reasonWrap" class="mb-2 d-none">
+          <label class="form-label small" for="resolutionReason">Reason (required to close)</label>
+          <input type="text" class="form-control form-control-sm" id="resolutionReason" placeholder="Cause and action taken">
+        </div>
+        <label class="form-label small" for="statusComment">Comment</label>
+        <input type="text" class="form-control form-control-sm mb-2" id="statusComment" placeholder="Optional note for the audit trail">
+        <button class="btn btn-sm btn-primary w-100" onclick="changeStatus()"><i class="bi bi-arrow-right-circle me-1"></i>Apply</button>
+
+        <hr>
+        <label class="form-label small" for="commentText">Add a comment</label>
+        <div class="input-group input-group-sm">
+          <input type="text" class="form-control" id="commentText" placeholder="Investigation note">
+          <button class="btn btn-outline-primary" onclick="addComment()">Add</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-7">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-clock-history me-2"></i>History (<%= events.length %>)</div>
+      <div class="table-responsive" style="max-height:420px;">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>When</th><th>Action</th><th>Detail</th><th>By</th></tr></thead>
+          <tbody>
+            <% if (!events.length) { %><tr><td colspan="4" class="text-muted small">No history recorded.</td></tr><% } %>
+            <% events.forEach(function(ev) { %>
+              <tr>
+                <td class="small text-nowrap"><%= ev.occurred_at ? new Date(ev.occurred_at).toLocaleString() : '-' %></td>
+                <td class="small"><span class="badge bg-light text-dark border"><%= ev.action %></span></td>
+                <td class="small">
+                  <% if (ev.from_status || ev.to_status) { %>
+                    <%= statusLabels[ev.from_status] || ev.from_status || '—' %> &rarr; <strong><%= statusLabels[ev.to_status] || ev.to_status %></strong><br>
+                  <% } %>
+                  <%= ev.comment || '' %>
+                </td>
+                <td class="small"><%= ev.actor || '-' %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+      <% if (exception.resolution_reason) { %>
+        <div class="card-footer small"><strong>Recorded reason:</strong> <%= exception.resolution_reason %></div>
+      <% } %>
+    </div>
+  </div>
+</div>
+
+<script>
+var exceptionId = <%= exception.id %>;
+
+function toggleReason() {
+  var status = document.getElementById('newStatus').value;
+  var closing = status === 'resolved' || status === 'accepted';
+  document.getElementById('reasonWrap').classList.toggle('d-none', !closing);
+}
+
+async function post(url, body) {
+  var resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return resp.json();
+}
+
+async function changeStatus() {
+  var status = document.getElementById('newStatus').value;
+  if (!status) { showToast('Pick a status', 'error'); return; }
+  try {
+    var data = await post('/reconciliation/exceptions/' + exceptionId + '/status', {
+      status: status,
+      owner: document.getElementById('assignOwner').value.trim() || null,
+      comment: document.getElementById('statusComment').value.trim() || null,
+      reason: document.getElementById('resolutionReason').value.trim() || null
+    });
+    if (data.success) window.location.reload(); else showToast(data.message, 'error');
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function assignOwner() {
+  try {
+    var data = await post('/reconciliation/exceptions/' + exceptionId + '/assign', {
+      owner: document.getElementById('assignOwner').value.trim() || null
+    });
+    if (data.success) window.location.reload(); else showToast(data.message, 'error');
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function addComment() {
+  try {
+    var data = await post('/reconciliation/exceptions/' + exceptionId + '/comment', {
+      comment: document.getElementById('commentText').value.trim()
+    });
+    if (data.success) window.location.reload(); else showToast(data.message, 'error');
+  } catch (e) { showToast(e.message, 'error'); }
+}
+</script>
+<%- include('../partials/footer') %>

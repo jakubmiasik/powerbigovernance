@@ -540,6 +540,30 @@ function createPowerBIService(spConfig, authOptions = {}) {
     return [...tables.values()].sort((a, b) => a.schema.localeCompare(b.schema) || a.name.localeCompare(b.name));
   }
 
+  // Reads business rows from a SQL analytics endpoint for reconciliation.
+  //
+  // Identifiers are validated and bracket-quoted rather than interpolated raw:
+  // dataset and column names arrive from user-authored rules, so they are treated
+  // as untrusted input even though only readers can reach this path.
+  async function readSqlEndpointRows(endpoint, { dataset, columns, rowLimit }) {
+    const quote = (identifier) => {
+      const text = String(identifier || '').trim();
+      if (!text || !/^[A-Za-z0-9_ .$#@-]+$/.test(text)) {
+        throw new Error('Unsupported identifier in rule definition: "' + identifier + '"');
+      }
+      return text.split('.').map(part => '[' + part.trim() + ']').join('.');
+    };
+
+    const columnList = (columns || []).filter(Boolean);
+    if (!columnList.length) throw new Error('No columns selected to read.');
+    const top = Number.parseInt(rowLimit, 10);
+    const topClause = Number.isFinite(top) && top > 0 ? 'TOP (' + Math.min(top, 200000) + ') ' : '';
+
+    const sql = 'SELECT ' + topClause + columnList.map(quote).join(', ') + ' FROM ' + quote(dataset);
+    const token = await getSqlTokenForSP(spConfig);
+    return querySqlEndpoint(endpoint.connectionString, endpoint.database, token, sql);
+  }
+
   // ── Tenant settings: Fabric Admin API ──
   // GET https://api.fabric.microsoft.com/v1/admin/tenantsettings
   // Needs Tenant.Read.All (or Tenant.ReadWrite.All) on the service principal.
@@ -1063,6 +1087,7 @@ function createPowerBIService(spConfig, authOptions = {}) {
     getOneLakeBreakdown,
     getSqlEndpointInfo,
     getSqlEndpointSchema,
+    readSqlEndpointRows,
     scanWorkspaces,
     getScanStatus,
     getScanResult,

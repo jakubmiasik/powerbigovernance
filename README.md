@@ -12,6 +12,7 @@ A web application to investigate and govern Power BI workspaces, reports, datase
 - **Governance Dashboard** — Tenant-wide metrics: capacity distribution, workspace states, refresh failures
 - **Configurable Connection** — Set up service principal credentials via UI or environment variables
 - **Entra ID Authentication** — Protect the app with Microsoft Entra ID sign-in (optional)
+- **Data Reconciliation** — Define controls that verify records agree between two business systems, run them, and manage the resulting exceptions through a controlled lifecycle
 
 ## Prerequisites
 
@@ -123,6 +124,24 @@ src/
 | `GET /dashboards/{id}/tiles` | Dashboard tiles |
 | `GET /capacities` | Available capacities |
 | `POST /admin/workspaces/getInfo` | Workspace scanner |
+
+## Data Reconciliation
+
+Verifies that records representing the same business event exist and agree across two systems — an invoice in an ERP and the same invoice in the reporting platform, for example.
+
+| Page | Purpose |
+|---|---|
+| `/reconciliation` | Oversight: active rules, open exceptions by type, severity, owner and age, rules with recurring discrepancies, recent runs |
+| `/reconciliation/sources` | Register the systems to compare and browse their datasets and fields |
+| `/reconciliation/rules` | Create, version, activate and retire controls; run one or more of them |
+| `/reconciliation/runs` | Full run history: what was checked, when, under which rule version, and what it produced |
+| `/reconciliation/exceptions` | Investigate, assign, comment and resolve discrepancies |
+
+Sources are Fabric SQL analytics endpoints (lakehouses and warehouses). Their schema comes from the artifact details already collected by an analysis run, so browsing available fields costs no extra API calls.
+
+Outcomes are match, missing from source A, missing from source B, value mismatch, duplicate record, and invalid or incomplete key. Numeric and date comparisons support tolerances so agreed-immaterial differences do not raise exceptions.
+
+Exceptions follow a controlled lifecycle — open, acknowledged, in investigation, resolved, ignored/accepted — and unsupported transitions are refused. Closing one requires a recorded reason. Every rule change, run, assignment, comment and decision is retained for audit, and an exception seen again after being closed is reopened with a note rather than silently staying closed.
 
 ## Operational Notes
 

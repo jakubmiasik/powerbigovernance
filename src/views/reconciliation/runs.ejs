@@ -1,0 +1,44 @@
+<%- include('../partials/header') %>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-play-circle me-2"></i>Reconciliation Runs</h2>
+    <p class="text-muted mb-0">Every run is kept: what was checked, when, which rule version, and what it produced.</p>
+  </div>
+  <a href="/reconciliation" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+<% if (error) { %><div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div><% } %>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-clock-history me-2"></i>Run History (<%= runs.length %>)</span>
+    <input type="text" class="form-control form-control-sm" style="max-width:260px;" placeholder="Filter runs..." oninput="filterTable(this, 'recon-runs-table')">
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0" id="recon-runs-table">
+      <thead><tr><th>Run</th><th>Rule</th><th>Version</th><th>Status</th><th>Source A</th><th>Source B</th><th>Compared</th><th>Matched</th><th>Exceptions</th><th>Started</th><th>By</th></tr></thead>
+      <tbody>
+        <% if (!runs.length) { %><tr data-filter="none"><td colspan="11" class="text-muted small py-3">No runs yet. Activate a rule and run it from the Rules page.</td></tr><% } %>
+        <% runs.forEach(function(run) { %>
+          <tr data-filter="<%= [run.rule_name || '', run.status, run.run_by || ''].join(' ').toLowerCase() %>">
+            <td><a href="/reconciliation/runs/<%= run.id %>">#<%= run.id %></a></td>
+            <td><%= run.rule_name || ('Rule #' + run.rule_id) %></td>
+            <td class="small">v<%= run.rule_version %></td>
+            <td><span class="badge bg-<%= run.status === 'completed' ? 'success' : run.status === 'failed' ? 'danger' : 'secondary' %>"><%= run.status %></span></td>
+            <td><%= run.records_a === null || run.records_a === undefined ? '-' : run.records_a %></td>
+            <td><%= run.records_b === null || run.records_b === undefined ? '-' : run.records_b %></td>
+            <td><%= run.keys_compared === null || run.keys_compared === undefined ? '-' : run.keys_compared %></td>
+            <td><%= run.matched === null || run.matched === undefined ? '-' : run.matched %></td>
+            <td>
+              <% if (run.status !== 'completed') { %>-
+              <% } else if (run.exception_count) { %><span class="badge bg-danger"><%= run.exception_count %></span>
+              <% } else { %><span class="badge bg-success">0</span><% } %>
+            </td>
+            <td class="small"><%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %></td>
+            <td class="small"><%= run.run_by || '-' %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+<%- include('../partials/footer') %>
