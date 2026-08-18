@@ -134,7 +134,12 @@
       var lockedRunId = typeof lockedRun !== 'undefined' && lockedRun ? lockedRun.id : null;
       var runSelectorValue = runSelectorLocked && lockedRunId ? lockedRunId : (typeof selectedRunId !== 'undefined' ? selectedRunId : null);
     %>
-    <% if (typeof availableRuns !== 'undefined' && availableRuns && availableRuns.length > 0) { %>
+    <%
+      // Pages that have nothing to do with an analysis scan hide the selector
+      // entirely, rather than showing a control that does not affect them.
+      var suppressRunSelector = typeof hideRunSelector !== 'undefined' && hideRunSelector;
+    %>
+    <% if (!suppressRunSelector && typeof availableRuns !== 'undefined' && availableRuns && availableRuns.length > 0) { %>
       <div class="run-selector-bar">
         <span class="fw-bold small text-nowrap" style="color: var(--color-primary);"><i class="bi bi-building me-1"></i>Service Principal / Scan:</span>
         <select class="form-select form-select-sm" style="max-width: 440px;" id="globalRunSelector" onchange="switchGlobalRun(this.value)" <%= runSelectorLocked ? 'disabled' : '' %>>

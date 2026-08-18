@@ -98,11 +98,14 @@
   </div>
   <div class="table-responsive">
     <table class="table table-sm mb-0" id="compareFieldsTable">
-      <thead><tr><th>Label</th><th>Field in A</th><th>Field in B</th><th>Type</th><th>Tolerance</th><th></th></tr></thead>
+      <thead><tr><th>Label</th><th style="min-width:210px;">Source A</th><th style="min-width:210px;">Source B</th><th>Type</th><th>Tolerance</th><th></th></tr></thead>
       <tbody id="compareFieldsBody"></tbody>
     </table>
   </div>
   <div class="card-footer small text-muted">
+    Each side can be a <strong>field</strong>, a <strong>SQL expression</strong> evaluated by that source
+    (<code>TRIM(Customer)</code>, <code>CASE WHEN Status = 1 THEN 'Posted' ELSE 'Draft' END</code>), or a
+    fixed <strong>value</strong> to check a column against.<br>
     Tolerance accepts differences the business has agreed are immaterial — a rounding difference on tax, or a date that may land a day either side.
   </div>
 </div>
@@ -173,6 +176,17 @@ var saved = {
 };
 var datasetsBySide = { A: [], B: [] };
 
+// Rules saved before expressions and constants existed carry plain fieldA/fieldB.
+savedFields = savedFields.map(function(f) {
+  return {
+    label: f.label || '',
+    a: f.a || { kind: 'field', value: f.fieldA || '' },
+    b: f.b || { kind: 'field', value: f.fieldB || '' },
+    type: f.type || 'string',
+    tolerance: f.tolerance || null
+  };
+});
+
 document.addEventListener('DOMContentLoaded', function() {
   renderCompareFields();
   ['A', 'B'].forEach(function(side) { if (document.getElementById('source' + side).value) loadDatasets(side, true); });
@@ -227,6 +241,33 @@ function fieldOptions(side, selected) {
   }).join('');
 }
 
+function operandCell(index, side) {
+  var field = savedFields[index];
+  var operand = field[side] || { kind: 'field', value: '' };
+  var upper = side.toUpperCase();
+  var kindSelect = '<select class="form-select form-select-sm mb-1" onchange="updateOperand(' + index + ', \'' + side + '\', \'kind\', this.value)">' +
+    [['field', 'Field'], ['expression', 'SQL expression'], ['constant', 'Fixed value']].map(function(opt) {
+      return '<option value="' + opt[0] + '"' + (operand.kind === opt[0] ? ' selected' : '') + '>' + opt[1] + '</option>';
+    }).join('') + '</select>';
+
+  var input;
+  if (operand.kind === 'field') {
+    input = '<select class="form-select form-select-sm" onchange="updateOperand(' + index + ', \'' + side + '\', \'value\', this.value)">' +
+      fieldOptions(upper, operand.value) + '</select>';
+  } else if (operand.kind === 'expression') {
+    input = '<input type="text" class="form-control form-control-sm font-monospace" value="' + escapeAttr(operand.value) +
+      '" placeholder="TRIM(Customer)" oninput="updateOperand(' + index + ', \'' + side + '\', \'value\', this.value)">';
+  } else {
+    input = '<input type="text" class="form-control form-control-sm" value="' + escapeAttr(operand.value) +
+      '" placeholder="e.g. Posted, 0, EUR" oninput="updateOperand(' + index + ', \'' + side + '\', \'value\', this.value)">';
+  }
+  return '<td>' + kindSelect + input + '</td>';
+}
+
+function escapeAttr(value) {
+  return String(value == null ? '' : value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
 function renderCompareFields() {
   var body = document.getElementById('compareFieldsBody');
   if (!savedFields.length) {
@@ -235,9 +276,9 @@ function renderCompareFields() {
   }
   body.innerHTML = savedFields.map(function(f, i) {
     return '<tr>' +
-      '<td><input type="text" class="form-control form-control-sm" value="' + (f.label || '') + '" oninput="updateField(' + i + ', \'label\', this.value)" placeholder="Net amount"></td>' +
-      '<td><select class="form-select form-select-sm" onchange="updateField(' + i + ', \'fieldA\', this.value)">' + fieldOptions('A', f.fieldA) + '</select></td>' +
-      '<td><select class="form-select form-select-sm" onchange="updateField(' + i + ', \'fieldB\', this.value)">' + fieldOptions('B', f.fieldB) + '</select></td>' +
+      '<td><input type="text" class="form-control form-control-sm" value="' + escapeAttr(f.label || '') + '" oninput="updateField(' + i + ', \'label\', this.value)" placeholder="Net amount"></td>' +
+      operandCell(i, 'a') +
+      operandCell(i, 'b') +
       '<td><select class="form-select form-select-sm" onchange="updateField(' + i + ', \'type\', this.value)">' +
         ['string', 'number', 'date'].map(function(t) {
           return '<option value="' + t + '"' + ((f.type || 'string') === t ? ' selected' : '') + '>' + t + '</option>';
@@ -255,7 +296,18 @@ function renderCompareFields() {
   }).join('');
 }
 
-function addCompareField() { savedFields.push({ label: '', fieldA: '', fieldB: '', type: 'string' }); renderCompareFields(); }
+function updateOperand(index, side, key, value) {
+  var field = savedFields[index];
+  field[side] = field[side] || { kind: 'field', value: '' };
+  field[side][key] = value;
+  // Switching kind clears a value that no longer makes sense for it.
+  if (key === 'kind') { field[side].value = ''; renderCompareFields(); }
+}
+
+function addCompareField() {
+  savedFields.push({ label: '', a: { kind: 'field', value: '' }, b: { kind: 'field', value: '' }, type: 'string' });
+  renderCompareFields();
+}
 function removeField(i) { savedFields.splice(i, 1); renderCompareFields(); }
 function updateField(i, key, value) { savedFields[i][key] = value; }
 function updateTolerance(i, key, value) {
