@@ -1177,3 +1177,195 @@ test('the pipeline grant redirect resolves the async auth URL', async () => {
     delete require.cache[require.resolve('../src/routes/pipelines')];
   }
 });
+
+// ── Data reconciliation engine ──
+const recon = require('../src/services/reconciliationService');
+
+const INVOICE_RULE = {
+  keyFieldA: 'InvoiceNumber',
+  keyFieldB: 'Invoice_No',
+  priority: 'medium',
+  compareFields: [
+    { label: 'Customer', fieldA: 'Customer', fieldB: 'CustomerName', type: 'string' },
+    { label: 'Net amount', fieldA: 'NetAmount', fieldB: 'Net', type: 'number' },
+  ],
+};
+
+test('reconciliation matches records that agree in both systems', () => {
+  const result = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: 'INV-1', CustomerName: 'Acme', Net: 100 }],
+    rule: INVOICE_RULE,
+  });
+  assert.equal(result.summary.matched, 1);
+  assert.equal(result.summary.exceptions, 0);
+  assert.equal(result.summary.passed, true);
+  assert.deepEqual(result.exceptions, []);
+});
+
+test('reconciliation reports which system a record is missing from', () => {
+  const result = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: 'INV-2', CustomerName: 'Beta', Net: 50 }],
+    rule: INVOICE_RULE,
+  });
+  const byOutcome = Object.fromEntries(result.exceptions.map(e => [e.businessKey, e.outcome]));
+  assert.equal(byOutcome['INV-1'], recon.OUTCOME.MISSING_FROM_B);
+  assert.equal(byOutcome['INV-2'], recon.OUTCOME.MISSING_FROM_A);
+  assert.equal(result.summary.matched, 0);
+  assert.equal(result.summary.passed, false);
+});
+
+test('reconciliation reports the specific values that differ', () => {
+  const result = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: 'INV-1', CustomerName: 'Acme Corp', Net: 120 }],
+    rule: INVOICE_RULE,
+  });
+  assert.equal(result.exceptions.length, 1);
+  const exception = result.exceptions[0];
+  assert.equal(exception.outcome, recon.OUTCOME.VALUE_MISMATCH);
+  assert.deepEqual(exception.differences.map(d => d.field), ['Customer', 'Net amount']);
+  // The amount difference is quantified, not just flagged.
+  assert.equal(exception.differences[1].difference, 20);
+  assert.deepEqual(exception.valuesA, { Customer: 'Acme', 'Net amount': 100 });
+});
+
+test('reconciliation accepts differences inside an agreed tolerance', () => {
+  const rule = {
+    ...INVOICE_RULE,
+    compareFields: [
+      { label: 'Tax', fieldA: 'Tax', fieldB: 'TaxAmount', type: 'number', tolerance: { type: 'absolute', value: 0.02 } },
+    ],
+  };
+  const within = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Tax: 19.99 }],
+    rowsB: [{ Invoice_No: 'INV-1', TaxAmount: 20.00 }],
+    rule,
+  });
+  assert.equal(within.summary.matched, 1, 'a one-cent rounding difference is immaterial');
+
+  const outside = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Tax: 19.00 }],
+    rowsB: [{ Invoice_No: 'INV-1', TaxAmount: 20.00 }],
+    rule,
+  });
+  assert.equal(outside.summary.exceptions, 1, 'a whole unit is not');
+});
+
+test('percentage tolerance scales with the value being compared', () => {
+  const field = { fieldA: 'a', fieldB: 'b', type: 'number', tolerance: { type: 'percent', value: 1 } };
+  assert.equal(recon.compareValues(1000, 1005, field).equal, true);
+  assert.equal(recon.compareValues(1000, 1050, field).equal, false);
+  // A percentage of zero has no meaning, so it falls back to an exact comparison.
+  assert.equal(recon.compareValues(0, 5, field).equal, false);
+});
+
+test('reconciliation flags duplicate business keys instead of guessing', () => {
+  const rows = {
+    rowsA: [
+      { InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 },
+      { InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 },
+    ],
+    rowsB: [{ Invoice_No: 'INV-1', CustomerName: 'Acme', Net: 100 }],
+  };
+  const flagged = recon.reconcile({ ...rows, rule: INVOICE_RULE });
+  assert.equal(flagged.exceptions[0].outcome, recon.OUTCOME.DUPLICATE);
+  assert.equal(flagged.exceptions[0].countA, 2);
+
+  // A rule may instead accept the first record when duplicates are expected.
+  const tolerated = recon.reconcile({ ...rows, rule: { ...INVOICE_RULE, duplicateHandling: 'first' } });
+  assert.equal(tolerated.summary.matched, 1);
+  assert.equal(tolerated.summary.exceptions, 0);
+});
+
+test('records with a blank business key are reported, never matched together', () => {
+  const result = recon.reconcile({
+    rowsA: [{ InvoiceNumber: '', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: '   ', CustomerName: 'Beta', Net: 50 }],
+    rule: INVOICE_RULE,
+  });
+  assert.equal(result.exceptions.length, 2);
+  assert.ok(result.exceptions.every(e => e.outcome === recon.OUTCOME.INVALID_KEY));
+  // Two blank keys must not be treated as the same business item.
+  assert.equal(result.summary.matched, 0);
+
+  const ignored = recon.reconcile({
+    rowsA: [{ InvoiceNumber: '', Customer: 'Acme' }],
+    rowsB: [{ Invoice_No: '', CustomerName: 'Beta' }],
+    rule: { ...INVOICE_RULE, incompleteKeyHandling: 'ignore' },
+  });
+  assert.equal(ignored.summary.exceptions, 0);
+});
+
+test('business keys match regardless of case and surrounding spaces', () => {
+  const result = recon.reconcile({
+    rowsA: [{ InvoiceNumber: ' inv-1 ', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: 'INV-1', CustomerName: 'Acme', Net: 100 }],
+    rule: INVOICE_RULE,
+  });
+  assert.equal(result.summary.matched, 1);
+});
+
+test('a high-priority rule raises the severity of what it finds', () => {
+  const normal = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: 'INV-1', CustomerName: 'Other', Net: 100 }],
+    rule: INVOICE_RULE,
+  });
+  assert.equal(normal.exceptions[0].severity, 'medium');
+
+  const critical = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: 'INV-1', CustomerName: 'Other', Net: 100 }],
+    rule: { ...INVOICE_RULE, priority: 'high' },
+  });
+  assert.equal(critical.exceptions[0].severity, 'high');
+});
+
+test('date comparison tolerates a configured number of days', () => {
+  const field = { fieldA: 'a', fieldB: 'b', type: 'date', tolerance: { type: 'days', value: 1 } };
+  assert.equal(recon.compareValues('2026-07-01', '2026-07-02', field).equal, true);
+  assert.equal(recon.compareValues('2026-07-01', '2026-07-05', field).equal, false);
+  assert.equal(recon.compareValues('2026-07-01', 'not a date', field).equal, false);
+});
+
+test('the exception lifecycle only allows supported transitions', () => {
+  assert.equal(recon.isStatusTransitionAllowed('open', 'acknowledged'), true);
+  assert.equal(recon.isStatusTransitionAllowed('acknowledged', 'investigating'), true);
+  assert.equal(recon.isStatusTransitionAllowed('investigating', 'resolved'), true);
+  // A closed exception can only be reopened, not moved sideways.
+  assert.equal(recon.isStatusTransitionAllowed('resolved', 'open'), true);
+  assert.equal(recon.isStatusTransitionAllowed('resolved', 'investigating'), false);
+  assert.equal(recon.isStatusTransitionAllowed('open', 'open'), false);
+});
+
+test('the same unresolved item keeps one identity across runs', () => {
+  const first = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-9', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [],
+    rule: INVOICE_RULE,
+  });
+  const second = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'inv-9', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [],
+    rule: INVOICE_RULE,
+  });
+  assert.equal(
+    recon.exceptionFingerprint(7, first.exceptions[0]),
+    recon.exceptionFingerprint(7, second.exceptions[0]),
+    'the same business item must not be raised as a new exception each run'
+  );
+  // A different rule checking the same key is a different control.
+  assert.notEqual(
+    recon.exceptionFingerprint(7, first.exceptions[0]),
+    recon.exceptionFingerprint(8, first.exceptions[0])
+  );
+});
+
+test('a rule without a business key is refused rather than matching everything', () => {
+  assert.throws(
+    () => recon.reconcile({ rowsA: [{ a: 1 }], rowsB: [{ b: 2 }], rule: { compareFields: [] } }),
+    /business key/i
+  );
+});

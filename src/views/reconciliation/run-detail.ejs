@@ -1,0 +1,77 @@
+<%- include('../partials/header') %>
+<%
+  var counts = {};
+  try { counts = JSON.parse(run.counts_json || '{}'); } catch (e) { counts = {}; }
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-play-circle me-2"></i>Run #<%= run.id %></h2>
+    <p class="text-muted mb-0">
+      <%= run.rule_name || ('Rule #' + run.rule_id) %> · rule version v<%= run.rule_version %> ·
+      <%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %> · by <%= run.run_by || '-' %>
+    </p>
+  </div>
+  <a href="/reconciliation/runs" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<% if (run.status === 'failed') { %>
+  <div class="alert alert-danger"><i class="bi bi-x-circle me-2"></i><strong>The run failed.</strong> <%= run.error_message || 'No detail recorded.' %></div>
+<% } %>
+
+<div class="row g-3 mb-4">
+  <div class="col-sm-6 col-xl-2"><div class="card text-center h-100 stat-card"><div class="card-body py-3">
+    <div class="fs-3 fw-bold text-primary"><%= run.records_a === null ? '-' : run.records_a %></div><div class="small">Records in A</div></div></div></div>
+  <div class="col-sm-6 col-xl-2"><div class="card text-center h-100 stat-card"><div class="card-body py-3">
+    <div class="fs-3 fw-bold text-primary"><%= run.records_b === null ? '-' : run.records_b %></div><div class="small">Records in B</div></div></div></div>
+  <div class="col-sm-6 col-xl-2"><div class="card text-center h-100 stat-card"><div class="card-body py-3">
+    <div class="fs-3 fw-bold text-dark"><%= run.keys_compared === null ? '-' : run.keys_compared %></div><div class="small">Keys compared</div></div></div></div>
+  <div class="col-sm-6 col-xl-2"><div class="card text-center h-100 stat-card"><div class="card-body py-3">
+    <div class="fs-3 fw-bold text-success"><%= run.matched === null ? '-' : run.matched %></div><div class="small">Matched</div></div></div></div>
+  <div class="col-sm-6 col-xl-2"><div class="card text-center h-100 stat-card"><div class="card-body py-3">
+    <div class="fs-3 fw-bold text-danger"><%= run.exception_count === null ? '-' : run.exception_count %></div><div class="small">Exceptions</div></div></div></div>
+  <div class="col-sm-6 col-xl-2"><div class="card text-center h-100 stat-card"><div class="card-body py-3">
+    <div class="fs-3 fw-bold text-<%= run.status === 'completed' ? (run.exception_count ? 'warning' : 'success') : 'secondary' %>">
+      <%= run.status === 'completed' ? (run.exception_count ? 'Attention' : 'Clean') : run.status %></div>
+    <div class="small">Outcome</div></div></div></div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-pie-chart me-2"></i>Outcome Breakdown</div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0">
+      <thead><tr><th>Outcome</th><th>Business meaning</th><th>Count</th></tr></thead>
+      <tbody>
+        <% outcomeDefs.forEach(function(o) { var c = Number(counts[o.key] || 0); %>
+          <tr class="<%= c ? '' : 'text-muted' %>">
+            <td><strong><%= o.label %></strong></td>
+            <td class="small"><%= o.description %></td>
+            <td><strong><%= c %></strong></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-exclamation-triangle me-2"></i>Exceptions Standing After This Run (<%= exceptions.length %>)</div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead><tr><th>Business key</th><th>Outcome</th><th>Severity</th><th>Status</th><th>Owner</th><th>Seen</th></tr></thead>
+      <tbody>
+        <% if (!exceptions.length) { %><tr><td colspan="6" class="text-muted small py-3">Nothing outstanding from this run.</td></tr><% } %>
+        <% exceptions.forEach(function(ex) { %>
+          <tr>
+            <td><a href="/reconciliation/exceptions/<%= ex.id %>"><strong><%= ex.business_key %></strong></a></td>
+            <td class="small"><%= ex.outcome %></td>
+            <td><span class="badge bg-<%= ex.severity === 'high' ? 'danger' : ex.severity === 'medium' ? 'warning' : 'secondary' %>"><%= ex.severity %></span></td>
+            <td class="small"><%= ex.status %></td>
+            <td class="small"><%= ex.owner || '-' %></td>
+            <td class="small"><%= ex.occurrence_count %>× since <%= ex.first_seen_at ? new Date(ex.first_seen_at).toLocaleDateString() : '-' %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+<%- include('../partials/footer') %>

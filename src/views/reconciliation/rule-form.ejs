@@ -1,0 +1,299 @@
+<%- include('../partials/header') %>
+<%
+  var isNew = !rule;
+  var r = rule || {};
+  var compareFields = r.compareFields || [];
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-pencil-square me-2"></i><%= isNew ? 'New Reconciliation Rule' : r.name %></h2>
+    <p class="text-muted mb-0">
+      <% if (isNew) { %>Define which records must agree between two systems, and what counts as agreement.
+      <% } else { %>Version <%= r.version %> · <span class="badge bg-<%= r.status === 'active' ? 'success' : r.status === 'draft' ? 'secondary' : 'dark' %>"><%= r.status %></span><% } %>
+    </p>
+  </div>
+  <a href="/reconciliation/rules" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<% if (!sources.length) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-exclamation-triangle me-2"></i>No sources registered yet.
+    <a href="/reconciliation/sources">Register the two systems</a> you want to compare first.
+  </div>
+<% } %>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-info-circle me-2"></i>Purpose and Ownership</div>
+  <div class="card-body py-3">
+    <div class="row g-2">
+      <div class="col-md-6">
+        <label class="form-label small" for="ruleName">Rule name</label>
+        <input type="text" class="form-control form-control-sm" id="ruleName" value="<%= r.name || '' %>" placeholder="Invoice Reconciliation between ERP and Reporting Platform">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="businessArea">Business area</label>
+        <input type="text" class="form-control form-control-sm" id="businessArea" value="<%= r.business_area || '' %>" placeholder="Finance">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="owner">Business owner</label>
+        <input type="text" class="form-control form-control-sm" id="owner" value="<%= r.owner || '' %>" placeholder="name@company.com">
+      </div>
+      <div class="col-md-9">
+        <label class="form-label small" for="description">Business purpose</label>
+        <input type="text" class="form-control form-control-sm" id="description" value="<%= r.description || '' %>" placeholder="Confirm that all invoices processed in the ERP are available for financial reporting.">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="priority">Priority</label>
+        <select class="form-select form-select-sm" id="priority">
+          <% ['high','medium','low'].forEach(function(p) { %>
+            <option value="<%= p %>" <%= (r.priority || 'medium') === p ? 'selected' : '' %>><%= p %></option>
+          <% }) %>
+        </select>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-arrow-left-right me-2"></i>Datasets and Business Key</div>
+  <div class="card-body py-3">
+    <div class="row g-3">
+      <div class="col-md-6">
+        <div class="fw-bold small mb-2">Source A</div>
+        <label class="form-label small" for="sourceA">System</label>
+        <select class="form-select form-select-sm mb-2" id="sourceA" onchange="loadDatasets('A')">
+          <option value="">Select...</option>
+          <% sources.forEach(function(s) { %>
+            <option value="<%= s.id %>" <%= String(r.source_a_id) === String(s.id) ? 'selected' : '' %>><%= s.system_label ? s.system_label + ' — ' : '' %><%= s.name %></option>
+          <% }) %>
+        </select>
+        <label class="form-label small" for="datasetA">Dataset</label>
+        <select class="form-select form-select-sm mb-2" id="datasetA" onchange="loadFields('A')"><option value="">Select a system first</option></select>
+        <label class="form-label small" for="keyFieldA">Business key field</label>
+        <select class="form-select form-select-sm" id="keyFieldA"><option value="">Select a dataset first</option></select>
+      </div>
+      <div class="col-md-6">
+        <div class="fw-bold small mb-2">Source B</div>
+        <label class="form-label small" for="sourceB">System</label>
+        <select class="form-select form-select-sm mb-2" id="sourceB" onchange="loadDatasets('B')">
+          <option value="">Select...</option>
+          <% sources.forEach(function(s) { %>
+            <option value="<%= s.id %>" <%= String(r.source_b_id) === String(s.id) ? 'selected' : '' %>><%= s.system_label ? s.system_label + ' — ' : '' %><%= s.name %></option>
+          <% }) %>
+        </select>
+        <label class="form-label small" for="datasetB">Dataset</label>
+        <select class="form-select form-select-sm mb-2" id="datasetB" onchange="loadFields('B')"><option value="">Select a system first</option></select>
+        <label class="form-label small" for="keyFieldB">Business key field</label>
+        <select class="form-select form-select-sm" id="keyFieldB"><option value="">Select a dataset first</option></select>
+      </div>
+    </div>
+    <div class="form-text mt-2"><i class="bi bi-info-circle me-1"></i>The business key identifies corresponding records — Invoice Number, Customer ID, Order Number, Employee ID.</div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span><i class="bi bi-check2-square me-2"></i>Values to Compare</span>
+    <button class="btn btn-sm btn-outline-primary" onclick="addCompareField()"><i class="bi bi-plus me-1"></i>Add value</button>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0" id="compareFieldsTable">
+      <thead><tr><th>Label</th><th>Field in A</th><th>Field in B</th><th>Type</th><th>Tolerance</th><th></th></tr></thead>
+      <tbody id="compareFieldsBody"></tbody>
+    </table>
+  </div>
+  <div class="card-footer small text-muted">
+    Tolerance accepts differences the business has agreed are immaterial — a rounding difference on tax, or a date that may land a day either side.
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-shield-exclamation me-2"></i>Handling Imperfect Data</div>
+  <div class="card-body py-3">
+    <div class="row g-2">
+      <div class="col-md-4">
+        <label class="form-label small" for="duplicateHandling">Duplicate business keys</label>
+        <select class="form-select form-select-sm" id="duplicateHandling">
+          <option value="exception" <%= (r.duplicate_handling || 'exception') === 'exception' ? 'selected' : '' %>>Raise an exception</option>
+          <option value="first" <%= r.duplicate_handling === 'first' ? 'selected' : '' %>>Compare the first record</option>
+          <option value="ignore" <%= r.duplicate_handling === 'ignore' ? 'selected' : '' %>>Ignore duplicated keys</option>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small" for="incompleteKeyHandling">Missing or invalid keys</label>
+        <select class="form-select form-select-sm" id="incompleteKeyHandling">
+          <option value="exception" <%= (r.incomplete_key_handling || 'exception') === 'exception' ? 'selected' : '' %>>Raise an exception</option>
+          <option value="ignore" <%= r.incomplete_key_handling === 'ignore' ? 'selected' : '' %>>Ignore those records</option>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small" for="rowLimit">Row limit per source (optional)</label>
+        <input type="number" min="1" class="form-control form-control-sm" id="rowLimit" value="<%= r.row_limit || '' %>" placeholder="all rows">
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="d-flex gap-2 mb-4">
+  <button class="btn btn-primary" onclick="saveRule()"><i class="bi bi-save me-1"></i><%= isNew ? 'Create as draft' : 'Save new version' %></button>
+  <% if (!isNew) { %>
+    <input type="text" class="form-control form-control-sm" style="max-width:320px;" id="changeNote" placeholder="What changed and why (recorded for audit)">
+  <% } %>
+</div>
+
+<% if (!isNew && versions.length) { %>
+  <div class="card mb-4">
+    <div class="card-header"><i class="bi bi-clock-history me-2"></i>Change History</div>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Version</th><th>Change</th><th>By</th><th>When</th></tr></thead>
+        <tbody>
+          <% versions.forEach(function(v) { %>
+            <tr>
+              <td>v<%= v.version %></td>
+              <td class="small"><%= v.change_note || '-' %></td>
+              <td class="small"><%= v.changed_by || '-' %></td>
+              <td class="small"><%= v.changed_at ? new Date(v.changed_at).toLocaleString() : '-' %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+<% } %>
+
+<script>
+var ruleId = <%= isNew ? 'null' : r.id %>;
+var savedFields = <%- JSON.stringify(compareFields) %>;
+var saved = {
+  datasetA: <%- JSON.stringify(r.dataset_a || '') %>,
+  datasetB: <%- JSON.stringify(r.dataset_b || '') %>,
+  keyFieldA: <%- JSON.stringify(r.key_field_a || '') %>,
+  keyFieldB: <%- JSON.stringify(r.key_field_b || '') %>
+};
+var datasetsBySide = { A: [], B: [] };
+
+document.addEventListener('DOMContentLoaded', function() {
+  renderCompareFields();
+  ['A', 'B'].forEach(function(side) { if (document.getElementById('source' + side).value) loadDatasets(side, true); });
+});
+
+async function loadDatasets(side, restore) {
+  var sourceId = document.getElementById('source' + side).value;
+  var datasetSelect = document.getElementById('dataset' + side);
+  if (!sourceId) { datasetSelect.innerHTML = '<option value="">Select a system first</option>'; return; }
+
+  datasetSelect.innerHTML = '<option value="">Loading...</option>';
+  try {
+    var resp = await fetch('/reconciliation/sources/' + sourceId + '/datasets');
+    var data = await resp.json();
+    if (!data.success) { datasetSelect.innerHTML = '<option value="">' + (data.message || 'Failed') + '</option>'; return; }
+    datasetsBySide[side] = data.datasets || [];
+    if (!datasetsBySide[side].length) {
+      datasetSelect.innerHTML = '<option value="">' + (data.message || 'No datasets') + '</option>';
+      return;
+    }
+    var target = restore ? saved['dataset' + side] : '';
+    datasetSelect.innerHTML = '<option value="">Select...</option>' + datasetsBySide[side].map(function(ds) {
+      return '<option value="' + ds.name + '"' + (ds.name === target ? ' selected' : '') + '>' + ds.name + '</option>';
+    }).join('');
+    if (target) loadFields(side, true);
+  } catch (e) {
+    datasetSelect.innerHTML = '<option value="">' + e.message + '</option>';
+  }
+}
+
+function fieldsFor(side) {
+  var name = document.getElementById('dataset' + side).value;
+  var dataset = datasetsBySide[side].find(function(ds) { return ds.name === name; });
+  return dataset ? dataset.fields : [];
+}
+
+function loadFields(side, restore) {
+  var fields = fieldsFor(side);
+  var keySelect = document.getElementById('keyField' + side);
+  var target = restore ? saved['keyField' + side] : '';
+  keySelect.innerHTML = '<option value="">Select...</option>' + fields.map(function(f) {
+    return '<option value="' + f.name + '"' + (f.name === target ? ' selected' : '') + '>' + f.name + ' (' + f.dataType + ')</option>';
+  }).join('');
+  renderCompareFields();
+}
+
+function fieldOptions(side, selected) {
+  var fields = fieldsFor(side);
+  if (!fields.length) return '<option value="' + (selected || '') + '">' + (selected || 'select a dataset') + '</option>';
+  return '<option value="">Select...</option>' + fields.map(function(f) {
+    return '<option value="' + f.name + '"' + (f.name === selected ? ' selected' : '') + '>' + f.name + '</option>';
+  }).join('');
+}
+
+function renderCompareFields() {
+  var body = document.getElementById('compareFieldsBody');
+  if (!savedFields.length) {
+    body.innerHTML = '<tr><td colspan="6" class="text-muted small">No values selected yet. Add at least one.</td></tr>';
+    return;
+  }
+  body.innerHTML = savedFields.map(function(f, i) {
+    return '<tr>' +
+      '<td><input type="text" class="form-control form-control-sm" value="' + (f.label || '') + '" oninput="updateField(' + i + ', \'label\', this.value)" placeholder="Net amount"></td>' +
+      '<td><select class="form-select form-select-sm" onchange="updateField(' + i + ', \'fieldA\', this.value)">' + fieldOptions('A', f.fieldA) + '</select></td>' +
+      '<td><select class="form-select form-select-sm" onchange="updateField(' + i + ', \'fieldB\', this.value)">' + fieldOptions('B', f.fieldB) + '</select></td>' +
+      '<td><select class="form-select form-select-sm" onchange="updateField(' + i + ', \'type\', this.value)">' +
+        ['string', 'number', 'date'].map(function(t) {
+          return '<option value="' + t + '"' + ((f.type || 'string') === t ? ' selected' : '') + '>' + t + '</option>';
+        }).join('') + '</select></td>' +
+      '<td><div class="d-flex gap-1">' +
+        '<select class="form-select form-select-sm" style="max-width:100px;" onchange="updateTolerance(' + i + ', \'type\', this.value)">' +
+          ['none', 'absolute', 'percent'].map(function(t) {
+            var current = (f.tolerance && f.tolerance.type) || 'none';
+            return '<option value="' + t + '"' + (current === t ? ' selected' : '') + '>' + t + '</option>';
+          }).join('') + '</select>' +
+        '<input type="number" step="any" class="form-control form-control-sm" style="max-width:90px;" value="' +
+          ((f.tolerance && f.tolerance.value) || '') + '" oninput="updateTolerance(' + i + ', \'value\', this.value)"></div></td>' +
+      '<td><button class="btn btn-sm btn-outline-danger p-0 px-1" onclick="removeField(' + i + ')"><i class="bi bi-x"></i></button></td>' +
+      '</tr>';
+  }).join('');
+}
+
+function addCompareField() { savedFields.push({ label: '', fieldA: '', fieldB: '', type: 'string' }); renderCompareFields(); }
+function removeField(i) { savedFields.splice(i, 1); renderCompareFields(); }
+function updateField(i, key, value) { savedFields[i][key] = value; }
+function updateTolerance(i, key, value) {
+  if (key === 'type' && value === 'none') { delete savedFields[i].tolerance; renderCompareFields(); return; }
+  savedFields[i].tolerance = savedFields[i].tolerance || { type: 'absolute', value: 0 };
+  savedFields[i].tolerance[key] = key === 'value' ? Number(value) : value;
+}
+
+async function saveRule() {
+  var body = {
+    name: document.getElementById('ruleName').value.trim(),
+    description: document.getElementById('description').value.trim(),
+    businessArea: document.getElementById('businessArea').value.trim(),
+    owner: document.getElementById('owner').value.trim(),
+    priority: document.getElementById('priority').value,
+    sourceAId: document.getElementById('sourceA').value,
+    sourceBId: document.getElementById('sourceB').value,
+    datasetA: document.getElementById('datasetA').value,
+    datasetB: document.getElementById('datasetB').value,
+    keyFieldA: document.getElementById('keyFieldA').value,
+    keyFieldB: document.getElementById('keyFieldB').value,
+    compareFields: savedFields,
+    duplicateHandling: document.getElementById('duplicateHandling').value,
+    incompleteKeyHandling: document.getElementById('incompleteKeyHandling').value,
+    rowLimit: document.getElementById('rowLimit').value || null
+  };
+  var noteEl = document.getElementById('changeNote');
+  if (noteEl) body.changeNote = noteEl.value.trim();
+
+  try {
+    var resp = await fetch(ruleId ? '/reconciliation/rules/' + ruleId : '/reconciliation/rules', {
+      method: ruleId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    var data = await resp.json();
+    if (!data.success) { showToast(data.message, 'error'); return; }
+    showToast(ruleId ? 'Saved as version ' + data.version : 'Rule created as draft', 'success');
+    setTimeout(function() { window.location.href = '/reconciliation/rules/' + (ruleId || data.id); }, 700);
+  } catch (e) { showToast(e.message, 'error'); }
+}
+</script>
+<%- include('../partials/footer') %>

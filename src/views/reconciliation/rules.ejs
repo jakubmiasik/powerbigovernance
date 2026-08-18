@@ -1,0 +1,146 @@
+<%- include('../partials/header') %>
+<%
+  function statusColor(s) { return s === 'active' ? 'success' : s === 'draft' ? 'secondary' : 'dark'; }
+  function priorityColor(p) { return p === 'high' ? 'danger' : p === 'low' ? 'secondary' : 'warning'; }
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-list-check me-2"></i>Reconciliation Rules</h2>
+    <p class="text-muted mb-0">Controls that define which records must agree between two business systems.</p>
+  </div>
+  <div class="d-flex gap-2">
+    <a href="/reconciliation" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+    <a href="/reconciliation/rules/new" class="btn btn-sm btn-primary"><i class="bi bi-plus me-1"></i>New rule</a>
+  </div>
+</div>
+
+<% if (error) { %><div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div><% } %>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-table me-2"></i>All Rules (<%= rules.length %>)</span>
+    <div class="d-flex gap-2">
+      <button class="btn btn-sm btn-success" onclick="runSelected()"><i class="bi bi-play-fill me-1"></i>Run selected</button>
+      <input type="text" class="form-control form-control-sm" style="max-width:260px;" placeholder="Filter rules..." oninput="filterTable(this, 'recon-rules-table')">
+    </div>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0" id="recon-rules-table">
+      <thead>
+        <tr>
+          <th style="width:32px;"></th>
+          <th>Rule</th><th>Business area</th><th>Owner</th><th>Priority</th>
+          <th>Status</th><th>Version</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% if (!rules.length) { %>
+          <tr data-filter="none"><td colspan="8" class="text-muted small py-3">No rules yet. Create one to define your first control.</td></tr>
+        <% } %>
+        <% rules.forEach(function(rule) { %>
+          <tr data-filter="<%= [rule.name, rule.business_area || '', rule.owner || '', rule.status].join(' ').toLowerCase() %>">
+            <td>
+              <% if (rule.status === 'active') { %>
+                <input type="checkbox" class="form-check-input rule-select" value="<%= rule.id %>">
+              <% } %>
+            </td>
+            <td>
+              <a href="/reconciliation/rules/<%= rule.id %>"><strong><%= rule.name %></strong></a>
+              <% if (rule.description) { %><div class="text-muted" style="font-size:0.7rem;"><%= rule.description %></div><% } %>
+            </td>
+            <td class="small"><%= rule.business_area || '-' %></td>
+            <td class="small"><%= rule.owner || '-' %></td>
+            <td><span class="badge bg-<%= priorityColor(rule.priority) %>"><%= rule.priority %></span></td>
+            <td><span class="badge bg-<%= statusColor(rule.status) %>"><%= rule.status %></span></td>
+            <td class="small">v<%= rule.version %></td>
+            <td class="text-nowrap">
+              <% if (rule.status !== 'active') { %>
+                <button class="btn btn-sm btn-outline-success p-0 px-1" onclick="setStatus(<%= rule.id %>, 'active')" title="Activate"><i class="bi bi-check-circle"></i></button>
+              <% } else { %>
+                <button class="btn btn-sm btn-outline-secondary p-0 px-1" onclick="setStatus(<%= rule.id %>, 'draft')" title="Back to draft"><i class="bi bi-pause-circle"></i></button>
+              <% } %>
+              <% if (rule.status !== 'retired') { %>
+                <button class="btn btn-sm btn-outline-dark p-0 px-1" onclick="setStatus(<%= rule.id %>, 'retired')" title="Retire"><i class="bi bi-archive"></i></button>
+              <% } %>
+              <button class="btn btn-sm btn-outline-danger p-0 px-1" onclick="removeRule(<%= rule.id %>)" title="Delete"><i class="bi bi-trash"></i></button>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+  <div class="card-footer small text-muted">Only active rules can be run. A rule is refused activation until it defines both sources, a business key and at least one value to compare.</div>
+</div>
+
+<div class="modal fade" id="runResultModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header"><h6 class="modal-title">Reconciliation Run</h6><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body" id="runResultBody"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+async function setStatus(id, status) {
+  try {
+    var resp = await fetch('/reconciliation/rules/' + id + '/status', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: status })
+    });
+    var data = await resp.json();
+    if (data.success) window.location.reload(); else showToast(data.message, 'error');
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function removeRule(id) {
+  showConfirmAction({
+    title: 'Delete rule', message: 'Delete this rule? Its runs and exceptions stay for audit.',
+    confirmText: 'Delete', confirmClass: 'btn-danger',
+    onConfirm: async function() {
+      var resp = await fetch('/reconciliation/rules/' + id, { method: 'DELETE' });
+      var data = await resp.json();
+      if (data.success) window.location.reload(); else showToast(data.message, 'error');
+    }
+  });
+}
+
+async function runSelected() {
+  var ids = Array.from(document.querySelectorAll('.rule-select:checked')).map(function(el) { return el.value; });
+  if (!ids.length) { showToast('Select at least one active rule', 'error'); return; }
+
+  var modal = new bootstrap.Modal(document.getElementById('runResultModal'));
+  document.getElementById('runResultBody').innerHTML =
+    '<div class="text-center py-3"><div class="spinner-border text-primary"></div><p class="mt-2 text-muted mb-0">Reading both systems and comparing records...</p></div>';
+  modal.show();
+
+  try {
+    var resp = await fetch('/reconciliation/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ruleIds: ids })
+    });
+    var data = await resp.json();
+    if (!data.success && !(data.results || []).length) {
+      document.getElementById('runResultBody').innerHTML = '<div class="alert alert-danger mb-0">' + (data.message || 'Run failed') + '</div>';
+      return;
+    }
+    var html = (data.results || []).map(function(r) {
+      if (!r.success) {
+        return '<div class="alert alert-danger py-2 small"><strong>' + (r.ruleName || ('Rule #' + r.ruleId)) + '</strong>: ' + r.message + '</div>';
+      }
+      var s = r.summary;
+      var cls = s.exceptions ? 'warning' : 'success';
+      return '<div class="alert alert-' + cls + ' py-2 small">' +
+        '<strong>' + r.ruleName + '</strong> — run <a href="/reconciliation/runs/' + r.runId + '">#' + r.runId + '</a><br>' +
+        s.recordsA + ' record(s) in source A, ' + s.recordsB + ' in source B; ' +
+        s.keysCompared + ' key(s) compared, <strong>' + s.matched + '</strong> matched, ' +
+        '<strong>' + s.exceptions + '</strong> exception(s).' +
+        (r.recorded ? '<br><span class="text-muted">' + r.recorded.created + ' new, ' + r.recorded.updated + ' recurring, ' + r.recorded.reopened + ' reopened.</span>' : '') +
+        '</div>';
+    }).join('');
+    document.getElementById('runResultBody').innerHTML = html +
+      '<a href="/reconciliation/exceptions" class="btn btn-sm btn-primary">Review exceptions</a>';
+  } catch (e) {
+    document.getElementById('runResultBody').innerHTML = '<div class="alert alert-danger mb-0">' + e.message + '</div>';
+  }
+}
+</script>
+<%- include('../partials/footer') %>
