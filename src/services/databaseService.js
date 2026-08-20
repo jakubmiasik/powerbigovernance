@@ -4,6 +4,7 @@ const { convertScheduleToUtc, normalizeTimezone } = require('./scheduleTimeServi
 const { METRIC_DEFS } = require('./runMetricsService');
 const { getConfig } = require('../config/settings');
 const { RECONCILIATION_MIGRATIONS } = require('./reconciliationSchema');
+const { MDM_MIGRATIONS } = require('./mdmSchema');
 const { encryptSecret, isEncryptionConfigured } = require('./secretCryptoService');
 
 const cfg = getConfig();
@@ -1084,6 +1085,10 @@ async function runMigrations() {
     await runStatement(conn, 'relax service_principals.client_secret', `IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'client_secret' AND is_nullable = 0) ALTER TABLE service_principals ALTER COLUMN client_secret NVARCHAR(MAX) NULL`);
     // Reconciliation engine tables
     for (const migration of RECONCILIATION_MIGRATIONS) {
+      await runStatement(conn, migration.label, migration.sql);
+    }
+    // Master data management tables
+    for (const migration of MDM_MIGRATIONS) {
       await runStatement(conn, migration.label, migration.sql);
     }
 

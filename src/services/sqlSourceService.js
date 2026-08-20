@@ -12,9 +12,9 @@
  * worse than saying up front that it is not supported.
  */
 
-const { Connection, Request } = require('tedious');
+const { Connection, Request, TYPES } = require('tedious');
 const { DefaultAzureCredential } = require('@azure/identity');
-const { buildSelectSql } = require('./reconciliationService');
+const { buildSelectSql, quoteIdentifier } = require('./reconciliationService');
 const { decryptSecret } = require('./secretCryptoService');
 
 const AUTH_MODES = [
@@ -97,11 +97,14 @@ async function tokenFor(source) {
   return response.token;
 }
 
-/** Runs one statement and returns its rows. One connection per query, closed always. */
-function runQuery(config, sql) {
+/**
+ * Runs a series of statements on one connection, in order, returning the rows of
+ * each. Sequential because a tedious connection carries a single request at a time.
+ */
+function runStatements(config, statements) {
   return new Promise((resolve, reject) => {
     const connection = new Connection(config);
-    const rows = [];
+    const results = [];
     let settled = false;
     const finish = (err, value) => {
       if (settled) return;
@@ -112,37 +115,58 @@ function runQuery(config, sql) {
 
     connection.on('connect', (err) => {
       if (err) return finish(err);
-      const request = new Request(sql, (reqErr) => {
-        if (reqErr) return finish(reqErr);
-        finish(null, rows);
-      });
-      request.on('row', (columns) => {
-        const row = {};
-        columns.forEach((col) => { row[col.metadata.colName] = col.value; });
-        rows.push(row);
-      });
-      connection.execSql(request);
+
+      const next = (index) => {
+        if (index >= statements.length) return finish(null, results);
+        const statement = statements[index];
+        const rows = [];
+        const request = new Request(statement.sql, (reqErr) => {
+          if (reqErr) return finish(reqErr);
+          results.push(rows);
+          next(index + 1);
+        });
+        for (const param of statement.params || []) {
+          request.addParameter(param.name, param.type, param.value);
+        }
+        request.on('row', (columns) => {
+          const row = {};
+          columns.forEach((col) => { row[col.metadata.colName] = col.value; });
+          rows.push(row);
+        });
+        connection.execSql(request);
+      };
+      next(0);
     });
     connection.on('error', err => finish(err));
     connection.connect();
   });
 }
 
-async function query(source, sql) {
+/**
+ * `token` overrides the identity used to connect. A Fabric warehouse is reached
+ * with its tenant's service principal rather than this application's own identity,
+ * and it speaks the same protocol, so the same connector serves both.
+ */
+async function execute(source, statements, { token } = {}) {
   if (!source.connection_string) {
     throw new Error('This source has no server recorded.');
   }
-  const config = connectionConfig(source, await tokenFor(source));
+  const config = connectionConfig(source, token || await tokenFor(source));
   try {
-    return await runQuery(config, sql);
+    return await runStatements(config, statements);
   } catch (err) {
     throw new Error(explainSqlFailure(err, source));
   }
 }
 
+async function query(source, sql, options = {}) {
+  const results = await execute(source, [{ sql }], options);
+  return results[0] || [];
+}
+
 /** Reads the rows a planned rule needs, in the same shape as a Fabric endpoint. */
-async function readRows(source, { dataset, selections, columns, rowLimit }) {
-  return query(source, buildSelectSql({ dataset, selections, columns, rowLimit }));
+async function readRows(source, { dataset, selections, columns, rowLimit }, options = {}) {
+  return query(source, buildSelectSql({ dataset, selections, columns, rowLimit }), options);
 }
 
 /**
@@ -210,9 +234,113 @@ async function testConnection(source) {
   };
 }
 
+// ── Writing ──
+
+/**
+ * Whether a registered source can be written to.
+ *
+ * A Fabric **lakehouse** SQL analytics endpoint is read-only — it serves queries
+ * over Delta tables that Spark and pipelines own, and no amount of permission makes
+ * it accept an INSERT. A Fabric **warehouse** does accept one, as does any
+ * registered SQL Server or Azure SQL database. Saying this at the point of choosing
+ * a destination is far better than letting a run get as far as writing and fail.
+ */
+function describeWritability(source) {
+  if (!source) return { writable: false, reason: 'No destination selected.' };
+  const itemType = String(source.item_type || '').toLowerCase();
+  if (itemType === 'lakehouse') {
+    return {
+      writable: false,
+      reason: 'A lakehouse SQL analytics endpoint is read-only. Choose a Fabric warehouse, or a registered SQL Server or Azure SQL database, as the destination.',
+    };
+  }
+  return { writable: true, reason: null };
+}
+
+// Everything is written as a string except numbers, dates and booleans, which keep
+// their type. Golden values come from heterogeneous systems, so a permissive column
+// type is the honest default rather than guessing a schema that later rejects a row.
+function parameterFor(name, value) {
+  if (value === null || value === undefined) return { name, type: TYPES.NVarChar, value: null };
+  if (typeof value === 'number') return { name, type: TYPES.Float, value };
+  if (typeof value === 'boolean') return { name, type: TYPES.Bit, value };
+  if (value instanceof Date) return { name, type: TYPES.DateTime2, value };
+  return { name, type: TYPES.NVarChar, value: String(value) };
+}
+
+/**
+ * A parameterised multi-row INSERT. Values never reach the statement as text, and
+ * batches are bounded because SQL Server caps a request at 2100 parameters.
+ */
+function buildInsertStatements(table, columns, rows, { batchSize } = {}) {
+  if (!columns.length) throw new Error('No columns to write.');
+  const maxRowsPerBatch = Math.max(1, Math.min(
+    Number(batchSize) || Math.floor(2000 / columns.length),
+    Math.floor(2000 / columns.length)
+  ));
+
+  const quotedTable = quoteIdentifier(table);
+  const quotedColumns = columns.map(quoteIdentifier).join(', ');
+  const statements = [];
+
+  for (let start = 0; start < rows.length; start += maxRowsPerBatch) {
+    const batch = rows.slice(start, start + maxRowsPerBatch);
+    const params = [];
+    const tuples = batch.map((row, rowIndex) => {
+      const placeholders = columns.map((column, columnIndex) => {
+        const name = 'p' + rowIndex + '_' + columnIndex;
+        params.push(parameterFor(name, row[column]));
+        return '@' + name;
+      });
+      return '(' + placeholders.join(', ') + ')';
+    });
+    statements.push({
+      sql: 'INSERT INTO ' + quotedTable + ' (' + quotedColumns + ') VALUES ' + tuples.join(', '),
+      params,
+    });
+  }
+  return statements;
+}
+
+/** `CREATE TABLE IF NOT EXISTS` in the form SQL Server actually accepts. */
+function buildCreateTableSql(table, columns) {
+  const quotedTable = quoteIdentifier(table);
+  const definitions = columns.map(column => quoteIdentifier(column) + ' NVARCHAR(4000) NULL').join(',\n  ');
+  return "IF OBJECT_ID(N'" + String(table).replace(/'/g, "''") + "', 'U') IS NULL\n"
+    + 'CREATE TABLE ' + quotedTable + ' (\n  ' + definitions + '\n)';
+}
+
+/**
+ * Writes rows to a destination table.
+ *
+ * `replace` empties the table first, which is what publishing a freshly mastered
+ * set means; `append` adds to what is there. The delete and the inserts run on one
+ * connection, in order, so a `replace` cannot leave the table empty because a later
+ * batch failed to connect.
+ */
+async function writeRows(source, { table, columns, rows, mode = 'replace', createIfMissing = false }, options = {}) {
+  const writability = describeWritability(source);
+  if (!writability.writable) throw new Error(writability.reason);
+  if (!rows.length && mode !== 'replace') return { written: 0 };
+
+  const statements = [];
+  if (createIfMissing) statements.push({ sql: buildCreateTableSql(table, columns) });
+  if (mode === 'replace') statements.push({ sql: 'DELETE FROM ' + quoteIdentifier(table) });
+  statements.push(...buildInsertStatements(table, columns, rows));
+
+  await execute(source, statements, options);
+  return { written: rows.length };
+}
+
 module.exports = {
   AUTH_MODES,
   AUTH_MODE_KEYS,
+  describeWritability,
+  buildInsertStatements,
+  buildCreateTableSql,
+  writeRows,
+  execute,
+  query,
   readRows,
   readSchema,
   shapeSchemaRows,

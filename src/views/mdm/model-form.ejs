@@ -1,0 +1,458 @@
+<%- include('../partials/header') %>
+<%
+  var config = model ? (model.config || {}) : {};
+  var isNew = !model;
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-diagram-3 me-2"></i><%= isNew ? 'New Master Data Model' : model.name %></h2>
+    <p class="text-muted mb-0">Which raw table to master, how records are matched, and which value survives for each field.</p>
+  </div>
+  <a href="/mdm" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<% if (error) { %><div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div><% } %>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-info-circle me-2"></i>Identity</div>
+  <div class="card-body py-3">
+    <div class="row g-2">
+      <div class="col-md-4">
+        <label class="form-label small" for="name">Name</label>
+        <input type="text" class="form-control form-control-sm" id="name" value="<%= model ? model.name : '' %>" placeholder="Customer master">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="entityType">Entity</label>
+        <input type="text" class="form-control form-control-sm" id="entityType" value="<%= model ? (model.entity_type || '') : '' %>" placeholder="Customer, Product, Supplier">
+      </div>
+      <div class="col-md-5">
+        <label class="form-label small" for="description">Description</label>
+        <input type="text" class="form-control form-control-sm" id="description" value="<%= model ? (model.description || '') : '' %>">
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-database me-2"></i>Raw Data</div>
+  <div class="card-body py-3">
+    <div class="row g-2">
+      <div class="col-md-4">
+        <label class="form-label small" for="sourceId">Source system</label>
+        <select class="form-select form-select-sm" id="sourceId" onchange="loadDatasets('source')">
+          <option value="">Select...</option>
+          <% sources.forEach(function(source) { %>
+            <option value="<%= source.id %>" <%= model && String(model.source_id) === String(source.id) ? 'selected' : '' %>>
+              <%= source.name %><%= source.system_label ? ' (' + source.system_label + ')' : '' %>
+            </option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small" for="sourceDataset">Raw table — all records, all sources</label>
+        <select class="form-select form-select-sm" id="sourceDataset" onchange="onDatasetChange()"><option value="">Select a source first</option></select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small" for="rowLimit">Row limit</label>
+        <input type="number" class="form-control form-control-sm" id="rowLimit" value="<%= model ? (model.row_limit || '') : '' %>" placeholder="all">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small" for="sourceIdField">Record ID column</label>
+        <select class="form-select form-select-sm" id="sourceIdField"><option value="">Select...</option></select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="sourceField">Source system column</label>
+        <select class="form-select form-select-sm" id="sourceField"><option value="">None</option></select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="timestampField">Last updated column</label>
+        <select class="form-select form-select-sm" id="timestampField"><option value="">None</option></select>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label small" for="sourcePriority">Source trust order — most trusted first, comma separated</label>
+        <input type="text" class="form-control form-control-sm" id="sourcePriority"
+               value="<%= (config.sourcePriority || []).join(', ') %>" placeholder="SAP, Salesforce, Legacy">
+      </div>
+    </div>
+    <div class="form-text mt-2">
+      <i class="bi bi-info-circle me-1"></i>The raw table holds every record from every system. The source system column is what makes
+      "most trusted source" mean anything — without it, survivorship falls back to whichever record happens to come first.
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-sliders me-2"></i>Fields, Matching and Survivorship</span>
+    <button class="btn btn-sm btn-outline-primary" onclick="addField()"><i class="bi bi-plus me-1"></i>Add field</button>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0" id="fieldTable">
+      <thead><tr>
+        <th style="min-width:140px;">Column</th>
+        <th style="min-width:170px;">Standardise</th>
+        <th style="min-width:140px;">Compare with</th>
+        <th style="width:80px;">Weight</th>
+        <th style="min-width:130px;">When missing</th>
+        <th style="min-width:150px;">Value that survives</th>
+        <th style="width:120px;">Rule</th>
+        <th style="width:36px;"></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="card-footer small text-muted">
+    <strong>Weight</strong> is how much a field counts towards the score, normalised across the fields that could actually be compared.
+    <strong>Required</strong> means the pair is rejected unless that field agrees — a shared tax ID or account number.
+    <strong>Must not conflict</strong> rejects the pair when the field disagrees but allows it to be missing — country, legal entity, company code.
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-grid-3x3 me-2"></i>Blocking — Which Records Get Compared</div>
+  <div class="card-body py-3">
+    <div id="blockList"></div>
+    <button class="btn btn-sm btn-outline-primary mt-2" onclick="addBlock()"><i class="bi bi-plus me-1"></i>Add blocking key</button>
+    <div class="form-text mt-2">
+      <i class="bi bi-exclamation-triangle me-1"></i>
+      Comparing every record with every other is quadratic — a hundred thousand rows is five billion comparisons. A blocking key groups
+      records that share something cheap and only compares within the group. Use several: a pair is a candidate if it shares <em>any</em> of
+      them, which recovers what a single key would miss. A key that puts most records in one block gives the quadratic cost straight back,
+      so each run reports its largest block.
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-check2-square me-2"></i>Decisions</div>
+  <div class="card-body py-3">
+    <div class="row g-2">
+      <div class="col-md-3">
+        <label class="form-label small" for="autoMatchThreshold">Merge automatically at or above</label>
+        <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="autoMatchThreshold"
+               value="<%= config.autoMatchThreshold === undefined ? 0.9 : config.autoMatchThreshold %>">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="reviewThreshold">Send to a steward at or above</label>
+        <input type="number" step="0.01" min="0" max="1" class="form-control form-control-sm" id="reviewThreshold"
+               value="<%= config.reviewThreshold === undefined ? 0.75 : config.reviewThreshold %>">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="goldenIdStrategy">Golden record ID</label>
+        <select class="form-select form-select-sm" id="goldenIdStrategy">
+          <option value="sequential" <%= config.goldenIdStrategy === 'primary_source_id' ? '' : 'selected' %>>Generated (prefix + number)</option>
+          <option value="primary_source_id" <%= config.goldenIdStrategy === 'primary_source_id' ? 'selected' : '' %>>The most trusted record's own ID</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="goldenIdPrefix">ID prefix</label>
+        <input type="text" class="form-control form-control-sm" id="goldenIdPrefix" value="<%= config.goldenIdPrefix || 'MDM' %>">
+      </div>
+      <div class="col-12">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="strictClustering" <%= config.strictClustering ? 'checked' : '' %>>
+          <label class="form-check-label small" for="strictClustering">
+            Strict grouping — only merge a group when every pair in it matched
+          </label>
+        </div>
+        <div class="form-text">
+          Without this, matches are transitive: A matches B and B matches C, so all three become one record even though A and C were never
+          compared favourably. That is how master data over-merges. Strict grouping refuses those chains, trading some recall for a
+          guarantee. Leave it off while tuning; turn it on before anyone depends on the output.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-upload me-2"></i>Destination</div>
+  <div class="card-body py-3">
+    <div class="row g-2">
+      <div class="col-md-4">
+        <label class="form-label small" for="destinationId">Destination system</label>
+        <select class="form-select form-select-sm" id="destinationId" onchange="onDestinationChange()">
+          <option value="">Preview only — do not write anywhere</option>
+          <% sources.forEach(function(source) { %>
+            <option value="<%= source.id %>" data-writable="<%= source.writable ? '1' : '' %>"
+                    data-reason="<%= source.writeBlockedReason || '' %>"
+                    <%= model && String(model.destination_id) === String(source.id) ? 'selected' : '' %>>
+              <%= source.name %><%= source.writable ? '' : ' — read-only' %>
+            </option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="destinationTable">Golden record table</label>
+        <input type="text" class="form-control form-control-sm" id="destinationTable"
+               value="<%= model ? (model.destination_table || '') : '' %>" placeholder="dbo.CustomerMaster">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="crosswalkTable">Crosswalk table <span class="text-muted">(optional)</span></label>
+        <input type="text" class="form-control form-control-sm" id="crosswalkTable"
+               value="<%= model ? (model.crosswalk_table || '') : '' %>" placeholder="dbo.CustomerMasterXref">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small" for="writeMode">Write mode</label>
+        <select class="form-select form-select-sm" id="writeMode">
+          <option value="replace" <%= model && model.write_mode === 'append' ? '' : 'selected' %>>Replace</option>
+          <option value="append" <%= model && model.write_mode === 'append' ? 'selected' : '' %>>Append</option>
+        </select>
+      </div>
+    </div>
+    <div class="mt-2" id="destinationNote"></div>
+    <div class="form-text mt-2">
+      <i class="bi bi-info-circle me-1"></i>
+      A Fabric <strong>lakehouse</strong> SQL endpoint is read-only, so it can hold the raw table but cannot be a destination. A Fabric
+      <strong>warehouse</strong>, an Azure SQL database or any registered SQL Server can. The crosswalk records which source records
+      contributed to each golden record — without it a mastered value cannot be traced back, which is the first thing anyone asks when
+      they disagree with one.
+    </div>
+  </div>
+</div>
+
+<div class="d-flex gap-2 mb-4">
+  <button class="btn btn-primary" onclick="saveModel()"><i class="bi bi-save me-1"></i><%= isNew ? 'Create model' : 'Save new version' %></button>
+  <% if (!isNew) { %>
+    <input type="text" class="form-control" style="max-width:320px;" id="changeNote" placeholder="What changed, for the version history">
+  <% } %>
+</div>
+<div id="saveResult"></div>
+
+<% if (!isNew && versions.length) { %>
+  <div class="card mb-4">
+    <div class="card-header"><i class="bi bi-clock-history me-2"></i>Version History</div>
+    <div class="table-responsive" style="max-height:260px;">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Version</th><th>Change</th><th>When</th><th>By</th></tr></thead>
+        <tbody>
+          <% versions.forEach(function(v) { %>
+            <tr>
+              <td class="small">v<%= v.version %></td>
+              <td class="small"><%= v.change_note || '-' %></td>
+              <td class="small"><%= v.changed_at ? new Date(v.changed_at).toLocaleString() : '-' %></td>
+              <td class="small"><%= v.changed_by || '-' %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+<% } %>
+
+<script>
+var CATALOGUE = <%- JSON.stringify(catalogue) %>;
+var MODEL_ID = <%= model ? model.id : 'null' %>;
+var savedConfig = <%- JSON.stringify(config) %>;
+var savedSourceDataset = <%- JSON.stringify(model ? (model.source_dataset || '') : '') %>;
+var datasets = [];
+var columns = [];
+var fields = (savedConfig.fields || []).slice();
+var blocks = (savedConfig.blocks || []).slice();
+
+function escapeAttr(value) {
+  return String(value === null || value === undefined ? '' : value)
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function optionsFor(defs, selected) {
+  return defs.map(function(def) {
+    return '<option value="' + def.key + '"' + (def.key === selected ? ' selected' : '') +
+      ' title="' + escapeAttr(def.description) + '">' + escapeAttr(def.label) + '</option>';
+  }).join('');
+}
+
+function columnOptions(selected, placeholder) {
+  var html = '<option value="">' + (placeholder || 'Select...') + '</option>';
+  return html + columns.map(function(column) {
+    return '<option value="' + escapeAttr(column) + '"' + (column === selected ? ' selected' : '') + '>' + escapeAttr(column) + '</option>';
+  }).join('');
+}
+
+// ── Fields ──
+function renderFields() {
+  var body = document.querySelector('#fieldTable tbody');
+  if (!fields.length) {
+    body.innerHTML = '<tr><td colspan="8" class="text-muted small py-3">No fields yet. Add the columns that identify the entity — name, address, tax ID — and the attributes you want mastered.</td></tr>';
+    return;
+  }
+  body.innerHTML = fields.map(function(field, index) {
+    var standardisers = CATALOGUE.standardisers.map(function(def) {
+      var on = (field.standardisers || []).indexOf(def.key) !== -1;
+      return '<label class="d-block" style="font-size:0.7rem;" title="' + escapeAttr(def.description) + '">' +
+        '<input type="checkbox" class="form-check-input me-1" ' + (on ? 'checked' : '') +
+        ' onchange="toggleStandardiser(' + index + ', \'' + def.key + '\', this.checked)">' + escapeAttr(def.label) + '</label>';
+    }).join('');
+
+    return '<tr>' +
+      '<td><select class="form-select form-select-sm" onchange="updateField(' + index + ', \'column\', this.value)">' +
+        columnOptions(field.column) + '</select></td>' +
+      '<td><div style="max-height:120px; overflow-y:auto;">' + standardisers + '</div></td>' +
+      '<td><select class="form-select form-select-sm" onchange="updateField(' + index + ', \'comparator\', this.value)">' +
+        optionsFor(CATALOGUE.comparators, field.comparator || 'exact') + '</select></td>' +
+      '<td><input type="number" step="0.5" min="0" class="form-control form-control-sm" value="' +
+        escapeAttr(field.weight === undefined ? 1 : field.weight) + '" onchange="updateField(' + index + ', \'weight\', this.value)"></td>' +
+      '<td><select class="form-select form-select-sm" onchange="updateField(' + index + ', \'nullPolicy\', this.value)">' +
+        optionsFor(CATALOGUE.nullPolicies, field.nullPolicy || 'skip') + '</select></td>' +
+      '<td><select class="form-select form-select-sm" onchange="updateField(' + index + ', \'survivorship\', this.value)">' +
+        optionsFor(CATALOGUE.survivorship, field.survivorship || 'most_complete') + '</select></td>' +
+      '<td>' +
+        '<label class="d-block" style="font-size:0.7rem;" title="The pair is rejected unless this field agrees"><input type="checkbox" class="form-check-input me-1" ' +
+          (field.required ? 'checked' : '') + ' onchange="updateField(' + index + ', \'required\', this.checked)">Required</label>' +
+        '<label class="d-block" style="font-size:0.7rem;" title="The pair is rejected if this field disagrees, but it may be missing"><input type="checkbox" class="form-check-input me-1" ' +
+          (field.blocker ? 'checked' : '') + ' onchange="updateField(' + index + ', \'blocker\', this.checked)">Must not conflict</label>' +
+      '</td>' +
+      '<td><button class="btn btn-sm btn-outline-danger p-0 px-1" onclick="removeField(' + index + ')"><i class="bi bi-x"></i></button></td>' +
+      '</tr>';
+  }).join('');
+}
+
+function addField() {
+  fields.push({ column: '', standardisers: ['trim', 'collapse_whitespace', 'lower'], comparator: 'jaro_winkler', weight: 1, nullPolicy: 'skip', survivorship: 'most_complete' });
+  renderFields();
+}
+function removeField(index) { fields.splice(index, 1); renderFields(); }
+function updateField(index, key, value) {
+  if (key === 'weight') value = Number(value);
+  fields[index][key] = value;
+  if (key === 'column' && !fields[index].key) fields[index].key = value;
+}
+function toggleStandardiser(index, key, on) {
+  var list = fields[index].standardisers || [];
+  var at = list.indexOf(key);
+  if (on && at === -1) list.push(key);
+  if (!on && at !== -1) list.splice(at, 1);
+  fields[index].standardisers = list;
+}
+
+// ── Blocking ──
+function renderBlocks() {
+  var wrap = document.getElementById('blockList');
+  if (!blocks.length) {
+    wrap.innerHTML = '<div class="text-muted small">No blocking key yet. Without one every record is compared with every other, which is only workable on small tables.</div>';
+    return;
+  }
+  wrap.innerHTML = blocks.map(function(block, index) {
+    return '<div class="row g-2 align-items-end mb-2">' +
+      '<div class="col-md-4"><select class="form-select form-select-sm" onchange="updateBlock(' + index + ', \'field\', this.value)">' +
+        columnOptions(block.field) + '</select></div>' +
+      '<div class="col-md-4"><select class="form-select form-select-sm" onchange="updateBlock(' + index + ', \'strategy\', this.value)">' +
+        optionsFor(CATALOGUE.blocking, block.strategy || 'exact') + '</select></div>' +
+      '<div class="col-md-2"><input type="number" min="1" class="form-control form-control-sm" placeholder="size" value="' +
+        escapeAttr(block.size === undefined ? '' : block.size) + '" onchange="updateBlock(' + index + ', \'size\', this.value)"></div>' +
+      '<div class="col-auto"><button class="btn btn-sm btn-outline-danger p-0 px-1" onclick="removeBlock(' + index + ')"><i class="bi bi-x"></i></button></div>' +
+      '</div>';
+  }).join('');
+}
+function addBlock() { blocks.push({ field: '', strategy: 'exact' }); renderBlocks(); }
+function removeBlock(index) { blocks.splice(index, 1); renderBlocks(); }
+function updateBlock(index, key, value) {
+  blocks[index][key] = key === 'size' ? Number(value) || undefined : value;
+}
+
+// ── Source and destination ──
+async function loadDatasets(which) {
+  var id = document.getElementById(which === 'source' ? 'sourceId' : 'destinationId').value;
+  var select = document.getElementById('sourceDataset');
+  if (which !== 'source') return;
+  if (!id) { select.innerHTML = '<option value="">Select a source first</option>'; return; }
+
+  select.innerHTML = '<option value="">Loading...</option>';
+  try {
+    var resp = await fetch('/mdm/sources/' + id + '/datasets');
+    var data = await resp.json();
+    datasets = (data && data.datasets) || [];
+    if (!datasets.length) {
+      select.innerHTML = '<option value="">' + (data.message || 'No tables found') + '</option>';
+      return;
+    }
+    select.innerHTML = '<option value="">Select...</option>' + datasets.map(function(ds) {
+      return '<option value="' + escapeAttr(ds.name) + '"' + (ds.name === savedSourceDataset ? ' selected' : '') + '>' +
+        escapeAttr(ds.name) + ' (' + ds.fields.length + ' field(s))</option>';
+    }).join('');
+    onDatasetChange();
+  } catch (e) {
+    select.innerHTML = '<option value="">' + e.message + '</option>';
+  }
+}
+
+function onDatasetChange() {
+  var name = document.getElementById('sourceDataset').value;
+  var dataset = datasets.find(function(ds) { return ds.name === name; });
+  columns = dataset ? dataset.fields.map(function(f) { return f.name; }) : [];
+
+  ['sourceIdField', 'sourceField', 'timestampField'].forEach(function(id) {
+    var placeholder = id === 'sourceIdField' ? 'Select...' : 'None';
+    document.getElementById(id).innerHTML = columnOptions(savedConfig[id] || '', placeholder);
+  });
+  renderFields();
+  renderBlocks();
+}
+
+function onDestinationChange() {
+  var option = document.getElementById('destinationId').selectedOptions[0];
+  var note = document.getElementById('destinationNote');
+  if (!option || !option.value) { note.innerHTML = ''; return; }
+  note.innerHTML = option.getAttribute('data-writable')
+    ? ''
+    : '<div class="alert alert-warning py-2 small mb-0"><i class="bi bi-exclamation-triangle me-1"></i>' +
+      escapeAttr(option.getAttribute('data-reason')) + '</div>';
+}
+
+// ── Save ──
+function collectConfig() {
+  return {
+    fields: fields,
+    blocks: blocks.filter(function(b) { return b.field; }),
+    sourceIdField: document.getElementById('sourceIdField').value || null,
+    sourceField: document.getElementById('sourceField').value || null,
+    timestampField: document.getElementById('timestampField').value || null,
+    sourcePriority: document.getElementById('sourcePriority').value.split(',').map(function(s) { return s.trim(); }).filter(Boolean),
+    autoMatchThreshold: Number(document.getElementById('autoMatchThreshold').value),
+    reviewThreshold: Number(document.getElementById('reviewThreshold').value),
+    goldenIdStrategy: document.getElementById('goldenIdStrategy').value,
+    goldenIdPrefix: document.getElementById('goldenIdPrefix').value.trim() || 'MDM',
+    strictClustering: document.getElementById('strictClustering').checked
+  };
+}
+
+async function saveModel() {
+  var payload = {
+    name: document.getElementById('name').value,
+    description: document.getElementById('description').value,
+    entityType: document.getElementById('entityType').value,
+    sourceId: document.getElementById('sourceId').value,
+    sourceDataset: document.getElementById('sourceDataset').value,
+    destinationId: document.getElementById('destinationId').value,
+    destinationTable: document.getElementById('destinationTable').value,
+    crosswalkTable: document.getElementById('crosswalkTable').value,
+    writeMode: document.getElementById('writeMode').value,
+    rowLimit: document.getElementById('rowLimit').value,
+    config: collectConfig()
+  };
+  var note = document.getElementById('changeNote');
+  if (note) payload.changeNote = note.value;
+
+  var result = document.getElementById('saveResult');
+  result.innerHTML = '<div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Saving...</div>';
+  try {
+    var resp = await fetch(MODEL_ID ? '/mdm/models/' + MODEL_ID : '/mdm/models', {
+      method: MODEL_ID ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    var data = await resp.json();
+    if (!data.success) { result.innerHTML = '<div class="alert alert-danger py-2 small">' + data.message + '</div>'; return; }
+    result.innerHTML = '<div class="alert alert-success py-2 small">Saved. Redirecting...</div>';
+    setTimeout(function() { window.location = '/mdm/models/' + (data.id || MODEL_ID); }, 600);
+  } catch (e) {
+    result.innerHTML = '<div class="alert alert-danger py-2 small">' + e.message + '</div>';
+  }
+}
+
+renderFields();
+renderBlocks();
+onDestinationChange();
+if (document.getElementById('sourceId').value) loadDatasets('source');
+</script>
+<%- include('../partials/footer') %>

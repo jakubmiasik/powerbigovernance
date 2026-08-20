@@ -13,6 +13,7 @@ A web application to investigate and govern Power BI workspaces, reports, datase
 - **Configurable Connection** — Set up service principal credentials via UI or environment variables
 - **Entra ID Authentication** — Protect the app with Microsoft Entra ID sign-in (optional)
 - **Data Reconciliation** — Define controls that verify records agree between two business systems, run them, and manage the resulting exceptions through a controlled lifecycle
+- **Master Data Management** — Match records that arrived from many systems, build one golden record per entity, and publish it to a chosen destination with full provenance
 
 ## Prerequisites
 
@@ -156,6 +157,51 @@ Each side of a comparison can be a **field**, a **SQL expression** evaluated by 
 Outcomes are match, missing from source A, missing from source B, value mismatch, duplicate record, and invalid or incomplete key. Numeric and date comparisons support tolerances so agreed-immaterial differences do not raise exceptions.
 
 Exceptions follow a controlled lifecycle — open, acknowledged, in investigation, resolved, ignored/accepted — and unsupported transitions are refused. Closing one requires a recorded reason. Every rule change, run, assignment, comment and decision is retained for audit, and an exception seen again after being closed is reopened with a note rather than silently staying closed.
+
+## Master Data Management
+
+Turns raw records that arrived from several source systems into one agreed version of each customer, product or supplier — the golden record.
+
+| Page | Purpose |
+|---|---|
+| `/mdm` | Models, headline numbers, recent runs |
+| `/mdm/models/:id` | Define the raw table, the fields, how records are matched, which value survives, and where to publish |
+| `/mdm/runs` | Full run history: which model version produced which golden records, and whether it was published |
+| `/mdm/runs/:id` | The golden records with per-value provenance, the crosswalk back to source records, and the pairs a steward still has to decide |
+
+Sources come from the same registry the reconciliation engine uses, so a lakehouse or database registered once serves both. The raw table is normally a Fabric lakehouse table holding every record from every system; the destination is chosen from the same list.
+
+**A Fabric lakehouse SQL analytics endpoint is read-only**, so it can hold the raw table but cannot be a destination. A Fabric *warehouse*, an Azure SQL database or any registered SQL Server can. The model form says so when a read-only destination is selected rather than letting a run fail at its last step.
+
+A **preview** masters the records and stores the result for review without touching the destination. **Publishing** also writes the golden records, and is only offered for an active model, because it replaces a table other systems read.
+
+### The pipeline
+
+**1. Standardise** — remove differences that carry no meaning, without overwriting the original: trim, collapse spaces, case, strip punctuation, fold accents, digits only, letters and digits only, sort words, and expand abbreviations from a configurable map (`ST` → `STREET`, `LTD` → `LIMITED`). Values the model treats as absent — `""`, `-`, `N/A`, `NULL`, `UNKNOWN` — become null, so two records are never merged for both saying "unknown".
+
+**2. Block** — comparing every record with every other is quadratic; a hundred thousand rows is five billion comparisons. A blocking key groups records that share something cheap and only compares within the group. Available keys: exact value, first N characters, Soundex, same words in any order, and shared N-gram. Use several — a pair is a candidate if it shares *any* of them, which recovers what a single key would miss. Every run reports its largest block, because one key that lands most records in a single block gives the quadratic cost straight back and the only symptom is a run that never finishes.
+
+**3. Match** — each candidate pair is scored field by field, with a comparator suited to the errors that field actually suffers:
+
+| Comparator | Use it for |
+|---|---|
+| Exact | Identifiers, where partial agreement means nothing |
+| Edit distance | References and short codes with typos |
+| Jaro-Winkler | Person names — it rewards agreement at the start |
+| Shared words | Company names and addresses, where word order and extra tokens vary |
+| Numeric tolerance | Amounts and quantities; degrades past the tolerance rather than falling off a cliff |
+| Date tolerance | Dates recorded at different precision |
+| Sounds alike | A blunt instrument — give it less weight than a string comparator |
+
+Weights are normalised across the fields that could actually be compared, so a pair where half the fields are empty is not quietly penalised — without that, sparse records never reach the threshold, and they are the ones most in need of mastering. Per field you can also choose what a missing value means (ignore it, count it as disagreement, or score it neutral), mark a field **required** (the pair is rejected unless it agrees — a shared tax ID), or mark it a **blocker** (the pair is rejected if it *disagrees*, but it may be absent — country, legal entity). Two thresholds decide the outcome: merge automatically above one, send to a steward between them, reject below.
+
+**4. Group** — matched pairs become entities by transitive closure. Transitivity is also how master data over-merges: A matches B, B matches C, and A and C are unrelated. **Strict grouping** refuses to merge a group unless every pair within it matched, trading recall for a guarantee. Leave it off while tuning; turn it on before anyone depends on the output. Either way, a group far larger than the rest is flagged as suspected over-merging.
+
+**5. Survive** — the rule that picks the surviving value is a business decision, so each field carries its own: most recent, most trusted source, most agreed (voting, ties broken by trust then recency), longest, first non-empty, highest, lowest, total, or reserved for a steward. A source that is not on the trust list ranks last, never first, so an unexpected new system cannot silently outrank the book of record.
+
+Every surviving value records which rule chose it, why, and which source record it came from. A golden record whose values cannot be traced back cannot be defended, and disagreement is the normal case in master data. The optional crosswalk table carries the same mapping to the destination.
+
+Pairs in the middle band go to a steward. Those decisions are the tuning signal: pairs confirmed as the same entity that scored below the threshold say it is set too high, and rejected pairs scoring close to it say the opposite.
 
 ## Operational Notes
 
