@@ -10,7 +10,7 @@ const {
 } = require('../services/reconciliationService');
 const sqlSource = require('../services/sqlSourceService');
 const { encryptSecret, isEncryptionConfigured } = require('../services/secretCryptoService');
-const { compareRuns, VERDICT_DEFS } = require('../services/reconciliationComparisonService');
+const { compareRuns, compareAcrossRules, latestPairsByRule, VERDICT_DEFS, SEVERITY_LEVELS } = require('../services/reconciliationComparisonService');
 
 const SOURCE_KIND = { FABRIC: 'fabric-sql', EXTERNAL: 'external-sql' };
 
@@ -671,16 +671,31 @@ router.get('/compare', async (req, res) => {
   const base = { title: 'Compare Reconciliation Runs', user: req.user, verdictDefs: VERDICT_DEFS };
   try {
     const runs = (await repo.listRuns({ limit: 300 })).filter(run => run.status === 'completed');
+
+    // Every rule's own latest pair, so the page opens on "how is each control
+    // moving" rather than on an empty form. One read covers all of them.
+    let overview = [];
+    try {
+      const pairRunIds = latestPairsByRule(runs)
+        .flatMap(pair => [pair.later, pair.earlier])
+        .filter(Boolean)
+        .map(run => run.id);
+      const findings = await repo.listFindingsForRuns(pairRunIds);
+      overview = compareAcrossRules({ runs, findings });
+    } catch (overviewErr) {
+      console.warn('[Reconciliation] Could not build the per-rule comparison:', overviewErr.message);
+    }
+
     if (!fromId || !toId) {
       return view(res, 'reconciliation/compare', {
-        ...base, runs, comparison: null, fromId, toId, error: null, notice: null,
+        ...base, runs, overview, comparison: null, fromId, toId, error: null, notice: null,
       });
     }
 
     const [fromRun, toRun] = await Promise.all([repo.getRunById(fromId), repo.getRunById(toId)]);
     if (!fromRun || !toRun) {
       return view(res, 'reconciliation/compare', {
-        ...base, runs, comparison: null, fromId, toId, notice: null, error: 'One of the selected runs no longer exists.',
+        ...base, runs, overview, comparison: null, fromId, toId, notice: null, error: 'One of the selected runs no longer exists.',
       });
     }
 
@@ -708,10 +723,10 @@ router.get('/compare', async (req, res) => {
       ? 'Run ' + missingDetail.join(' and ') + ' recorded exceptions but no per-item detail, because it ran before findings were kept per run. The totals below are accurate; the item lists are not.'
       : null;
 
-    view(res, 'reconciliation/compare', { ...base, runs, comparison, fromId, toId, error, notice });
+    view(res, 'reconciliation/compare', { ...base, runs, overview, comparison, fromId, toId, error, notice });
   } catch (err) {
     view(res, 'reconciliation/compare', {
-      ...base, runs: [], comparison: null, fromId, toId, notice: null, error: err.message,
+      ...base, runs: [], overview: [], comparison: null, fromId, toId, notice: null, error: err.message,
     });
   }
 });
@@ -740,17 +755,98 @@ router.get('/exceptions', async (req, res) => {
       ruleId: req.query.ruleId ? Number.parseInt(req.query.ruleId, 10) : null,
       openOnly: req.query.status ? false : req.query.all !== '1',
     };
-    const [exceptions, rules] = await Promise.all([repo.listExceptions(filters), repo.listRules()]);
+    const [exceptions, rules, owners] = await Promise.all([
+      repo.listExceptions(filters), repo.listRules(), repo.listOwners(),
+    ]);
     view(res, 'reconciliation/exceptions', {
-      title: 'Reconciliation Exceptions', user: req.user, exceptions, rules,
+      title: 'Reconciliation Exceptions', user: req.user, exceptions, rules, owners,
       filters: { ...filters, all: req.query.all === '1' },
-      outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, error: null,
+      outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, severityLevels: SEVERITY_LEVELS, error: null,
     });
   } catch (err) {
     view(res, 'reconciliation/exceptions', {
-      title: 'Reconciliation Exceptions', user: req.user, exceptions: [], rules: [],
-      filters: {}, outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, error: err.message,
+      title: 'Reconciliation Exceptions', user: req.user, exceptions: [], rules: [], owners: [],
+      filters: {}, outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, severityLevels: SEVERITY_LEVELS, error: err.message,
     });
+  }
+});
+
+/**
+ * Applies one decision — owner, severity, status, or a combination — to several
+ * exceptions.
+ *
+ * The lifecycle is still enforced per exception. A selection routinely mixes
+ * statuses, so a bulk move to "resolved" is legitimate for the open ones and not
+ * for those already closed; the ones that can move do, and the rest are named with
+ * the reason. Silently skipping them, or forcing the transition, would both put the
+ * audit trail at odds with the process it is meant to evidence.
+ */
+router.post('/exceptions/batch', async (req, res) => {
+  try {
+    const ids = [].concat(req.body.ids || [])
+      .map(id => Number.parseInt(id, 10))
+      .filter(Number.isFinite);
+    if (!ids.length) return res.json({ success: false, message: 'Select at least one exception.' });
+
+    const assignOwner = req.body.assignOwner === true || req.body.assignOwner === 'true';
+    const owner = (req.body.owner || '').trim() || null;
+    const severity = req.body.severity || null;
+    const toStatus = req.body.status || null;
+    const comment = (req.body.comment || '').trim() || null;
+    const reason = (req.body.reason || '').trim() || null;
+
+    if (!assignOwner && !severity && !toStatus && !comment) {
+      return res.json({ success: false, message: 'Choose an owner, a severity, a status, or add a comment.' });
+    }
+    if (severity && !SEVERITY_LEVELS.includes(severity)) {
+      return res.json({ success: false, message: 'Unknown severity.' });
+    }
+    if (toStatus && !STATUS_BY_KEY.has(toStatus)) {
+      return res.json({ success: false, message: 'Unknown status.' });
+    }
+    // Closing requires a recorded reason whether one exception is closed or fifty.
+    if (toStatus && (toStatus === EXCEPTION_STATUS.RESOLVED || toStatus === EXCEPTION_STATUS.ACCEPTED) && !reason) {
+      return res.json({ success: false, message: 'Record why these exceptions are being closed.' });
+    }
+
+    const exceptions = await repo.getExceptionsByIds(ids);
+    const found = new Map(exceptions.map(exception => [Number(exception.id), exception]));
+
+    const eligible = [];
+    const skipped = [];
+    for (const id of ids) {
+      const exception = found.get(id);
+      if (!exception) { skipped.push({ id, key: '#' + id, message: 'No longer exists.' }); continue; }
+      if (toStatus && toStatus !== exception.status && !isStatusTransitionAllowed(exception.status, toStatus)) {
+        skipped.push({
+          id, key: exception.business_key,
+          message: 'Cannot move from "' + exception.status + '" to "' + toStatus + '".',
+        });
+        continue;
+      }
+      eligible.push(exception);
+    }
+
+    const results = eligible.length
+      ? await repo.batchUpdateExceptions(eligible, {
+        owner, assignOwner, severity, toStatus, comment, reason, actor: actorOf(req),
+      })
+      : [];
+
+    const failed = results.filter(result => !result.success).map(result => ({
+      id: result.id,
+      key: (found.get(result.id) || {}).business_key || ('#' + result.id),
+      message: result.message,
+    }));
+
+    res.json({
+      success: true,
+      updated: results.filter(result => result.success && result.changed).length,
+      unchanged: results.filter(result => result.success && !result.changed).length,
+      skipped: skipped.concat(failed),
+    });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
   }
 });
 

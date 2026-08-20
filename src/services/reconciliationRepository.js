@@ -523,6 +523,105 @@ async function commentOnException(id, comment, actor) {
   return withConnection(conn => addExceptionEvent(conn, id, { action: 'comment', comment, actor }));
 }
 
+/**
+ * Applies owner, severity and status to one exception on a connection the caller
+ * owns, recording an event for each part that actually changed.
+ *
+ * Severity is set by the engine from the outcome, but a business decides what is
+ * material to it — an amount mismatch under a threshold may not warrant the same
+ * attention as a missing invoice. Overriding it is a judgement worth recording,
+ * which is why it lands in the audit trail like any other decision.
+ */
+async function applyExceptionChange(conn, exception, { owner, assignOwner, severity, toStatus, comment, reason, actor }) {
+  const assignments = [];
+  const params = [int('id', exception.id)];
+  const events = [];
+
+  if (assignOwner && (owner || null) !== (exception.owner || null)) {
+    assignments.push('owner=@owner');
+    params.push(str('owner', owner || null));
+    events.push({ action: 'assigned', comment: owner ? 'Assigned to ' + owner : 'Owner cleared', actor });
+  }
+  if (severity && severity !== exception.severity) {
+    assignments.push('severity=@severity');
+    params.push(str('severity', severity));
+    events.push({ action: 'severity-change', comment: 'Severity ' + exception.severity + ' → ' + severity, actor });
+  }
+  if (toStatus && toStatus !== exception.status) {
+    const closing = CLOSED_STATUSES.has(toStatus);
+    assignments.push('status=@status', 'resolved_at=' + (closing ? 'SYSUTCDATETIME()' : 'NULL'));
+    params.push(str('status', toStatus));
+    if (reason) {
+      assignments.push('resolution_reason=@reason');
+      params.push(str('reason', reason));
+    }
+    events.push({ action: 'status-change', fromStatus: exception.status, toStatus, comment, actor });
+  } else if (comment) {
+    events.push({ action: 'comment', comment, actor });
+  }
+
+  if (assignments.length) {
+    await execSql(conn, 'UPDATE recon_exceptions SET ' + assignments.join(', ') + ' WHERE id=@id', params);
+  }
+  for (const event of events) {
+    await addExceptionEvent(conn, exception.id, event);
+  }
+  return events.length;
+}
+
+/**
+ * Applies the same decision to several exceptions on one connection. Each is
+ * written separately so one failure does not discard the rest, and every one gets
+ * its own history entries — a bulk action must not be less auditable than the same
+ * decisions taken one at a time.
+ */
+async function batchUpdateExceptions(exceptions, change) {
+  return withConnection(async conn => {
+    const results = [];
+    for (const exception of exceptions) {
+      try {
+        const changes = await applyExceptionChange(conn, exception, change);
+        results.push({ id: exception.id, success: true, changed: changes > 0 });
+      } catch (err) {
+        results.push({ id: exception.id, success: false, message: err.message });
+      }
+    }
+    return results;
+  });
+}
+
+/** The exceptions named by a list of ids, for validating a bulk decision. */
+async function getExceptionsByIds(ids) {
+  const wanted = (ids || []).map(id => Number.parseInt(id, 10)).filter(Number.isFinite);
+  if (!wanted.length) return [];
+  return withConnection(async conn => {
+    // Parameterised one id at a time rather than interpolated into an IN list, so
+    // the values never reach the statement as text.
+    const params = wanted.map((id, index) => int('e' + index, id));
+    const placeholders = wanted.map((_, index) => '@e' + index).join(', ');
+    const rows = await execSql(conn, 'SELECT * FROM recon_exceptions WHERE id IN (' + placeholders + ')', params);
+    return rows.map(mapException);
+  });
+}
+
+/** Findings for several runs in one read, so a per-rule overview is one query. */
+async function listFindingsForRuns(runIds) {
+  const wanted = (runIds || []).map(id => Number.parseInt(id, 10)).filter(Number.isFinite);
+  if (!wanted.length) return [];
+  return withConnection(async conn => {
+    try {
+      const params = wanted.map((id, index) => int('r' + index, id));
+      const placeholders = wanted.map((_, index) => '@r' + index).join(', ');
+      return await execSql(conn,
+        'SELECT run_id, rule_id, exception_id, fingerprint, business_key, outcome, severity, is_new'
+        + ' FROM recon_run_findings WHERE run_id IN (' + placeholders + ')', params);
+    } catch (err) {
+      if ((err.message || '').includes('Invalid object name')) return [];
+      throw err;
+    }
+  });
+}
+
 // ── Oversight ──
 
 /**
@@ -622,8 +721,9 @@ module.exports = {
   listRules, getRuleById, createRule, updateRule, setRuleStatus, deleteRule, getRuleVersions,
   setRuleStatusAndOwner, batchUpdateRules, listOwners,
   createRun, completeRun, listRuns, getRunById,
-  recordExceptions, listRunFindings, hasRunFindings,
-  listExceptions, getExceptionById, getExceptionEvents,
+  recordExceptions, listRunFindings, hasRunFindings, listFindingsForRuns,
+  listExceptions, getExceptionById, getExceptionsByIds, getExceptionEvents,
+  batchUpdateExceptions,
   updateExceptionStatus, assignException, commentOnException,
   getDashboardData,
   EXCEPTION_STATUS,

@@ -2051,3 +2051,190 @@ test('a batch activation moves the valid rules and names the ones it could not a
     await new Promise(resolve => server.close(resolve));
   }
 });
+
+// ── Reconciliation: comparing every rule at once ──
+test('the per-rule overview pairs each rule\'s two most recent runs', () => {
+  const runs = [
+    { id: 1, rule_id: 9, rule_name: 'Invoices', status: 'completed', started_at: '2026-08-01T10:00:00Z', exception_count: 4 },
+    { id: 2, rule_id: 9, rule_name: 'Invoices', status: 'completed', started_at: '2026-08-10T10:00:00Z', exception_count: 2 },
+    { id: 3, rule_id: 9, rule_name: 'Invoices', status: 'completed', started_at: '2026-07-01T10:00:00Z', exception_count: 9 },
+    { id: 4, rule_id: 10, rule_name: 'Ledger', status: 'completed', started_at: '2026-08-05T10:00:00Z', exception_count: 1 },
+    { id: 5, rule_id: 10, rule_name: 'Ledger', status: 'failed', started_at: '2026-08-09T10:00:00Z' },
+  ];
+  const pairs = reconCompare.latestPairsByRule(runs);
+  const invoices = pairs.find(pair => pair.ruleId === 9);
+  assert.equal(invoices.later.id, 2, 'the newest run is the later side');
+  assert.equal(invoices.earlier.id, 1, 'the one before it is the earlier side, not the oldest');
+
+  // A failed run is not a result to compare against.
+  const ledger = pairs.find(pair => pair.ruleId === 10);
+  assert.equal(ledger.later.id, 4);
+  assert.equal(ledger.earlier, null);
+});
+
+test('a rule that has only ever run once is listed rather than omitted', () => {
+  // A control nobody has re-run is exactly the one worth noticing.
+  const overview = reconCompare.compareAcrossRules({
+    runs: [{ id: 7, rule_id: 11, rule_name: 'New control', status: 'completed', started_at: '2026-08-01T10:00:00Z', exception_count: 3 }],
+    findings: [
+      { run_id: 7, rule_id: 11, fingerprint: 'a', business_key: 'K1', outcome: 'duplicate', severity: 'high' },
+      { run_id: 7, rule_id: 11, fingerprint: 'b', business_key: 'K2', outcome: 'duplicate', severity: 'low' },
+    ],
+  });
+  assert.equal(overview.length, 1);
+  assert.equal(overview[0].comparable, false);
+  assert.equal(overview[0].comparison, null);
+  assert.equal(overview[0].exceptionCount, 3);
+  assert.deepEqual(overview[0].severity, { high: 1, medium: 0, low: 1 });
+});
+
+test('the overview reports each rule\'s movement and keeps rules independent', () => {
+  const runs = [
+    { id: 1, rule_id: 9, rule_name: 'Improving', status: 'completed', started_at: '2026-08-01T10:00:00Z', exception_count: 2 },
+    { id: 2, rule_id: 9, rule_name: 'Improving', status: 'completed', started_at: '2026-08-10T10:00:00Z', exception_count: 0 },
+    { id: 3, rule_id: 10, rule_name: 'Worsening', status: 'completed', started_at: '2026-08-02T10:00:00Z', exception_count: 0 },
+    { id: 4, rule_id: 10, rule_name: 'Worsening', status: 'completed', started_at: '2026-08-11T10:00:00Z', exception_count: 2 },
+  ];
+  const findings = [
+    { run_id: 1, rule_id: 9, fingerprint: 'a', business_key: 'A', outcome: 'duplicate', severity: 'medium' },
+    { run_id: 1, rule_id: 9, fingerprint: 'b', business_key: 'B', outcome: 'duplicate', severity: 'medium' },
+    { run_id: 4, rule_id: 10, fingerprint: 'c', business_key: 'C', outcome: 'missing_from_b', severity: 'high' },
+    { run_id: 4, rule_id: 10, fingerprint: 'd', business_key: 'D', outcome: 'missing_from_b', severity: 'high' },
+  ];
+  const overview = reconCompare.compareAcrossRules({ runs, findings });
+  const byName = Object.fromEntries(overview.map(row => [row.ruleName, row]));
+
+  assert.equal(byName.Improving.summary.verdict, 'better');
+  assert.equal(byName.Improving.summary.resolved, 2);
+  assert.equal(byName.Worsening.summary.verdict, 'worse');
+  assert.equal(byName.Worsening.summary.introduced, 2);
+  // Findings are grouped by run, so one rule's items never leak into another's.
+  assert.equal(byName.Improving.summary.introduced, 0);
+});
+
+test('a rule the overview cannot compare does not take the other rules down with it', () => {
+  const overview = reconCompare.compareAcrossRules({
+    runs: [
+      // Same rule id but the same run twice — compareRuns refuses this pair.
+      { id: 1, rule_id: 9, rule_name: 'Broken', status: 'completed', started_at: '2026-08-01T10:00:00Z' },
+      { id: 1, rule_id: 9, rule_name: 'Broken', status: 'completed', started_at: '2026-08-02T10:00:00Z' },
+      { id: 3, rule_id: 10, rule_name: 'Fine', status: 'completed', started_at: '2026-08-01T10:00:00Z' },
+      { id: 4, rule_id: 10, rule_name: 'Fine', status: 'completed', started_at: '2026-08-02T10:00:00Z' },
+    ],
+    findings: [],
+  });
+  const broken = overview.find(row => row.ruleName === 'Broken');
+  const fine = overview.find(row => row.ruleName === 'Fine');
+  assert.ok(broken.error, 'the unusable pair reports its problem');
+  assert.equal(fine.summary.verdict, 'clean');
+});
+
+// ── Reconciliation: bulk decisions on exceptions ──
+test('a bulk decision records owner, severity and status as separate history entries', async () => {
+  const { result, executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    [{ id: 1, status: 'open', severity: 'medium', owner: null }],
+    { assignOwner: true, owner: 'Ann', severity: 'high', toStatus: 'investigating', actor: 'tester' }
+  ));
+
+  assert.equal(result[0].success, true);
+  assert.equal(result[0].changed, true);
+  const events = executed.filter(entry => /INSERT INTO recon_exception_events/.test(entry.sql));
+  assert.equal(events.length, 3, 'assignment, severity change and status change are each auditable');
+
+  const update = executed.find(entry => /UPDATE recon_exceptions/.test(entry.sql));
+  assert.match(update.sql, /owner=@owner/);
+  assert.match(update.sql, /severity=@severity/);
+  assert.match(update.sql, /status=@status/);
+});
+
+test('a bulk decision that matches what an exception already says writes nothing', async () => {
+  const { result, executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    [{ id: 1, status: 'open', severity: 'high', owner: 'Ann' }],
+    { assignOwner: true, owner: 'Ann', severity: 'high', toStatus: 'open', actor: 'tester' }
+  ));
+  assert.equal(result[0].changed, false);
+  assert.equal(executed.length, 0, 'no update and no history entry for a no-op');
+});
+
+test('closing in bulk stamps the reason and the resolution date', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    [{ id: 1, status: 'investigating', severity: 'high', owner: 'Ann' }],
+    { toStatus: 'resolved', reason: 'Source system corrected', actor: 'tester' }
+  ));
+  const update = executed.find(entry => /UPDATE recon_exceptions/.test(entry.sql));
+  assert.match(update.sql, /resolved_at=SYSUTCDATETIME\(\)/);
+  assert.match(update.sql, /resolution_reason=@reason/);
+});
+
+test('reopening clears the resolution date rather than leaving a stale one', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    [{ id: 1, status: 'resolved', severity: 'high' }],
+    { toStatus: 'open', actor: 'tester' }
+  ));
+  const update = executed.find(entry => /UPDATE recon_exceptions/.test(entry.sql));
+  assert.match(update.sql, /resolved_at=NULL/);
+});
+
+test('exception ids are parameterised, never interpolated into the statement', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.getExceptionsByIds([4, 9, 'nonsense']));
+  const select = executed[0];
+  assert.match(select.sql, /WHERE id IN \(@e0, @e1\)/);
+  assert.deepEqual(select.params.map(p => p.value), [4, 9]);
+});
+
+test('a bulk status change moves what it can and names what it cannot', async () => {
+  // A selection routinely mixes statuses. The open one can be resolved; the one
+  // already accepted cannot, and forcing it would put the audit trail at odds with
+  // the process it evidences.
+  const rows = [
+    { id: 1, business_key: 'INV-1', status: 'open', severity: 'medium' },
+    { id: 2, business_key: 'INV-2', status: 'accepted', severity: 'low' },
+  ];
+  const original = { getExceptionsByIds: reconRepo.getExceptionsByIds, batchUpdateExceptions: reconRepo.batchUpdateExceptions };
+  reconRepo.getExceptionsByIds = async () => rows;
+  let applied = null;
+  reconRepo.batchUpdateExceptions = async (exceptions, change) => {
+    applied = { ids: exceptions.map(e => e.id), change };
+    return exceptions.map(e => ({ id: e.id, success: true, changed: true }));
+  };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/reconciliation/exceptions/batch', {
+      ids: [1, 2], status: 'resolved', reason: 'Corrected at source', assignOwner: true, owner: 'Ann', severity: 'high',
+    });
+    assert.equal(body.success, true);
+    assert.deepEqual(applied.ids, [1]);
+    assert.equal(applied.change.severity, 'high');
+    assert.equal(applied.change.owner, 'Ann');
+    assert.equal(body.skipped.length, 1);
+    assert.equal(body.skipped[0].key, 'INV-2');
+    assert.match(body.skipped[0].message, /Cannot move from "accepted"/);
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('closing exceptions in bulk still requires a recorded reason', async () => {
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/reconciliation/exceptions/batch', { ids: [1, 2], status: 'resolved' });
+    assert.equal(body.success, false);
+    assert.match(body.message, /Record why/);
+
+    const empty = await postJson(server, '/reconciliation/exceptions/batch', { ids: [1] });
+    assert.equal(empty.success, false);
+    assert.match(empty.message, /owner, a severity, a status/);
+
+    const bad = await postJson(server, '/reconciliation/exceptions/batch', { ids: [1], severity: 'catastrophic' });
+    assert.equal(bad.success, false);
+    assert.match(bad.message, /Unknown severity/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});

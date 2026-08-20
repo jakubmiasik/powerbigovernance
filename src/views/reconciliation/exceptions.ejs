@@ -75,15 +75,66 @@
     <span><i class="bi bi-list-task me-2"></i>Exceptions (<%= exceptions.length %>)</span>
     <input type="text" class="form-control form-control-sm" style="max-width:260px;" placeholder="Filter by key or rule..." oninput="filterTable(this, 'recon-exceptions-table')">
   </div>
+  <!-- Bulk decisions. Hidden until something is selected, so it does not sit there
+       inert above a list nobody has picked from yet. -->
+  <div class="card-body border-bottom py-2 d-none" id="bulkBar">
+    <div class="row g-2 align-items-end">
+      <div class="col-auto"><span class="badge bg-primary" id="bulkCount">0 selected</span></div>
+      <div class="col-md-3">
+        <label class="form-label small mb-1" for="bulkOwner">Assign to</label>
+        <input type="text" class="form-control form-control-sm" id="bulkOwner" list="ownerOptions" placeholder="name@company.com">
+        <datalist id="ownerOptions">
+          <% (owners || []).forEach(function(owner) { %><option value="<%= owner %>"></option><% }) %>
+        </datalist>
+        <div class="form-check small mt-1">
+          <input class="form-check-input" type="checkbox" id="bulkAssign">
+          <label class="form-check-label" for="bulkAssign">Apply owner (blank unassigns)</label>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small mb-1" for="bulkSeverity">Severity</label>
+        <select class="form-select form-select-sm" id="bulkSeverity">
+          <option value="">Leave unchanged</option>
+          <% (severityLevels || ['high','medium','low']).forEach(function(level) { %>
+            <option value="<%= level %>"><%= level %></option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small mb-1" for="bulkStatus">Status</label>
+        <select class="form-select form-select-sm" id="bulkStatus" onchange="toggleBulkReason()">
+          <option value="">Leave unchanged</option>
+          <% statusDefs.forEach(function(s) { %><option value="<%= s.key %>"><%= s.label %></option><% }) %>
+        </select>
+      </div>
+      <div class="col-md-3 d-none" id="bulkReasonWrap">
+        <label class="form-label small mb-1" for="bulkReason">Reason (required to close)</label>
+        <input type="text" class="form-control form-control-sm" id="bulkReason" placeholder="Cause and action taken">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small mb-1" for="bulkComment">Comment</label>
+        <input type="text" class="form-control form-control-sm" id="bulkComment" placeholder="Optional note for the audit trail">
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-sm btn-primary" onclick="applyBulk()"><i class="bi bi-check2-all me-1"></i>Apply</button>
+      </div>
+    </div>
+    <div class="mt-2" id="bulkResult"></div>
+  </div>
+
   <div class="table-responsive">
     <table class="table table-sm table-hover mb-0" id="recon-exceptions-table">
-      <thead><tr><th>Business key</th><th>Rule</th><th>Type</th><th>Severity</th><th>Status</th><th>Owner</th><th>Age</th><th>Seen</th></tr></thead>
+      <thead><tr>
+        <th style="width:32px;"><input type="checkbox" class="form-check-input" title="Select all" onchange="toggleAllExceptions(this.checked)"></th>
+        <th>Business key</th><th>Rule</th><th>Type</th><th>Severity</th><th>Status</th><th>Owner</th><th>Age</th><th>Seen</th>
+      </tr></thead>
       <tbody>
         <% if (!exceptions.length) { %>
-          <tr data-filter="none"><td colspan="8" class="text-muted small py-3">Nothing matches. Either the controls are clean or the filters are too narrow.</td></tr>
+          <tr data-filter="none"><td colspan="9" class="text-muted small py-3">Nothing matches. Either the controls are clean or the filters are too narrow.</td></tr>
         <% } %>
         <% exceptions.forEach(function(ex) { var age = ageDays(ex.first_seen_at); %>
           <tr data-filter="<%= [ex.business_key || '', ex.rule_name || '', ex.outcome, ex.status, ex.owner || ''].join(' ').toLowerCase() %>">
+            <td><input type="checkbox" class="form-check-input exception-select" value="<%= ex.id %>" onchange="updateBulkBar()"></td>
             <td><a href="/reconciliation/exceptions/<%= ex.id %>"><strong><%= ex.business_key %></strong></a></td>
             <td class="small"><%= ex.rule_name || ('Rule #' + ex.rule_id) %><% if (ex.business_area) { %><div class="text-muted" style="font-size:0.7rem;"><%= ex.business_area %></div><% } %></td>
             <td class="small"><%= ex.outcome %></td>
@@ -97,6 +148,79 @@
       </tbody>
     </table>
   </div>
-  <div class="card-footer small text-muted">An exception seen many times is the same item failing run after run — usually a systemic problem rather than a record to fix once.</div>
+  <div class="card-footer small text-muted">
+    An exception seen many times is the same item failing run after run — usually a systemic problem rather than a record to fix once.
+    Bulk decisions follow the same lifecycle as single ones: an exception that cannot make the transition is named rather than forced,
+    closing needs a reason, and every change is written to that exception's own history.
+  </div>
 </div>
+
+<script>
+function selectedExceptions() {
+  return Array.from(document.querySelectorAll('.exception-select:checked'));
+}
+
+function toggleAllExceptions(checked) {
+  // Only the rows the text filter is currently showing, so "select all" cannot
+  // quietly include exceptions the user has filtered out of view.
+  document.querySelectorAll('#recon-exceptions-table tbody tr').forEach(function(row) {
+    if (row.style.display === 'none') return;
+    var box = row.querySelector('.exception-select');
+    if (box) box.checked = checked;
+  });
+  updateBulkBar();
+}
+
+function updateBulkBar() {
+  var selected = selectedExceptions();
+  document.getElementById('bulkBar').classList.toggle('d-none', selected.length === 0);
+  document.getElementById('bulkCount').textContent = selected.length + ' selected';
+}
+
+function toggleBulkReason() {
+  var status = document.getElementById('bulkStatus').value;
+  var closing = status === 'resolved' || status === 'accepted';
+  document.getElementById('bulkReasonWrap').classList.toggle('d-none', !closing);
+}
+
+function escapeText(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+async function applyBulk() {
+  var ids = selectedExceptions().map(function(el) { return el.value; });
+  if (!ids.length) return;
+
+  var payload = {
+    ids: ids,
+    assignOwner: document.getElementById('bulkAssign').checked,
+    owner: document.getElementById('bulkOwner').value.trim(),
+    severity: document.getElementById('bulkSeverity').value,
+    status: document.getElementById('bulkStatus').value,
+    reason: document.getElementById('bulkReason').value.trim(),
+    comment: document.getElementById('bulkComment').value.trim()
+  };
+
+  var result = document.getElementById('bulkResult');
+  result.innerHTML = '<div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Applying to ' + ids.length + ' exception(s)...</div>';
+  try {
+    var resp = await fetch('/reconciliation/exceptions/batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    var data = await resp.json();
+    if (!data.success) { result.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeText(data.message) + '</div>'; return; }
+
+    // Exceptions that could not take the change are named — "38 of 50 updated"
+    // without saying which twelve is not something anyone can act on.
+    var skipped = (data.skipped || []).map(function(s) {
+      return '<li>' + escapeText(s.key) + ' — ' + escapeText(s.message) + '</li>';
+    }).join('');
+    result.innerHTML = '<div class="alert alert-' + (skipped ? 'warning' : 'success') + ' py-2 small mb-0">' +
+      data.updated + ' exception(s) updated' +
+      (data.unchanged ? ', ' + data.unchanged + ' already had these values' : '') + '.' +
+      (skipped ? '<br>Not changed:<ul class="mb-0">' + skipped + '</ul>' : ' Reloading...') + '</div>';
+    setTimeout(function() { window.location.reload(); }, skipped ? 5000 : 700);
+  } catch (e) {
+    result.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeText(e.message) + '</div>';
+  }
+}
+</script>
 <%- include('../partials/footer') %>

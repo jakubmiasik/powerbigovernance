@@ -23,8 +23,83 @@
 <% if (error) { %><div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div><% } %>
 <% if (notice) { %><div class="alert alert-info small"><i class="bi bi-info-circle me-2"></i><%= notice %></div><% } %>
 
+<!-- Every rule's own latest pair, so the page opens on how each control is moving
+     rather than on an empty form. -->
 <div class="card mb-4">
-  <div class="card-header"><i class="bi bi-sliders me-2"></i>Select Two Runs</div>
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-grid-3x3-gap me-2"></i>Every Rule, Latest Run vs Previous</span>
+    <span class="text-muted small"><%= (overview || []).length %> rule(s) with at least one completed run</span>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead><tr>
+        <th>Rule</th><th>Latest run</th><th class="text-end">Exceptions</th><th class="text-end">Change</th>
+        <th class="text-end">New</th><th class="text-end">Fixed</th><th class="text-end">Still failing</th>
+        <th>Severity now</th><th>Movement</th><th></th>
+      </tr></thead>
+      <tbody>
+        <% if (!(overview || []).length) { %>
+          <tr><td colspan="10" class="text-muted small py-3">No completed runs yet. Run a rule from the <a href="/reconciliation/rules">Rules</a> page first.</td></tr>
+        <% } %>
+        <% (overview || []).forEach(function(row) {
+             var verdict = row.summary ? (verdictDefs[row.summary.verdict] || { label: row.summary.verdict, color: 'secondary' }) : null;
+             var delta = row.comparison ? (row.comparison.metrics.find(function(m) { return m.key === 'exception_count'; }) || {}) : {};
+        %>
+          <tr>
+            <td class="small"><strong><%= row.ruleName %></strong></td>
+            <td class="small">
+              <% if (row.later) { %>
+                <a href="/reconciliation/runs/<%= row.later.id %>">#<%= row.later.id %></a>
+                <span class="text-muted"><%= row.later.started_at ? new Date(row.later.started_at).toLocaleString() : '' %></span>
+              <% } else { %>-<% } %>
+            </td>
+            <td class="text-end small">
+              <% if (row.exceptionCount) { %><span class="badge bg-danger"><%= row.exceptionCount %></span>
+              <% } else { %><span class="badge bg-success">0</span><% } %>
+            </td>
+            <td class="text-end small <%= delta.delta > 0 ? 'text-danger' : delta.delta < 0 ? 'text-success' : 'text-muted' %>">
+              <% if (!row.comparable) { %>-
+              <% } else if (delta.delta === null || delta.delta === undefined) { %>-
+              <% } else { %><%= delta.delta > 0 ? '+' : '' %><%= delta.delta %><% } %>
+            </td>
+            <td class="text-end small"><%= row.summary ? row.summary.introduced : '-' %></td>
+            <td class="text-end small"><%= row.summary ? row.summary.resolved : '-' %></td>
+            <td class="text-end small"><%= row.summary ? row.summary.persisting : '-' %></td>
+            <td class="small">
+              <% if (row.severity.high) { %><span class="badge bg-danger me-1"><%= row.severity.high %> high</span><% } %>
+              <% if (row.severity.medium) { %><span class="badge bg-warning me-1"><%= row.severity.medium %> med</span><% } %>
+              <% if (row.severity.low) { %><span class="badge bg-secondary"><%= row.severity.low %> low</span><% } %>
+              <% if (!row.severity.high && !row.severity.medium && !row.severity.low) { %><span class="text-muted">—</span><% } %>
+            </td>
+            <td class="small">
+              <% if (row.error) { %><span class="text-muted" title="<%= row.error %>">not comparable</span>
+              <% } else if (!row.comparable) { %>
+                <span class="text-muted" title="This rule has only run once, so there is nothing to compare it against">first run</span>
+              <% } else { %>
+                <span class="badge bg-<%= verdict.color %>"><%= verdict.label %></span>
+                <% if (row.comparison.versionChanged) { %>
+                  <i class="bi bi-exclamation-triangle text-warning ms-1" title="The rule changed between these runs, so the movement may be the control being redefined"></i>
+                <% } %>
+              <% } %>
+            </td>
+            <td class="text-end">
+              <% if (row.comparable) { %>
+                <a href="/reconciliation/compare?from=<%= row.earlier.id %>&to=<%= row.later.id %>" class="btn btn-sm btn-outline-primary p-0 px-1">Detail</a>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+  <div class="card-footer small text-muted">
+    Each row compares a rule's most recent completed run with the one before it. A rule that has run only once is listed with what that
+    run found and no comparison — a control nobody has re-run is exactly the one worth noticing, not one to leave out.
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-sliders me-2"></i>Compare Any Two Runs</div>
   <div class="card-body py-3">
     <% if (!runs.length) { %>
       <p class="text-muted small mb-0">No completed runs yet. Run a rule from the <a href="/reconciliation/rules">Rules</a> page first.</p>

@@ -135,8 +135,8 @@ Verifies that records representing the same business event exist and agree acros
 | `/reconciliation/sources` | Register the systems to compare and browse their datasets and fields |
 | `/reconciliation/rules` | Create, version, activate and retire controls; change status or assign an owner across several at once; run one or more of them |
 | `/reconciliation/runs` | Full run history: what was checked, when, under which rule version, and what it produced |
-| `/reconciliation/compare` | Two runs of the same rule side by side: what was fixed, what is newly failing, what persists |
-| `/reconciliation/exceptions` | Investigate, assign, comment and resolve discrepancies |
+| `/reconciliation/compare` | Every rule's latest run against its previous one, and any two runs of the same rule side by side |
+| `/reconciliation/exceptions` | Investigate, assign, comment and resolve discrepancies, one at a time or in bulk |
 
 Two kinds of source can be registered:
 
@@ -144,6 +144,10 @@ Two kinds of source can be registered:
 - **Any other SQL Server or Azure SQL database**, by server, database and optional port, authenticating either with this application's Entra ID identity or with a SQL login whose password is stored encrypted (which requires `SECRET_ENCRYPTION_KEY`). *Test connection* checks it before you register, and the schema is read once at registration and stored, so authoring a rule never opens a connection to the business system. Other database engines are not supported — they would need their own wire protocol and driver, and a connector that quietly failed against them would be worse than saying so.
 
 Batch changes apply the same status and/or owner to several rules at once. Rules are still checked individually: a batch activation moves the rules that are complete, names the ones it could not activate and why, and records a version entry for each rule it changed.
+
+Exceptions can be worked in bulk: select any set — filtering by rule first, for instance — and assign an owner, change severity, move status, or add a comment to all of them at once. Severity is set by the engine from the outcome, but what is material is a business judgement, so overriding it is recorded like any other decision. Bulk changes follow the same lifecycle as single ones: an exception that cannot make the transition is named rather than forced, closing needs a reason, and each exception gets its own history entries.
+
+The comparison page opens on **every rule's latest completed run against the one before it** — exception count and change, how many items are newly failing, fixed and still failing, current severity mix, and a verdict per rule. A rule that has run only once is listed with what that run found and no comparison, since a control nobody has re-run is exactly the one worth noticing. Any two runs of the same rule can then be opened in detail.
 
 Comparing two runs works from the findings each run recorded, not from its totals — twenty exceptions before and twenty after can mean nothing moved, or that twenty were fixed and twenty new ones appeared. Only runs of the same rule can be compared, because different rules check different records. Runs recorded before per-run findings were kept still compare on totals, and the page says so rather than reporting every item as fixed.
 
@@ -165,6 +169,7 @@ Exceptions follow a controlled lifecycle — open, acknowledged, in investigatio
 - Progress is measured as work units per step rather than as fixed percentages. Each step reports what it has finished and what is left (`85 / 210`, `125 remaining`), the overall bar is weighted by how expensive each step actually is, and an estimated time remaining appears once the estimate is worth showing. A run in flight never reads 100%.
 - A run whose application instance stopped mid-scan is recognised rather than left at "running" forever: once its progress has not been written for `ANALYSIS_HEARTBEAT_STALE_SECONDS` (default 900) it is reported as **interrupted**, and startup marks such runs interrupted in the database.
 - Basic security headers, JSON/form body limits, and a lightweight `/api` rate limiter are enabled without adding runtime dependencies.
+- Bootstrap's contextual table row classes (`table-warning` and friends) paint a pale background and set black text. The app's dark theme colours table cells directly, which wins on the cells and puts light text back — pale on pale. Dark mode now gives those rows dark tints at a specificity that beats the generic cell rule, so a highlighted row stays both highlighted and readable.
 - Repository queries that share one connection run one after another. A `tedious` connection carries a single request at a time, so issuing several together leaves the first answered and the rest rejected — which is how the reconciliation dashboard came to render empty panels that looked like stale data. A panel that genuinely cannot be read is now named on the page and logged, rather than blanked silently.
 - Startup migrations run statement by statement, so one failing `ALTER` no longer skips the migrations behind it, and a database that is unreachable at startup no longer prevents the capacity scheduler from starting.
 - The capacity scheduler catches up on schedules that came due while the process was restarting or idle. The look-back window is `SCHEDULER_CATCHUP_MINUTES` (default 20, `0` disables it); already-completed runs are recognised from `capacity_schedule_history`, so a catch-up never repeats an action that already ran.
