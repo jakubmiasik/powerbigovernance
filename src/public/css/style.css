@@ -89,6 +89,33 @@
 [data-theme="dark"] .table td { color: var(--color-text); border-color: var(--color-divider); }
 [data-theme="dark"] .table tbody tr:nth-child(even) { background: var(--color-surface-2); }
 [data-theme="dark"] .table tbody tr:hover { background: var(--color-primary-soft); }
+
+/* Highlighted rows in dark mode.
+   Bootstrap's contextual row classes paint the cells a pale colour and set the row
+   text to black. The `.table td` rule above then wins on the cells and puts light
+   text back — pale background, pale text, nothing readable. These give the same
+   rows a dark tint instead, at a specificity that beats the generic cell rule, so a
+   highlighted row stays highlighted and stays legible. */
+[data-theme="dark"] .table > :not(caption) > tr.table-success > *,
+[data-theme="dark"] .table > :not(caption) > * > tr.table-success > * {
+  background-color: rgba(74, 222, 128, .16); color: var(--color-text); box-shadow: none;
+}
+[data-theme="dark"] .table > :not(caption) > tr.table-warning > *,
+[data-theme="dark"] .table > :not(caption) > * > tr.table-warning > * {
+  background-color: rgba(252, 211, 77, .16); color: var(--color-text); box-shadow: none;
+}
+[data-theme="dark"] .table > :not(caption) > tr.table-danger > *,
+[data-theme="dark"] .table > :not(caption) > * > tr.table-danger > * {
+  background-color: rgba(248, 113, 113, .16); color: var(--color-text); box-shadow: none;
+}
+[data-theme="dark"] .table > :not(caption) > tr.table-info > *,
+[data-theme="dark"] .table > :not(caption) > * > tr.table-info > * {
+  background-color: rgba(125, 211, 252, .16); color: var(--color-text); box-shadow: none;
+}
+[data-theme="dark"] .table > :not(caption) > tr.table-active > *,
+[data-theme="dark"] .table > :not(caption) > * > tr.table-active > * {
+  background-color: var(--color-surface-offset); color: var(--color-text); box-shadow: none;
+}
 [data-theme="dark"] .modal-content { background: var(--color-surface); color: var(--color-text); border-color: var(--color-border); }
 [data-theme="dark"] .modal-header { border-color: var(--color-divider); }
 [data-theme="dark"] .modal-footer { border-color: var(--color-divider); }

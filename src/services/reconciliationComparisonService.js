@@ -230,9 +230,109 @@ function compareRuns({ fromRun, toRun, findingsFrom, findingsTo, sampleLimit }) 
   };
 }
 
+const SEVERITY_LEVELS = ['high', 'medium', 'low'];
+
+/**
+ * The two most recent completed runs of each rule, so one page can answer "is every
+ * control moving in the right direction" without picking pairs by hand.
+ *
+ * Rules with a single run are still listed — with what that run found and no
+ * comparison — because a control that has only ever run once is exactly the one
+ * someone needs to be told about, not one to omit from the overview.
+ */
+function latestPairsByRule(runs) {
+  const byRule = new Map();
+  for (const run of runs || []) {
+    if (run.status !== 'completed') continue;
+    const key = Number(run.rule_id);
+    if (!byRule.has(key)) {
+      byRule.set(key, { ruleId: key, ruleName: run.rule_name || 'Rule #' + key, runs: [] });
+    }
+    byRule.get(key).runs.push(run);
+  }
+
+  const pairs = [];
+  for (const entry of byRule.values()) {
+    // Newest first, so the pair is the two most recent whatever order they arrived in.
+    const ordered = entry.runs.slice().sort((a, b) => new Date(b.started_at) - new Date(a.started_at));
+    pairs.push({
+      ruleId: entry.ruleId,
+      ruleName: entry.ruleName,
+      later: ordered[0] || null,
+      earlier: ordered[1] || null,
+      runCount: ordered.length,
+    });
+  }
+  return pairs.sort((a, b) => a.ruleName.localeCompare(b.ruleName));
+}
+
+function groupFindingsByRun(findings) {
+  const byRun = new Map();
+  for (const finding of findings || []) {
+    const key = Number(finding.run_id);
+    if (!byRun.has(key)) byRun.set(key, []);
+    byRun.get(key).push(finding);
+  }
+  return byRun;
+}
+
+function countBySeverity(findings) {
+  const counts = { high: 0, medium: 0, low: 0 };
+  for (const finding of findings || []) {
+    const level = SEVERITY_LEVELS.includes(finding.severity) ? finding.severity : 'medium';
+    counts[level] += 1;
+  }
+  return counts;
+}
+
+/**
+ * One row per rule: where it stands now, and how that differs from its previous run.
+ * Built on `compareRuns` so the overview and the detailed pair view can never
+ * disagree about what "newly failing" means.
+ */
+function compareAcrossRules({ runs, findings, sampleLimit = 5 }) {
+  const findingsByRun = groupFindingsByRun(findings);
+
+  return latestPairsByRule(runs).map(pair => {
+    const laterFindings = pair.later ? (findingsByRun.get(Number(pair.later.id)) || []) : [];
+    const row = {
+      ruleId: pair.ruleId,
+      ruleName: pair.ruleName,
+      later: pair.later,
+      earlier: pair.earlier,
+      runCount: pair.runCount,
+      severity: countBySeverity(laterFindings),
+      exceptionCount: pair.later ? Number(pair.later.exception_count) || 0 : 0,
+      comparable: !!pair.earlier,
+      comparison: null,
+      summary: null,
+      error: null,
+    };
+    if (!pair.earlier) return row;
+
+    try {
+      row.comparison = compareRuns({
+        fromRun: pair.earlier,
+        toRun: pair.later,
+        findingsFrom: findingsByRun.get(Number(pair.earlier.id)) || [],
+        findingsTo: laterFindings,
+        sampleLimit,
+      });
+      row.summary = row.comparison.summary;
+    } catch (err) {
+      // One rule that cannot be compared must not take the overview down with it.
+      row.error = err.message;
+    }
+    return row;
+  });
+}
+
 module.exports = {
   RUN_METRICS,
   VERDICT_DEFS,
+  SEVERITY_LEVELS,
+  latestPairsByRule,
+  compareAcrossRules,
   diffRunMetrics,
   diffOutcomes,
   diffFindings,
