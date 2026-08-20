@@ -5,6 +5,7 @@ const { METRIC_DEFS } = require('./runMetricsService');
 const { getConfig } = require('../config/settings');
 const { RECONCILIATION_MIGRATIONS } = require('./reconciliationSchema');
 const { MDM_MIGRATIONS } = require('./mdmSchema');
+const { ANALYSIS_MODEL_MIGRATIONS } = require('./analysisModelSchema');
 const { encryptSecret, isEncryptionConfigured } = require('./secretCryptoService');
 
 const cfg = getConfig();
@@ -288,6 +289,28 @@ async function getAnalysisRuns() {
   }
 }
 
+const RUN_META_COLUMNS = `id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports,
+  total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by`;
+
+/**
+ * A run without its result document.
+ *
+ * `getAnalysisRunById` does `SELECT *`, which pulls the whole scan — potentially
+ * megabytes — even for a caller that only wanted the status or the service
+ * principal. This is for those callers.
+ */
+async function getAnalysisRunMeta(id) {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(conn, 'SELECT ' + RUN_META_COLUMNS + ' FROM analysis_runs WHERE id=@id', [
+      { name: 'id', type: TYPES.Int, value: id },
+    ]);
+    return rows[0] || null;
+  } finally {
+    conn.close();
+  }
+}
+
 async function getAnalysisRunById(id) {
   const conn = await getConnection();
   try {
@@ -303,7 +326,10 @@ async function getAnalysisRunById(id) {
 async function deleteAnalysisRun(id) {
   const conn = await getConnection();
   try {
-    for (const table of ['analysis_run_totals', 'analysis_run_progress']) {
+    for (const table of [
+      'analysis_run_totals', 'analysis_run_progress', 'analysis_workspace_users',
+      'analysis_items', 'analysis_workspaces', 'analysis_run_model_state',
+    ]) {
       try {
         await execSql(conn, `DELETE FROM ${table} WHERE run_id=@id`, [
           { name: 'id', type: TYPES.Int, value: id },
@@ -1091,6 +1117,10 @@ async function runMigrations() {
     for (const migration of MDM_MIGRATIONS) {
       await runStatement(conn, migration.label, migration.sql);
     }
+    // Relational view of an analysis run, plus indexes for the newer predicates
+    for (const migration of ANALYSIS_MODEL_MIGRATIONS) {
+      await runStatement(conn, migration.label, migration.sql);
+    }
 
     console.log('[DB] Migrations complete.');
   } catch (err) {
@@ -1114,6 +1144,7 @@ module.exports = {
   updateAnalysisRun,
   getAnalysisRuns,
   getAnalysisRunById,
+  getAnalysisRunMeta,
   deleteAnalysisRun,
   saveRunProgress,
   getRunProgress,

@@ -146,7 +146,7 @@ Two kinds of source can be registered:
 
 Batch changes apply the same status and/or owner to several rules at once. Rules are still checked individually: a batch activation moves the rules that are complete, names the ones it could not activate and why, and records a version entry for each rule it changed.
 
-Exceptions can be worked in bulk: select any set — filtering by rule first, for instance — and assign an owner, change severity, move status, or add a comment to all of them at once. Severity is set by the engine from the outcome, but what is material is a business judgement, so overriding it is recorded like any other decision. Bulk changes follow the same lifecycle as single ones: an exception that cannot make the transition is named rather than forced, closing needs a reason, and each exception gets its own history entries.
+Exceptions can be worked in bulk, either on the rows ticked or on **everything the current filter covers** — the whole rule rather than the page, which matters because the list is capped. The whole-set option shows how many exceptions it will touch, and refuses to run until the filter is narrowed to at least a rule, status, severity or type. Assign an owner, change severity, move status, or add a comment to all of them at once. Severity is set by the engine from the outcome, but what is material is a business judgement, so overriding it is recorded like any other decision. Bulk changes follow the same lifecycle as single ones: an exception that cannot make the transition is named rather than forced, closing needs a reason, and each exception gets its own history entries.
 
 The comparison page opens on **every rule's latest completed run against the one before it** — exception count and change, how many items are newly failing, fixed and still failing, current severity mix, and a verdict per rule. A rule that has run only once is listed with what that run found and no comparison, since a control nobody has re-run is exactly the one worth noticing. Any two runs of the same rule can then be opened in detail.
 
@@ -202,6 +202,21 @@ Weights are normalised across the fields that could actually be compared, so a p
 Every surviving value records which rule chose it, why, and which source record it came from. A golden record whose values cannot be traced back cannot be defended, and disagreement is the normal case in master data. The optional crosswalk table carries the same mapping to the destination.
 
 Pairs in the middle band go to a steward. Those decisions are the tuning signal: pairs confirmed as the same entity that scored below the threshold say it is set too high, and rejected pairs scoring close to it say the opposite.
+
+## Data Model and Performance
+
+An analysis run's result was stored only as one `results_json` document. That is a good way to keep an immutable record of a scan and a poor way to query it: opening one workspace meant reading and parsing the whole tenant on every page load, with no index able to help, and any question narrower than "give me everything" paid the cost of everything.
+
+The same facts are now also written in third normal form — `analysis_workspaces`, `analysis_items`, `analysis_workspace_users`, each keyed by run plus the identifier that names the thing, with indexes on the predicates that are actually used. The document is still written, because it is the faithful record of the scan and the whole-tenant analytics (Governance Overview, workspace triage, run comparison) genuinely do want all of it. It simply stops being the query path.
+
+- Runs are indexed as they complete. `POST /analysis/index/:runId` builds the tables for a run recorded before they existed; that is done on request rather than at startup, because normalising every historic run at boot would mean parsing every stored document before the app could serve anything.
+- Readers check whether a run has been indexed and fall back to the document if not, so nothing breaks on an un-indexed run. `analysis_run_model_state` is what makes "this run found nothing" distinguishable from "this run predates the tables".
+- Rebuilding a run replaces its rows, so re-indexing converges instead of duplicating.
+- `getAnalysisRunMeta` reads a run without its document, for the many callers that only wanted a status or a service principal id and were pulling megabytes to get one.
+- Exception listing selects only the columns it renders. The stored values and differences are large JSON documents the list never shows.
+- Indexes were added for predicates the newer features query on but had no support for: exceptions by rule and status, exceptions by owner, golden records by model, crosswalk by source record.
+
+Not every JSON column is worth normalising, and the ones left alone were left alone deliberately. A rule's compare-field definition, an exception's captured values, a golden record's provenance and a run's progress snapshot are each read as a whole, by one owner, and never filtered on — normalising those would add joins and buy nothing.
 
 ## Operational Notes
 

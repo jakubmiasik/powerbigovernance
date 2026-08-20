@@ -8,6 +8,7 @@ const {
 const { buildItemDetails } = require('../services/itemDetailsService');
 const { buildWorkspaceAssignments, lookupAssignment } = require('../services/deploymentPipelineService');
 const runProgress = require('../services/runProgressService');
+const analysisModel = require('../services/analysisModelRepository');
 
 const activeAnalyses = new Map();
 
@@ -435,6 +436,32 @@ router.get('/compare/details', async (req, res) => {
     if (!fromResults || !toResults) return res.json({ success: false, message: 'One of the selected runs has no stored results.' });
 
     res.json({ success: true, details: diffRunDetails(fromResults, toResults) });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * Builds the relational view for a run recorded before those tables existed.
+ *
+ * On request rather than at startup: normalising every historic run at boot would
+ * mean parsing every stored document before the app could serve anything.
+ */
+router.post('/index/:runId', async (req, res) => {
+  try {
+    const runId = Number.parseInt(req.params.runId, 10);
+    const run = await db.getAnalysisRunById(runId);
+    if (!run) return res.json({ success: false, message: 'Run not found.' });
+    if (!run.results_json) return res.json({ success: false, message: 'This run stored no results to index.' });
+
+    let results;
+    try {
+      results = JSON.parse(run.results_json);
+    } catch {
+      return res.json({ success: false, message: 'This run\'s stored results could not be read.' });
+    }
+    const shaped = await analysisModel.saveRunModel(runId, results);
+    res.json({ success: true, ...shaped });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
@@ -925,6 +952,19 @@ async function runAnalysis(runId, sp, authOptions = {}) {
       );
     } catch (totalsErr) {
       console.warn('[Analysis] Could not store run totals for run', runId, totalsErr.message);
+    }
+
+    // Write the relational view of the run alongside the document. Every question
+    // narrower than "give me the whole tenant" reads these tables instead of
+    // parsing megabytes of JSON. Failing here must not fail an otherwise good run —
+    // the readers fall back to the document.
+    try {
+      const shaped = await analysisModel.saveRunModel(runId, analysisResults);
+      addProgressEvent(progress, 'info',
+        'Indexed ' + shaped.workspaces + ' workspace(s), ' + shaped.items + ' item(s) and ' + shaped.users + ' access grant(s)');
+    } catch (modelErr) {
+      console.warn('[Analysis] Could not build the relational model for run', runId, modelErr.message);
+      addProgressEvent(progress, 'warning', 'Run results were saved, but could not be indexed: ' + modelErr.message);
     }
 
     completePhase(progress, 'save');

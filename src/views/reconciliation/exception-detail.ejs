@@ -152,6 +152,10 @@ function toggleReason() {
   document.getElementById('reasonWrap').classList.toggle('d-none', !closing);
 }
 
+// Same reason as the list page: a restored select value fires no change event, so
+// the field the server requires would be unreachable.
+document.addEventListener('DOMContentLoaded', toggleReason);
+
 async function post(url, body) {
   var resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   return resp.json();
@@ -160,6 +164,15 @@ async function post(url, body) {
 async function changeStatus() {
   var status = document.getElementById('newStatus').value;
   if (!status) { showToast('Pick a status', 'error'); return; }
+
+  var reasonField = document.getElementById('resolutionReason');
+  if ((status === 'resolved' || status === 'accepted') && !reasonField.value.trim()) {
+    document.getElementById('reasonWrap').classList.remove('d-none');
+    reasonField.classList.add('is-invalid');
+    reasonField.focus();
+    showToast('Record why this exception is being closed', 'error');
+    return;
+  }
   try {
     var data = await post('/reconciliation/exceptions/' + exceptionId + '/status', {
       status: status,
