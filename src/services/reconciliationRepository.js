@@ -457,7 +457,13 @@ function mapException(row) {
   };
 }
 
-async function listExceptions(filters = {}) {
+/**
+ * The WHERE clause behind an exception filter, built once so listing, counting and
+ * acting on a filtered set can never disagree about what the filter means. A bulk
+ * action that operated on a different set from the one on screen would be a
+ * dangerous kind of wrong.
+ */
+function exceptionFilterClause(filters = {}) {
   const clauses = [];
   const params = [];
   if (filters.status) { clauses.push('status=@status'); params.push(str('status', filters.status)); }
@@ -467,15 +473,51 @@ async function listExceptions(filters = {}) {
   if (filters.ruleId) { clauses.push('rule_id=@rule'); params.push(int('rule', filters.ruleId)); }
   if (filters.owner) { clauses.push('owner=@owner'); params.push(str('owner', filters.owner)); }
   if (filters.runId) { clauses.push('last_run_id=@run'); params.push(int('run', filters.runId)); }
+  return { where: clauses.length ? ' WHERE ' + clauses.join(' AND ') : '', params };
+}
 
-  const where = clauses.length ? ' WHERE ' + clauses.join(' AND ') : '';
+// Only these columns are needed to list exceptions. The values and differences are
+// large JSON documents that the list never renders, and reading them for every row
+// was making the page pay for data it immediately discarded.
+const EXCEPTION_LIST_COLUMNS = `id, rule_id, rule_name, business_area, business_key, outcome,
+  severity, status, owner, occurrence_count, first_seen_at, last_seen_at, resolved_at, last_run_id`;
+
+async function listExceptions(filters = {}) {
+  const { where, params } = exceptionFilterClause(filters);
   const limit = Math.max(1, Math.min(2000, Number(filters.limit) || 500));
   return withConnection(async conn => {
     const rows = await execSql(conn,
-      'SELECT TOP (' + limit + ') * FROM recon_exceptions' + where
+      'SELECT TOP (' + limit + ') ' + EXCEPTION_LIST_COLUMNS + ' FROM recon_exceptions' + where
       + " ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC",
       params);
     return rows.map(mapException);
+  });
+}
+
+/** How many exceptions a filter covers, so a whole-set action can say what it will touch. */
+async function countExceptions(filters = {}) {
+  const { where, params } = exceptionFilterClause(filters);
+  return withConnection(async conn => {
+    const rows = await execSql(conn, 'SELECT COUNT(*) AS total FROM recon_exceptions' + where, params);
+    return rows[0] ? Number(rows[0].total) : 0;
+  });
+}
+
+/**
+ * Every exception a filter covers — the whole rule, not just the page.
+ *
+ * Bounded, because a bulk action still has to fit in one request and one audit
+ * write per exception. The caller is told when the bound was reached rather than
+ * silently acting on part of the set.
+ */
+async function listExceptionsForAction(filters = {}, { max = 5000 } = {}) {
+  const { where, params } = exceptionFilterClause(filters);
+  const cap = Math.max(1, Math.min(20000, Number(max) || 5000));
+  return withConnection(async conn => {
+    const rows = await execSql(conn,
+      'SELECT TOP (' + (cap + 1) + ') ' + EXCEPTION_LIST_COLUMNS + ' FROM recon_exceptions' + where + ' ORDER BY id',
+      params);
+    return { exceptions: rows.slice(0, cap).map(mapException), truncated: rows.length > cap };
   });
 }
 
@@ -722,7 +764,8 @@ module.exports = {
   setRuleStatusAndOwner, batchUpdateRules, listOwners,
   createRun, completeRun, listRuns, getRunById,
   recordExceptions, listRunFindings, hasRunFindings, listFindingsForRuns,
-  listExceptions, getExceptionById, getExceptionsByIds, getExceptionEvents,
+  listExceptions, countExceptions, listExceptionsForAction,
+  getExceptionById, getExceptionsByIds, getExceptionEvents,
   batchUpdateExceptions,
   updateExceptionStatus, assignException, commentOnException,
   getDashboardData,

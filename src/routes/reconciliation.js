@@ -11,6 +11,7 @@ const {
 const sqlSource = require('../services/sqlSourceService');
 const { encryptSecret, isEncryptionConfigured } = require('../services/secretCryptoService');
 const { compareRuns, compareAcrossRules, latestPairsByRule, VERDICT_DEFS, SEVERITY_LEVELS } = require('../services/reconciliationComparisonService');
+const analysisModel = require('../services/analysisModelRepository');
 
 const SOURCE_KIND = { FABRIC: 'fabric-sql', EXTERNAL: 'external-sql' };
 
@@ -170,8 +171,23 @@ router.get('/sources/candidates', async (req, res) => {
         message: 'No completed analysis run for this tenant yet. Run an analysis so its lakehouses and warehouses are discovered.',
       });
     }
+    // The indexed items answer this directly. Before, finding a tenant's lakehouses
+    // meant loading the whole scan document and walking every workspace in memory.
+    const indexed = await analysisModel.getRunModelState(latest.id);
+    if (indexed) {
+      const rows = await analysisModel.listRunItemsByType(latest.id, ['lakehouse', 'warehouse']);
+      return res.json({
+        success: true, runId: latest.id,
+        candidates: rows.map(row => ({
+          workspaceId: row.workspace_id, workspaceName: row.workspace_name,
+          itemId: row.item_id, itemName: row.item_name, itemType: row.item_type,
+        })),
+      });
+    }
+
+    // A run from before the tables existed still answers, from its document.
     const run = await db.getAnalysisRunById(latest.id);
-    res.json({ success: true, runId: latest.id, candidates: extractCandidates(run) });
+    res.json({ success: true, runId: latest.id, candidates: extractCandidates(run), fromDocument: true });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
@@ -746,15 +762,27 @@ router.get('/runs/:id', async (req, res) => {
 });
 
 // ── Exceptions ──
+
+/**
+ * One reading of the filter query, shared by the list, the count and the bulk
+ * action. A bulk action that interpreted the filter differently from the list would
+ * act on a different set from the one on screen.
+ */
+function readExceptionFilters(query) {
+  const all = query.all === '1' || query.all === true || query.all === 'true';
+  return {
+    status: query.status || null,
+    severity: query.severity || null,
+    outcome: query.outcome || null,
+    ruleId: query.ruleId ? Number.parseInt(query.ruleId, 10) : null,
+    runId: query.runId ? Number.parseInt(query.runId, 10) : null,
+    openOnly: query.status ? false : !all,
+  };
+}
+
 router.get('/exceptions', async (req, res) => {
   try {
-    const filters = {
-      status: req.query.status || null,
-      severity: req.query.severity || null,
-      outcome: req.query.outcome || null,
-      ruleId: req.query.ruleId ? Number.parseInt(req.query.ruleId, 10) : null,
-      openOnly: req.query.status ? false : req.query.all !== '1',
-    };
+    const filters = readExceptionFilters(req.query);
     const [exceptions, rules, owners] = await Promise.all([
       repo.listExceptions(filters), repo.listRules(), repo.listOwners(),
     ]);
@@ -783,10 +811,13 @@ router.get('/exceptions', async (req, res) => {
  */
 router.post('/exceptions/batch', async (req, res) => {
   try {
+    const scope = req.body.scope === 'filter' ? 'filter' : 'selection';
     const ids = [].concat(req.body.ids || [])
       .map(id => Number.parseInt(id, 10))
       .filter(Number.isFinite);
-    if (!ids.length) return res.json({ success: false, message: 'Select at least one exception.' });
+    if (scope === 'selection' && !ids.length) {
+      return res.json({ success: false, message: 'Select at least one exception.' });
+    }
 
     const assignOwner = req.body.assignOwner === true || req.body.assignOwner === 'true';
     const owner = (req.body.owner || '').trim() || null;
@@ -809,12 +840,34 @@ router.post('/exceptions/batch', async (req, res) => {
       return res.json({ success: false, message: 'Record why these exceptions are being closed.' });
     }
 
-    const exceptions = await repo.getExceptionsByIds(ids);
+    // Two scopes. "selection" acts on the rows the user ticked; "filter" acts on
+    // every exception the current filter covers — the whole rule, not just the page
+    // the list happened to load.
+    let exceptions;
+    let truncated = false;
+    let targetIds;
+    if (scope === 'filter') {
+      const filters = readExceptionFilters(req.body.filters || {});
+      if (!filters.ruleId && !filters.status && !filters.severity && !filters.outcome && !filters.runId) {
+        // Acting on every exception in the system is almost never what someone
+        // means, and it is not undoable. Require the set to be narrowed first.
+        return res.json({ success: false, message: 'Narrow the list to a rule, status, severity or type before applying to the whole set.' });
+      }
+      const found = await repo.listExceptionsForAction(filters);
+      exceptions = found.exceptions;
+      truncated = found.truncated;
+      targetIds = exceptions.map(exception => Number(exception.id));
+      if (!exceptions.length) return res.json({ success: false, message: 'The current filter covers no exceptions.' });
+    } else {
+      exceptions = await repo.getExceptionsByIds(ids);
+      targetIds = ids;
+    }
+
     const found = new Map(exceptions.map(exception => [Number(exception.id), exception]));
 
     const eligible = [];
     const skipped = [];
-    for (const id of ids) {
+    for (const id of targetIds) {
       const exception = found.get(id);
       if (!exception) { skipped.push({ id, key: '#' + id, message: 'No longer exists.' }); continue; }
       if (toStatus && toStatus !== exception.status && !isStatusTransitionAllowed(exception.status, toStatus)) {
@@ -841,10 +894,23 @@ router.post('/exceptions/batch', async (req, res) => {
 
     res.json({
       success: true,
+      scope,
+      considered: targetIds.length,
       updated: results.filter(result => result.success && result.changed).length,
       unchanged: results.filter(result => result.success && !result.changed).length,
       skipped: skipped.concat(failed),
+      truncated,
     });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/** How many exceptions the current filter covers, for the whole-set option's label. */
+router.get('/exceptions/count', async (req, res) => {
+  try {
+    const total = await repo.countExceptions(readExceptionFilters(req.query));
+    res.json({ success: true, total });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }

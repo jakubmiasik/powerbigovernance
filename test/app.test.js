@@ -2622,3 +2622,209 @@ test('the create-if-missing statement is guarded so an existing table is left al
   assert.match(sql, /CREATE TABLE \[dbo\]\.\[CustomerMaster\]/);
   assert.match(sql, /\[golden_id\] NVARCHAR\(4000\) NULL/);
 });
+
+// ── Relational view of an analysis run ──
+const analysisModel = require('../src/services/analysisModelRepository');
+
+const SCAN_RESULT = {
+  summary: { totalWorkspaces: 2 },
+  workspaces: [
+    {
+      id: 'ws-1', name: 'Finance', type: 'Workspace', state: 'Active',
+      capacityId: 'cap-1', capacityName: 'F64', capacitySku: 'F64', isOnDedicatedCapacity: true,
+      storageSize: 1024, storageFiles: 8,
+      items: [
+        { id: 'i-1', name: 'Sales', type: 'Lakehouse', storageSize: 900 },
+        { id: 'i-2', name: 'Finance DW', type: 'Warehouse' },
+        { id: 'i-3', name: 'Monthly', type: 'Report', lastUpdate: '2026-07-01T00:00:00Z' },
+      ],
+      users: [
+        { identifier: 'u1', displayName: 'Ann', emailAddress: 'ann@x.com', groupUserAccessRight: 'Admin', principalType: 'User' },
+        { identifier: 'sp1', displayName: 'Scanner', groupUserAccessRight: 'Admin', principalType: 'App' },
+      ],
+    },
+    // A workspace whose access list could not be read is not a workspace with no
+    // users, and the two must stay distinguishable.
+    { id: 'ws-2', name: 'Marketing', items: [], users: [], usersReadable: false },
+  ],
+};
+
+test('a scan result is flattened into workspaces, items and access grants', () => {
+  const shaped = analysisModel.shapeRun(7, SCAN_RESULT);
+
+  assert.equal(shaped.workspaces.length, 2);
+  assert.equal(shaped.items.length, 3);
+  assert.equal(shaped.users.length, 2);
+
+  const finance = shaped.workspaces.find(w => w.workspaceId === 'ws-1');
+  assert.equal(finance.runId, 7);
+  assert.equal(finance.itemCount, 3);
+  assert.equal(finance.userCount, 2);
+  assert.equal(finance.capacitySku, 'F64');
+  assert.equal(finance.usersReadable, true);
+
+  const lakehouse = shaped.items.find(item => item.itemId === 'i-1');
+  assert.equal(lakehouse.type, 'Lakehouse');
+  assert.equal(lakehouse.workspaceId, 'ws-1');
+  assert.equal(lakehouse.storageSize, 900);
+  assert.equal(shaped.items.find(item => item.itemId === 'i-3').modifiedAt, '2026-07-01T00:00:00Z');
+
+  const ann = shaped.users.find(user => user.email === 'ann@x.com');
+  assert.equal(ann.accessRight, 'Admin');
+  assert.equal(ann.principalType, 'User');
+});
+
+test('an unreadable access list is recorded as unreadable, not as no users', () => {
+  const shaped = analysisModel.shapeRun(7, SCAN_RESULT);
+  const marketing = shaped.workspaces.find(w => w.workspaceId === 'ws-2');
+  assert.equal(marketing.usersReadable, false);
+  assert.equal(marketing.userCount, 0);
+});
+
+test('an empty or malformed scan flattens to nothing rather than throwing', () => {
+  for (const input of [null, {}, { workspaces: null }, { workspaces: [{ id: 'a' }] }]) {
+    const shaped = analysisModel.shapeRun(1, input);
+    assert.ok(Array.isArray(shaped.workspaces));
+    assert.ok(Array.isArray(shaped.items));
+    assert.ok(Array.isArray(shaped.users));
+  }
+});
+
+test('rebuilding a run replaces its rows instead of duplicating them', async () => {
+  // A scan that updates its storage figures rewrites the model, and a backfill can
+  // be run twice; both must converge.
+  const { executed } = await withFakeSql(() => [], () => analysisModel.saveRunModel(7, SCAN_RESULT));
+
+  const deletes = executed.filter(entry => /^DELETE FROM analysis_/.test(entry.sql.trim()));
+  assert.equal(deletes.length, 4, 'the three fact tables and the state row are cleared before rewriting');
+  assert.ok(executed.some(entry => /INSERT INTO analysis_workspaces/.test(entry.sql)));
+  assert.ok(executed.some(entry => /INSERT INTO analysis_items/.test(entry.sql)));
+  assert.ok(executed.some(entry => /INSERT INTO analysis_workspace_users/.test(entry.sql)));
+  assert.ok(executed.some(entry => /INSERT INTO analysis_run_model_state/.test(entry.sql)));
+});
+
+test('items are looked up by type with bound parameters, not an interpolated list', async () => {
+  const { executed } = await withFakeSql(() => [], () => analysisModel.listRunItemsByType(7, ['Lakehouse', 'Warehouse']));
+  const select = executed[0];
+  assert.match(select.sql, /LOWER\(i\.type\) IN \(@t0, @t1\)/);
+  assert.deepEqual(select.params.map(p => p.value), [7, 'lakehouse', 'warehouse']);
+  assert.match(select.sql, /LEFT JOIN analysis_workspaces/, 'the workspace name comes from the join, not a second pass');
+});
+
+test('an empty type list reads nothing rather than everything', async () => {
+  const { executed } = await withFakeSql(() => [], () => analysisModel.listRunItemsByType(7, []));
+  assert.equal(executed.length, 0);
+});
+
+// ── Exception filtering: list, count and bulk action must agree ──
+test('the list reads only the columns it renders', async () => {
+  // The values and differences are large JSON documents the list never shows, and
+  // reading them for every row made the page pay for data it discarded.
+  const { executed } = await withFakeSql(() => [], () => reconRepo.listExceptions({ ruleId: 9 }));
+  assert.ok(!/SELECT TOP \(\d+\) \* FROM recon_exceptions/.test(executed[0].sql));
+  assert.ok(!/values_a/.test(executed[0].sql));
+  assert.match(executed[0].sql, /business_key/);
+});
+
+test('counting and acting on a filter build the same predicate as listing it', async () => {
+  const filters = { ruleId: 9, severity: 'high', openOnly: true };
+  const listed = await withFakeSql(() => [], () => reconRepo.listExceptions(filters));
+  const counted = await withFakeSql(() => [{ total: 42 }], () => reconRepo.countExceptions(filters));
+  const acted = await withFakeSql(() => [], () => reconRepo.listExceptionsForAction(filters));
+
+  const clauseOf = sql => sql.slice(sql.indexOf(' WHERE '), sql.indexOf(' ORDER BY ') === -1 ? undefined : sql.indexOf(' ORDER BY '));
+  assert.equal(clauseOf(listed.executed[0].sql), clauseOf(acted.executed[0].sql));
+  assert.equal(clauseOf(listed.executed[0].sql), clauseOf(counted.executed[0].sql));
+  assert.equal(counted.result, 42);
+});
+
+test('acting on a whole filter reports when the set was larger than one action covers', async () => {
+  const rows = Array.from({ length: 12 }, (_, i) => ({ id: i + 1, status: 'open', severity: 'high' }));
+  const { result } = await withFakeSql(() => rows, () => reconRepo.listExceptionsForAction({ ruleId: 9 }, { max: 10 }));
+  assert.equal(result.exceptions.length, 10);
+  assert.equal(result.truncated, true);
+});
+
+test('a whole-filter bulk action acts on the rule, not just the loaded page', async () => {
+  // The list is capped, so acting only on what it rendered would silently miss the
+  // rest of the rule.
+  const rows = Array.from({ length: 700 }, (_, i) => ({
+    id: i + 1, business_key: 'INV-' + i, status: 'open', severity: 'medium', owner: null,
+  }));
+  const original = {
+    listExceptionsForAction: reconRepo.listExceptionsForAction,
+    batchUpdateExceptions: reconRepo.batchUpdateExceptions,
+    getExceptionsByIds: reconRepo.getExceptionsByIds,
+  };
+  let usedFilters = null;
+  reconRepo.listExceptionsForAction = async filters => {
+    usedFilters = filters;
+    return { exceptions: rows, truncated: false };
+  };
+  reconRepo.batchUpdateExceptions = async exceptions => exceptions.map(e => ({ id: e.id, success: true, changed: true }));
+  reconRepo.getExceptionsByIds = async () => { throw new Error('the selection path must not be used'); };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/reconciliation/exceptions/batch', {
+      scope: 'filter', ids: [1, 2], filters: { ruleId: 9, all: '' },
+      assignOwner: true, owner: 'Ann',
+    });
+    assert.equal(body.success, true);
+    assert.equal(body.considered, 700, 'the whole rule, not the two ticked rows');
+    assert.equal(body.updated, 700);
+    assert.equal(usedFilters.ruleId, 9);
+    assert.equal(usedFilters.openOnly, true);
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('a whole-filter action with no narrowing filter is refused', async () => {
+  // Acting on every exception in the system is almost never intended and cannot be
+  // undone.
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/reconciliation/exceptions/batch', {
+      scope: 'filter', filters: {}, assignOwner: true, owner: 'Ann',
+    });
+    assert.equal(body.success, false);
+    assert.match(body.message, /Narrow the list/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('closing in bulk succeeds once a reason is supplied', async () => {
+  // The reported failure was the reason never reaching the server, not the server
+  // rejecting a good one. This pins the accepting side.
+  const original = { getExceptionsByIds: reconRepo.getExceptionsByIds, batchUpdateExceptions: reconRepo.batchUpdateExceptions };
+  reconRepo.getExceptionsByIds = async () => ([{ id: 1, business_key: 'INV-1', status: 'open', severity: 'medium' }]);
+  let applied = null;
+  reconRepo.batchUpdateExceptions = async (exceptions, change) => {
+    applied = change;
+    return exceptions.map(e => ({ id: e.id, success: true, changed: true }));
+  };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    for (const status of ['resolved', 'accepted']) {
+      const body = await postJson(server, '/reconciliation/exceptions/batch', {
+        ids: [1], status, reason: 'Corrected at source',
+      });
+      assert.equal(body.success, true, status + ' with a reason must be accepted');
+      assert.equal(applied.reason, 'Corrected at source');
+      assert.equal(applied.toStatus, status);
+    }
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});

@@ -79,7 +79,13 @@
        inert above a list nobody has picked from yet. -->
   <div class="card-body border-bottom py-2 d-none" id="bulkBar">
     <div class="row g-2 align-items-end">
-      <div class="col-auto"><span class="badge bg-primary" id="bulkCount">0 selected</span></div>
+      <div class="col-md-3">
+        <label class="form-label small mb-1" for="bulkScope">Apply to</label>
+        <select class="form-select form-select-sm" id="bulkScope">
+          <option value="selection" id="bulkScopeSelection">The rows I ticked (0)</option>
+          <option value="filter" id="bulkScopeFilter">Everything matching the current filter</option>
+        </select>
+      </div>
       <div class="col-md-3">
         <label class="form-label small mb-1" for="bulkOwner">Assign to</label>
         <input type="text" class="form-control form-control-sm" id="bulkOwner" list="ownerOptions" placeholder="name@company.com">
@@ -107,16 +113,24 @@
           <% statusDefs.forEach(function(s) { %><option value="<%= s.key %>"><%= s.label %></option><% }) %>
         </select>
       </div>
-      <div class="col-md-3 d-none" id="bulkReasonWrap">
-        <label class="form-label small mb-1" for="bulkReason">Reason (required to close)</label>
-        <input type="text" class="form-control form-control-sm" id="bulkReason" placeholder="Cause and action taken">
-      </div>
       <div class="col-md-3">
         <label class="form-label small mb-1" for="bulkComment">Comment</label>
         <input type="text" class="form-control form-control-sm" id="bulkComment" placeholder="Optional note for the audit trail">
       </div>
       <div class="col-auto">
         <button class="btn btn-sm btn-primary" onclick="applyBulk()"><i class="bi bi-check2-all me-1"></i>Apply</button>
+      </div>
+      <!-- Closing needs a recorded reason. It gets its own full-width row so grid
+           wrapping cannot push it out of sight. -->
+      <div class="col-12 d-none" id="bulkReasonWrap">
+        <label class="form-label small mb-1" for="bulkReason">
+          Reason <span class="text-danger">*</span> — required to close an exception
+        </label>
+        <input type="text" class="form-control form-control-sm" id="bulkReason"
+               placeholder="Cause and action taken" oninput="clearBulkReasonError()">
+        <div class="invalid-feedback d-block d-none" id="bulkReasonError">
+          Record why these exceptions are being closed before applying.
+        </div>
       </div>
     </div>
     <div class="mt-2" id="bulkResult"></div>
@@ -152,10 +166,34 @@
     An exception seen many times is the same item failing run after run — usually a systemic problem rather than a record to fix once.
     Bulk decisions follow the same lifecycle as single ones: an exception that cannot make the transition is named rather than forced,
     closing needs a reason, and every change is written to that exception's own history.
+    <strong>Apply to</strong> chooses between the rows ticked here and every exception the current filter covers — the whole rule rather
+    than the page, which matters because this list is capped. Applying to a whole set needs the filter narrowed to at least a rule,
+    status, severity or type first.
   </div>
 </div>
 
 <script>
+// Browsers restore a select's value across a reload, and applying a bulk change
+// reloads this page. Without running the toggle on load, the status could come back
+// showing "Resolved" while the reason field stayed hidden — leaving no way to enter
+// the reason the server then insisted on.
+document.addEventListener('DOMContentLoaded', function() {
+  toggleBulkReason();
+  updateBulkBar();
+  loadFilterTotal();
+});
+
+// The list is capped, so "the rows I ticked" can be fewer than the rule actually
+// holds. The whole-filter option says how many it really covers, which is the
+// number that matters before applying an irreversible change.
+var FILTER_QUERY = <%- JSON.stringify({
+  status: filters.status || '',
+  severity: filters.severity || '',
+  outcome: filters.outcome || '',
+  ruleId: filters.ruleId || '',
+  all: filters.all ? '1' : ''
+}) %>;
+
 function selectedExceptions() {
   return Array.from(document.querySelectorAll('.exception-select:checked'));
 }
@@ -171,36 +209,89 @@ function toggleAllExceptions(checked) {
   updateBulkBar();
 }
 
+// The bar is shown once there is something to act on: rows ticked, or a filter
+// narrow enough for the whole-set option to be meaningful.
+function hasNarrowingFilter() {
+  return ['status', 'severity', 'outcome', 'ruleId'].some(function(key) { return FILTER_QUERY[key]; });
+}
+
 function updateBulkBar() {
   var selected = selectedExceptions();
-  document.getElementById('bulkBar').classList.toggle('d-none', selected.length === 0);
-  document.getElementById('bulkCount').textContent = selected.length + ' selected';
+  document.getElementById('bulkBar').classList.toggle('d-none', selected.length === 0 && !hasNarrowingFilter());
+  document.getElementById('bulkScopeSelection').textContent = 'The rows I ticked (' + selected.length + ')';
+}
+
+
+function filterQueryString() {
+  return Object.keys(FILTER_QUERY)
+    .filter(function(key) { return FILTER_QUERY[key] !== '' && FILTER_QUERY[key] !== null; })
+    .map(function(key) { return encodeURIComponent(key) + '=' + encodeURIComponent(FILTER_QUERY[key]); })
+    .join('&');
+}
+
+async function loadFilterTotal() {
+  var option = document.getElementById('bulkScopeFilter');
+  if (!option) return;
+  try {
+    var resp = await fetch('/reconciliation/exceptions/count?' + filterQueryString());
+    var data = await resp.json();
+    if (!data.success) return;
+    option.textContent = 'Everything matching the current filter (' + data.total + ')';
+    if (data.total > <%= exceptions.length %>) {
+      option.textContent += ' — more than this page shows';
+    }
+  } catch (e) { /* the selection option still works */ }
+}
+
+function isClosingStatus(status) {
+  return status === 'resolved' || status === 'accepted';
 }
 
 function toggleBulkReason() {
-  var status = document.getElementById('bulkStatus').value;
-  var closing = status === 'resolved' || status === 'accepted';
+  var closing = isClosingStatus(document.getElementById('bulkStatus').value);
   document.getElementById('bulkReasonWrap').classList.toggle('d-none', !closing);
+  if (!closing) clearBulkReasonError();
+}
+
+function clearBulkReasonError() {
+  document.getElementById('bulkReasonError').classList.add('d-none');
+  document.getElementById('bulkReason').classList.remove('is-invalid');
 }
 
 function escapeText(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 
 async function applyBulk() {
+  var scope = document.getElementById('bulkScope').value;
   var ids = selectedExceptions().map(function(el) { return el.value; });
-  if (!ids.length) return;
+  if (scope === 'selection' && !ids.length) return;
+
+  var status = document.getElementById('bulkStatus').value;
+  var reason = document.getElementById('bulkReason').value.trim();
+  if (isClosingStatus(status) && !reason) {
+    // Say so here rather than after a round trip, and put the cursor where the
+    // answer goes.
+    document.getElementById('bulkReasonWrap').classList.remove('d-none');
+    document.getElementById('bulkReasonError').classList.remove('d-none');
+    document.getElementById('bulkReason').classList.add('is-invalid');
+    document.getElementById('bulkReason').focus();
+    return;
+  }
 
   var payload = {
+    scope: scope,
     ids: ids,
+    filters: FILTER_QUERY,
     assignOwner: document.getElementById('bulkAssign').checked,
     owner: document.getElementById('bulkOwner').value.trim(),
     severity: document.getElementById('bulkSeverity').value,
-    status: document.getElementById('bulkStatus').value,
-    reason: document.getElementById('bulkReason').value.trim(),
+    status: status,
+    reason: reason,
     comment: document.getElementById('bulkComment').value.trim()
   };
 
   var result = document.getElementById('bulkResult');
-  result.innerHTML = '<div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Applying to ' + ids.length + ' exception(s)...</div>';
+  result.innerHTML = '<div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Applying to ' +
+    (scope === 'filter' ? 'every exception matching the filter' : ids.length + ' exception(s)') + '...</div>';
   try {
     var resp = await fetch('/reconciliation/exceptions/batch', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
@@ -214,8 +305,9 @@ async function applyBulk() {
       return '<li>' + escapeText(s.key) + ' — ' + escapeText(s.message) + '</li>';
     }).join('');
     result.innerHTML = '<div class="alert alert-' + (skipped ? 'warning' : 'success') + ' py-2 small mb-0">' +
-      data.updated + ' exception(s) updated' +
+      data.updated + ' of ' + data.considered + ' exception(s) updated' +
       (data.unchanged ? ', ' + data.unchanged + ' already had these values' : '') + '.' +
+      (data.truncated ? '<br>The set was larger than one action can cover; run it again to continue.' : '') +
       (skipped ? '<br>Not changed:<ul class="mb-0">' + skipped + '</ul>' : ' Reloading...') + '</div>';
     setTimeout(function() { window.location.reload(); }, skipped ? 5000 : 700);
   } catch (e) {
