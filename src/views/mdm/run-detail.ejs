@@ -1,0 +1,212 @@
+<%- include('../partials/header') %>
+<%
+  var stats = run.stats || {};
+  var fieldKeys = (fields || []).map(function(f) { return f.key || f.column; }).filter(Boolean);
+  var pending = (review || []).filter(function(p) { return p.decision === 'pending'; });
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-gem me-2"></i>Master Data Run #<%= run.id %></h2>
+    <p class="text-muted mb-0">
+      <%= run.model_name || ('Model #' + run.model_id) %> v<%= run.model_version %>
+      · <%= run.mode %> · <%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %>
+      · by <%= run.run_by || '-' %>
+    </p>
+  </div>
+  <a href="/mdm/runs" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<% if (run.status === 'failed') { %>
+  <div class="alert alert-danger"><i class="bi bi-x-circle me-2"></i><%= run.error_message || 'The run failed.' %></div>
+<% } %>
+<% if (stats.pairsTruncated) { %>
+  <div class="alert alert-warning small">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    Candidate pairs hit the limit, so some comparisons were skipped and records that should have merged may not have.
+    Narrow the blocking keys — the largest block held <%= stats.largestBlock %> records.
+  </div>
+<% } %>
+<% if (stats.overMergeSuspected) { %>
+  <div class="alert alert-warning small">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    One group holds <%= stats.largestCluster %> records, far more than the rest. That is the signature of over-merging through
+    transitive matches. Consider strict grouping, a higher threshold, or a field marked "must not conflict".
+  </div>
+<% } %>
+
+<div class="row g-3 mb-4">
+  <div class="col-6 col-xl-2"><div class="card text-center h-100 stat-card"><div class="card-body py-3">
+    <div class="fs-4 fw-bold"><%= stats.rawRecords || 0 %></div><div class="small text-muted">Raw records</div></div></div></div>
+  <div class="col-6 col-xl-2"><div class="card text-center h-100 stat-card"><div class="card-body py-3">
+    <div class="fs-4 fw-bold text-success"><%= stats.goldenRecords || 0 %></div><div class="small text-muted">Golden records</div></div></div></div>
+  <div class="col-6 col-xl-2"><div class="card text-center h-100 stat-card"><div class="card-body py-3">
+    <div class="fs-4 fw-bold text-warning"><%= stats.duplicatesRemoved || 0 %></div><div class="small text-muted">Collapsed</div></div></div></div>
+  <div class="col-6 col-xl-2"><div class="card text-center h-100 stat-card"><div class="card-body py-3">
+    <div class="fs-4 fw-bold text-danger"><%= stats.reviewPairs || 0 %></div><div class="small text-muted">Need a steward</div></div></div></div>
+  <div class="col-6 col-xl-2"><div class="card text-center h-100 stat-card"><div class="card-body py-3">
+    <div class="fs-4 fw-bold"><%= stats.conflictedFields || 0 %></div><div class="small text-muted">Conflicted fields</div></div></div></div>
+  <div class="col-6 col-xl-2"><div class="card text-center h-100 stat-card"><div class="card-body py-3">
+    <div class="fs-4 fw-bold"><%= run.written_rows === null || run.written_rows === undefined ? '—' : run.written_rows %></div>
+    <div class="small text-muted">Rows published</div></div></div></div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-speedometer2 me-2"></i>Matching Cost</div>
+  <div class="card-body py-3 small text-muted">
+    <%= stats.pairsCompared || 0 %> pair(s) compared, generated from <%= stats.blocksExamined || 0 %> block(s).
+    Largest block: <strong><%= stats.largestBlock || 0 %></strong> record(s).
+    Largest resulting group: <strong><%= stats.largestCluster || 0 %></strong>.
+    <br>
+    Blocking is what keeps matching from being quadratic. Comparing every record with every other would have taken
+    <strong><%= stats.rawRecords ? Math.round(stats.rawRecords * (stats.rawRecords - 1) / 2).toLocaleString() : 0 %></strong>
+    comparisons; this run did <%= (stats.pairsCompared || 0).toLocaleString() %>.
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-gem me-2"></i>Golden Records (<%= golden.length %> shown)</span>
+    <input type="text" class="form-control form-control-sm" style="max-width:260px;" placeholder="Filter..." oninput="filterTable(this, 'golden-table')">
+  </div>
+  <div class="table-responsive" style="max-height:520px;">
+    <table class="table table-sm table-hover mb-0" id="golden-table">
+      <thead><tr>
+        <th>Golden ID</th>
+        <% fieldKeys.forEach(function(key) { %><th><%= key %></th><% }) %>
+        <th class="text-end">Sources</th><th>Systems</th><th class="text-end">Conflicts</th><th></th>
+      </tr></thead>
+      <tbody>
+        <% if (!golden.length) { %>
+          <tr data-filter="none"><td colspan="<%= fieldKeys.length + 5 %>" class="text-muted small py-3">No golden records were produced.</td></tr>
+        <% } %>
+        <% golden.forEach(function(record) { %>
+          <tr data-filter="<%= (record.golden_id + ' ' + Object.values(record.values || {}).join(' ')).toLowerCase() %>"
+              class="<%= record.needs_steward ? 'table-warning' : '' %>">
+            <td class="small"><code><%= record.golden_id %></code></td>
+            <% fieldKeys.forEach(function(key) {
+                 var provenance = (record.provenance || {})[key] || {}; %>
+              <td class="small" title="<%= provenance.strategy ? provenance.strategy + ' — ' + provenance.reason : '' %>">
+                <%= record.values[key] === null || record.values[key] === undefined ? '—' : record.values[key] %>
+                <% if (provenance.candidates > 1) { %>
+                  <i class="bi bi-info-circle text-warning" title="<%= provenance.candidates %> different values across the sources; kept the one chosen by <%= provenance.strategy %> (<%= provenance.reason %>)"></i>
+                <% } %>
+              </td>
+            <% }) %>
+            <td class="text-end small"><%= record.member_count %></td>
+            <td class="small"><%= record.source_systems || '-' %></td>
+            <td class="text-end small"><%= record.conflicts %></td>
+            <td class="text-end">
+              <button class="btn btn-sm btn-outline-primary p-0 px-1" onclick="showCrosswalk('<%= record.golden_id %>')" title="Which source records built this"><i class="bi bi-diagram-2"></i></button>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+  <div class="card-footer small text-muted">
+    Hover a value to see which rule chose it and why. A warning marker means the sources disagreed and one value was kept — that is what
+    makes a golden record defensible rather than merely produced.
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-person-raised-hand me-2"></i>Pairs Needing a Decision (<%= pending.length %> pending of <%= review.length %>)</span>
+    <div class="d-flex gap-2">
+      <button class="btn btn-sm btn-outline-success" onclick="decide('match')"><i class="bi bi-check2 me-1"></i>Same entity</button>
+      <button class="btn btn-sm btn-outline-danger" onclick="decide('not_match')"><i class="bi bi-x me-1"></i>Different</button>
+    </div>
+  </div>
+  <div class="table-responsive" style="max-height:420px;">
+    <table class="table table-sm mb-0">
+      <thead><tr>
+        <th style="width:32px;"><input type="checkbox" class="form-check-input" onchange="toggleAllPairs(this.checked)"></th>
+        <th>Left</th><th>Right</th><th class="text-end">Score</th><th>Field agreement</th><th>Decision</th>
+      </tr></thead>
+      <tbody>
+        <% if (!review.length) { %>
+          <tr><td colspan="6" class="text-muted small py-3">Nothing to decide — every pair was either confidently a match or confidently not.</td></tr>
+        <% } %>
+        <% review.forEach(function(pair) { %>
+          <tr>
+            <td><input type="checkbox" class="form-check-input pair-select" value="<%= pair.id %>" <%= pair.decision === 'pending' ? '' : 'disabled' %>></td>
+            <td class="small"><code><%= pair.left_record_id %></code><% if (pair.left_system) { %><div class="text-muted" style="font-size:0.7rem;"><%= pair.left_system %></div><% } %></td>
+            <td class="small"><code><%= pair.right_record_id %></code><% if (pair.right_system) { %><div class="text-muted" style="font-size:0.7rem;"><%= pair.right_system %></div><% } %></td>
+            <td class="text-end small"><strong><%= Number(pair.score).toFixed(3) %></strong></td>
+            <td class="small">
+              <% (pair.detail || []).forEach(function(part) { %>
+                <span class="badge bg-<%= part.skipped ? 'secondary' : part.score >= 0.9 ? 'success' : part.score >= 0.6 ? 'warning' : 'danger' %> me-1"
+                      title="weight <%= part.weight %><%= part.skipped ? ' — skipped, one side was empty' : '' %>">
+                  <%= part.field %><%= part.skipped ? '' : ' ' + part.score %>
+                </span>
+              <% }) %>
+            </td>
+            <td>
+              <% if (pair.decision === 'pending') { %><span class="badge bg-secondary">pending</span>
+              <% } else { %>
+                <span class="badge bg-<%= pair.decision === 'match' ? 'success' : 'danger' %>"><%= pair.decision === 'match' ? 'same' : 'different' %></span>
+                <div class="text-muted" style="font-size:0.7rem;"><%= pair.decided_by || '' %></div>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+  <div class="card-footer small text-muted">
+    These scored between the review and automatic-merge thresholds. The decisions are the signal for tuning: pairs confirmed as the same
+    entity that scored below the threshold say it is set too high, and rejected pairs scoring close to it say the opposite.
+  </div>
+</div>
+
+<div class="modal fade" id="crosswalkModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header"><h6 class="modal-title">Source Records</h6><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body" id="crosswalkBody"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+var RUN_ID = <%= run.id %>;
+function escapeText(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+async function showCrosswalk(goldenId) {
+  var modal = new bootstrap.Modal(document.getElementById('crosswalkModal'));
+  document.getElementById('crosswalkBody').innerHTML = '<div class="text-center py-3"><div class="spinner-border text-primary"></div></div>';
+  modal.show();
+  try {
+    var resp = await fetch('/mdm/runs/' + RUN_ID + '/crosswalk/' + encodeURIComponent(goldenId));
+    var data = await resp.json();
+    if (!data.success) { document.getElementById('crosswalkBody').innerHTML = '<div class="alert alert-danger mb-0">' + escapeText(data.message) + '</div>'; return; }
+    document.getElementById('crosswalkBody').innerHTML =
+      '<p class="small text-muted">' + escapeText(goldenId) + ' was built from ' + data.rows.length + ' source record(s).</p>' +
+      '<table class="table table-sm mb-0"><thead><tr><th>Source record</th><th>System</th></tr></thead><tbody>' +
+      data.rows.map(function(row) {
+        return '<tr><td class="small"><code>' + escapeText(row.source_record_id) + '</code></td><td class="small">' +
+          escapeText(row.source_system || '-') + '</td></tr>';
+      }).join('') + '</tbody></table>';
+  } catch (e) {
+    document.getElementById('crosswalkBody').innerHTML = '<div class="alert alert-danger mb-0">' + escapeText(e.message) + '</div>';
+  }
+}
+
+function toggleAllPairs(checked) {
+  document.querySelectorAll('.pair-select:not(:disabled)').forEach(function(box) { box.checked = checked; });
+}
+
+async function decide(decision) {
+  var ids = Array.from(document.querySelectorAll('.pair-select:checked')).map(function(el) { return el.value; });
+  if (!ids.length) { showToast('Select at least one pair', 'error'); return; }
+  try {
+    var resp = await fetch('/mdm/runs/' + RUN_ID + '/review', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: ids, decision: decision })
+    });
+    var data = await resp.json();
+    if (data.success) { showToast(data.updated + ' pair(s) decided', 'success'); setTimeout(function() { window.location.reload(); }, 600); }
+    else showToast(data.message, 'error');
+  } catch (e) { showToast(e.message, 'error'); }
+}
+</script>
+<%- include('../partials/footer') %>

@@ -1,0 +1,226 @@
+<%- include('../partials/header') %>
+<%
+  var o = overview || {};
+  function total(rows, key, value) {
+    var row = (rows || []).find(function(r) { return String(r[key]) === value; });
+    return row ? Number(row.total) : 0;
+  }
+  function statusColor(s) { return s === 'active' ? 'success' : s === 'draft' ? 'secondary' : 'dark'; }
+  var latestByModel = {};
+  (o.latest || []).forEach(function(row) { latestByModel[row.model_id] = row; });
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-diagram-3 me-2"></i>Master Data</h2>
+    <p class="text-muted mb-0">Turn raw records from many systems into one agreed version of each customer, product or supplier.</p>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    <a href="/mdm/runs" class="btn btn-sm btn-outline-primary"><i class="bi bi-clock-history me-1"></i>Runs</a>
+    <a href="/mdm/models/new" class="btn btn-sm btn-primary"><i class="bi bi-plus me-1"></i>New model</a>
+  </div>
+</div>
+
+<% if (error) { %><div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div><% } %>
+<% if (o.problems && o.problems.length) { %>
+  <div class="alert alert-warning small"><i class="bi bi-exclamation-triangle me-2"></i>
+    Some panels could not be read (<%= o.problems.join(', ') %>). The application log has the reason.
+  </div>
+<% } %>
+
+<div class="row g-3 mb-4">
+  <div class="col-sm-6 col-xl-3">
+    <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+      <div class="text-primary mb-2"><i class="bi bi-diagram-3"></i></div>
+      <div class="fs-3 fw-bold text-primary"><%= total(o.models, 'status', 'active') %></div>
+      <div class="small">Active Models</div>
+      <div class="text-muted" style="font-size:0.7rem;"><%= total(o.models, 'status', 'draft') %> draft / <%= total(o.models, 'status', 'retired') %> retired</div>
+    </div></div>
+  </div>
+  <div class="col-sm-6 col-xl-3">
+    <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+      <div class="text-success mb-2"><i class="bi bi-gem"></i></div>
+      <div class="fs-3 fw-bold text-success"><%= (o.latest || []).reduce(function(sum, r) { return sum + (Number(r.golden_records) || 0); }, 0) %></div>
+      <div class="small">Golden Records</div>
+      <div class="text-muted" style="font-size:0.7rem;">across the latest run of each model</div>
+    </div></div>
+  </div>
+  <div class="col-sm-6 col-xl-3">
+    <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+      <div class="text-warning mb-2"><i class="bi bi-layers"></i></div>
+      <div class="fs-3 fw-bold text-warning"><%= (o.latest || []).reduce(function(sum, r) { return sum + (Number(r.duplicates_removed) || 0); }, 0) %></div>
+      <div class="small">Duplicates Collapsed</div>
+    </div></div>
+  </div>
+  <div class="col-sm-6 col-xl-3">
+    <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+      <div class="text-danger mb-2"><i class="bi bi-person-raised-hand"></i></div>
+      <div class="fs-3 fw-bold text-danger"><%= o.pendingReview || 0 %></div>
+      <div class="small">Pairs Awaiting a Steward</div>
+    </div></div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-table me-2"></i>Models (<%= models.length %>)</span>
+    <input type="text" class="form-control form-control-sm" style="max-width:260px;" placeholder="Filter models..." oninput="filterTable(this, 'mdm-models-table')">
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0" id="mdm-models-table">
+      <thead><tr>
+        <th>Model</th><th>Entity</th><th>Raw table</th><th>Destination</th>
+        <th>Status</th><th>Version</th><th class="text-end">Latest result</th><th>Actions</th>
+      </tr></thead>
+      <tbody>
+        <% if (!models.length) { %>
+          <tr data-filter="none"><td colspan="8" class="text-muted small py-3">
+            No models yet. A model describes one entity — customer, product, supplier — and how to master it.
+            <a href="/mdm/models/new">Create the first one</a>.
+          </td></tr>
+        <% } %>
+        <% models.forEach(function(model) { var latest = latestByModel[model.id]; %>
+          <tr data-filter="<%= [model.name, model.entity_type || '', model.status, model.source_dataset || ''].join(' ').toLowerCase() %>">
+            <td>
+              <a href="/mdm/models/<%= model.id %>"><strong><%= model.name %></strong></a>
+              <% if (model.description) { %><div class="text-muted" style="font-size:0.7rem;"><%= model.description %></div><% } %>
+            </td>
+            <td class="small"><%= model.entity_type || '-' %></td>
+            <td class="small"><code><%= model.source_dataset || '-' %></code></td>
+            <td class="small"><%= model.destination_table ? model.destination_table : '<span class="text-muted">preview only</span>' %></td>
+            <td><span class="badge bg-<%= statusColor(model.status) %>"><%= model.status %></span></td>
+            <td class="small">v<%= model.version %></td>
+            <td class="text-end small">
+              <% if (latest) { %>
+                <a href="/mdm/runs/<%= latest.run_id %>"><%= latest.golden_records %> golden</a>
+                <span class="text-muted">from <%= latest.raw_records %> raw</span>
+              <% } else { %><span class="text-muted">never run</span><% } %>
+            </td>
+            <td class="text-nowrap">
+              <button class="btn btn-sm btn-outline-primary p-0 px-1" onclick="runModel(<%= model.id %>, 'preview')" title="Master the records without writing anywhere"><i class="bi bi-eye"></i></button>
+              <% if (model.status === 'active' && model.destination_table) { %>
+                <button class="btn btn-sm btn-outline-success p-0 px-1" onclick="runModel(<%= model.id %>, 'publish')" title="Master and write to the destination"><i class="bi bi-upload"></i></button>
+              <% } %>
+              <% if (model.status !== 'active') { %>
+                <button class="btn btn-sm btn-outline-success p-0 px-1" onclick="setStatus(<%= model.id %>, 'active')" title="Activate"><i class="bi bi-check-circle"></i></button>
+              <% } else { %>
+                <button class="btn btn-sm btn-outline-secondary p-0 px-1" onclick="setStatus(<%= model.id %>, 'draft')" title="Back to draft"><i class="bi bi-pause-circle"></i></button>
+              <% } %>
+              <button class="btn btn-sm btn-outline-danger p-0 px-1" onclick="removeModel(<%= model.id %>)" title="Delete"><i class="bi bi-trash"></i></button>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+  <div class="card-footer small text-muted">
+    A preview masters the records and stores the result for review without touching the destination. Publishing writes the golden
+    records to the destination table and is only offered for an active model, because it replaces a table other systems read.
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span><i class="bi bi-clock-history me-2"></i>Recent Runs</span>
+    <a href="/mdm/runs" class="btn btn-sm btn-outline-primary">All runs</a>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead><tr><th>Run</th><th>Model</th><th>Mode</th><th>Status</th><th class="text-end">Raw</th><th class="text-end">Golden</th><th class="text-end">Collapsed</th><th class="text-end">Review</th><th>When</th></tr></thead>
+      <tbody>
+        <% if (!(o.recentRuns || []).length) { %>
+          <tr><td colspan="9" class="text-muted small py-3">No runs yet.</td></tr>
+        <% } %>
+        <% (o.recentRuns || []).forEach(function(run) { %>
+          <tr>
+            <td><a href="/mdm/runs/<%= run.id %>">#<%= run.id %></a></td>
+            <td class="small"><%= run.model_name || ('Model #' + run.model_id) %> <span class="text-muted">v<%= run.model_version %></span></td>
+            <td><span class="badge bg-<%= run.mode === 'publish' ? 'success' : 'secondary' %>"><%= run.mode %></span></td>
+            <td><span class="badge bg-<%= run.status === 'completed' ? 'success' : run.status === 'failed' ? 'danger' : 'secondary' %>"><%= run.status %></span></td>
+            <td class="text-end small"><%= run.raw_records === null ? '-' : run.raw_records %></td>
+            <td class="text-end small"><%= run.golden_records === null ? '-' : run.golden_records %></td>
+            <td class="text-end small"><%= run.duplicates_removed === null ? '-' : run.duplicates_removed %></td>
+            <td class="text-end small"><%= run.review_pairs === null ? '-' : run.review_pairs %></td>
+            <td class="small"><%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="modal fade" id="runResultModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header"><h6 class="modal-title">Master Data Run</h6><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body" id="runResultBody"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+function escapeText(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+async function runModel(id, mode) {
+  var modal = new bootstrap.Modal(document.getElementById('runResultModal'));
+  document.getElementById('runResultBody').innerHTML =
+    '<div class="text-center py-3"><div class="spinner-border text-primary"></div>' +
+    '<p class="mt-2 text-muted mb-0">Reading the raw table, matching records and building golden records...</p></div>';
+  modal.show();
+
+  try {
+    var resp = await fetch('/mdm/models/' + id + '/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: mode })
+    });
+    var data = await resp.json();
+    if (!data.success) {
+      document.getElementById('runResultBody').innerHTML =
+        '<div class="alert alert-danger mb-0">' + escapeText(data.message) + '</div>' +
+        (data.runId ? '<a class="btn btn-sm btn-outline-secondary mt-2" href="/mdm/runs/' + data.runId + '">Open the run</a>' : '');
+      return;
+    }
+    var s = data.stats;
+    var warnings = '';
+    if (s.pairsTruncated) {
+      warnings += '<div class="alert alert-warning py-2 small">Candidate pairs hit the limit, so some comparisons were skipped. Narrow the blocking keys.</div>';
+    }
+    if (s.overMergeSuspected) {
+      warnings += '<div class="alert alert-warning py-2 small">One group is far larger than the rest (' + s.largestCluster +
+        ' records). That is the signature of over-merging — consider strict grouping or a stricter threshold.</div>';
+    }
+    document.getElementById('runResultBody').innerHTML =
+      '<div class="alert alert-success py-2 small">' +
+        '<strong>' + s.rawRecords + '</strong> raw record(s) became <strong>' + s.goldenRecords + '</strong> golden record(s)' +
+        ' — ' + s.duplicatesRemoved + ' collapsed across ' + s.mergedClusters + ' group(s).' +
+        (data.written !== null && data.written !== undefined ? '<br>' + data.written + ' row(s) written to the destination.' : '') +
+      '</div>' + warnings +
+      '<div class="small text-muted">' + s.pairsCompared + ' pair(s) compared from ' + s.blocksExamined +
+        ' block(s); largest block ' + s.largestBlock + '. ' + s.reviewPairs + ' pair(s) need a steward.</div>' +
+      '<a class="btn btn-sm btn-primary mt-3" href="/mdm/runs/' + data.runId + '">Review the result</a>';
+  } catch (e) {
+    document.getElementById('runResultBody').innerHTML = '<div class="alert alert-danger mb-0">' + escapeText(e.message) + '</div>';
+  }
+}
+
+async function setStatus(id, status) {
+  try {
+    var resp = await fetch('/mdm/models/' + id + '/status', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: status })
+    });
+    var data = await resp.json();
+    if (data.success) window.location.reload(); else showToast(data.message, 'error');
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function removeModel(id) {
+  showConfirmAction({
+    title: 'Delete model', message: 'Delete this model? Its runs and golden records stay for audit.',
+    confirmText: 'Delete', confirmClass: 'btn-danger',
+    onConfirm: async function() {
+      var resp = await fetch('/mdm/models/' + id, { method: 'DELETE' });
+      var data = await resp.json();
+      if (data.success) window.location.reload(); else showToast(data.message, 'error');
+    }
+  });
+}
+</script>
+<%- include('../partials/footer') %>
