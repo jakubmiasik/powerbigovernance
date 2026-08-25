@@ -55,24 +55,110 @@
 </div>
 
 <div class="card mb-4">
-  <div class="card-header"><i class="bi bi-exclamation-triangle me-2"></i>Exceptions Standing After This Run (<%= exceptions.length %>)</div>
-  <div class="table-responsive">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span>
+      <i class="bi bi-exclamation-triangle me-2"></i>Exceptions This Run Found
+      <span class="text-muted">(<span id="loadedCount">0</span><%= exceptionTotal === null ? '' : ' of ' + exceptionTotal %>)</span>
+    </span>
+    <span class="small text-muted" id="loadState"></span>
+  </div>
+
+  <!-- Loading is visible: a run with tens of thousands of findings streams in a page
+       at a time rather than showing nothing until it is all there. -->
+  <div class="progress rounded-0" id="loadBar" style="height: 3px;">
+    <div class="progress-bar progress-bar-striped progress-bar-animated" id="loadBarInner" style="width: 0%"></div>
+  </div>
+
+  <div class="table-responsive" style="max-height: 640px;">
     <table class="table table-sm table-hover mb-0">
       <thead><tr><th>Business key</th><th>Outcome</th><th>Severity</th><th>Status</th><th>Owner</th><th>Seen</th></tr></thead>
-      <tbody>
-        <% if (!exceptions.length) { %><tr><td colspan="6" class="text-muted small py-3">Nothing outstanding from this run.</td></tr><% } %>
-        <% exceptions.forEach(function(ex) { %>
-          <tr>
-            <td><a href="/reconciliation/exceptions/<%= ex.id %>"><strong><%= ex.business_key %></strong></a></td>
-            <td class="small"><%= ex.outcome %></td>
-            <td><span class="badge bg-<%= ex.severity === 'high' ? 'danger' : ex.severity === 'medium' ? 'warning' : 'secondary' %>"><%= ex.severity %></span></td>
-            <td class="small"><%= ex.status %></td>
-            <td class="small"><%= ex.owner || '-' %></td>
-            <td class="small"><%= ex.occurrence_count %>× since <%= ex.first_seen_at ? new Date(ex.first_seen_at).toLocaleDateString() : '-' %></td>
-          </tr>
-        <% }) %>
+      <tbody id="exceptionRows">
+        <tr id="loadingRow"><td colspan="6" class="text-muted small py-3">
+          <span class="spinner-border spinner-border-sm me-2"></span>Loading what this run found...
+        </td></tr>
       </tbody>
     </table>
   </div>
+  <div class="card-footer small text-muted">
+    These are the exceptions <strong>this run recorded</strong>, taken from its own findings — not the ones whose most recent
+    sighting happens to be this run, which is a different set for every run but the newest.
+  </div>
 </div>
+
+<script>
+var RUN_ID = <%= run.id %>;
+var EXPECTED = <%= exceptionTotal === null ? 'null' : exceptionTotal %>;
+var loaded = 0;
+
+function escapeText(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+function severityBadge(severity) {
+  var color = severity === 'high' ? 'danger' : severity === 'medium' ? 'warning' : 'secondary';
+  return '<span class="badge bg-' + color + '">' + escapeText(severity) + '</span>';
+}
+
+function renderRows(rows) {
+  var body = document.getElementById('exceptionRows');
+  var loadingRow = document.getElementById('loadingRow');
+  if (loadingRow) loadingRow.remove();
+
+  body.insertAdjacentHTML('beforeend', rows.map(function(ex) {
+    var seen = ex.first_seen_at ? new Date(ex.first_seen_at).toLocaleDateString() : '-';
+    return '<tr>' +
+      '<td><a href="/reconciliation/exceptions/' + ex.id + '"><strong>' + escapeText(ex.business_key) + '</strong></a></td>' +
+      '<td class="small">' + escapeText(ex.outcome) + '</td>' +
+      '<td>' + severityBadge(ex.severity) + '</td>' +
+      '<td class="small">' + escapeText(ex.status) + '</td>' +
+      '<td class="small">' + escapeText(ex.owner || '-') + '</td>' +
+      '<td class="small">' + escapeText(ex.occurrence_count) + '\u00d7 since ' + seen + '</td>' +
+      '</tr>';
+  }).join(''));
+}
+
+function updateLoadState(done) {
+  document.getElementById('loadedCount').textContent = loaded;
+  var bar = document.getElementById('loadBarInner');
+  var percent = EXPECTED ? Math.min(100, Math.round((loaded / EXPECTED) * 100)) : (done ? 100 : 50);
+  bar.style.width = percent + '%';
+
+  if (done) {
+    document.getElementById('loadBar').classList.add('d-none');
+    document.getElementById('loadState').textContent = loaded ? 'All loaded' : '';
+    if (!loaded) {
+      document.getElementById('exceptionRows').innerHTML =
+        '<tr><td colspan="6" class="text-muted small py-3">This run recorded no exceptions.</td></tr>';
+    }
+    return;
+  }
+  document.getElementById('loadState').textContent =
+    'Loading' + (EXPECTED ? ' — ' + percent + '%' : '') + '...';
+}
+
+async function loadExceptions() {
+  var after = 0;
+  try {
+    for (;;) {
+      var resp = await fetch('/reconciliation/runs/' + RUN_ID + '/exceptions?after=' + after + '&limit=500');
+      var data = await resp.json();
+      if (!data.success) {
+        document.getElementById('loadState').textContent = data.message || 'Could not load the list';
+        document.getElementById('loadBar').classList.add('d-none');
+        return;
+      }
+      renderRows(data.exceptions || []);
+      loaded += (data.exceptions || []).length;
+      updateLoadState(false);
+
+      after = data.nextAfter;
+      if (data.done || after === null) break;
+    }
+    updateLoadState(true);
+  } catch (e) {
+    document.getElementById('loadState').textContent = e.message;
+    document.getElementById('loadBar').classList.add('d-none');
+  }
+}
+
+loadExceptions();
+</script>
 <%- include('../partials/footer') %>

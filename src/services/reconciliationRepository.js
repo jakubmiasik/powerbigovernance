@@ -775,7 +775,20 @@ function exceptionFilterClause(filters = {}) {
   if (filters.outcome) { clauses.push('outcome=@outcome'); params.push(str('outcome', filters.outcome)); }
   if (filters.ruleId) { clauses.push('rule_id=@rule'); params.push(int('rule', filters.ruleId)); }
   if (filters.owner) { clauses.push('owner=@owner'); params.push(str('owner', filters.owner)); }
-  if (filters.runId) { clauses.push('last_run_id=@run'); params.push(int('run', filters.runId)); }
+  if (filters.runId) {
+    // What this run actually found, from the findings it recorded — not
+    // `last_run_id`, which means "the most recent run that saw this exception".
+    // For the newest run those coincide, so the filter looked like it worked; for
+    // any earlier run it silently answered a different question.
+    //
+    // Runs recorded before findings were kept have none, so they fall back to the
+    // old meaning rather than showing an empty list.
+    clauses.push(`(
+      id IN (SELECT f.exception_id FROM recon_run_findings f WHERE f.run_id=@run)
+      OR (last_run_id=@run AND NOT EXISTS (SELECT 1 FROM recon_run_findings f2 WHERE f2.run_id=@run))
+    )`);
+    params.push(int('run', filters.runId));
+  }
   return { where: clauses.length ? ' WHERE ' + clauses.join(' AND ') : '', params };
 }
 
@@ -807,21 +820,49 @@ async function countExceptions(filters = {}) {
 }
 
 /**
- * Every exception a filter covers — the whole rule, not just the page.
+ * One page of the exceptions a filter covers, ordered by id.
  *
- * Bounded, because a bulk action still has to fit in one request and one audit
- * write per exception. The caller is told when the bound was reached rather than
- * silently acting on part of the set.
+ * Keyset paging rather than OFFSET: the set is walked once, in id order, and each
+ * page continues from the last id seen. That stays the same cost at page one and
+ * page five hundred, and — unlike OFFSET — is not disturbed by the rows the action
+ * is itself updating.
  */
-async function listExceptionsForAction(filters = {}, { max = 5000 } = {}) {
+async function listExceptionPage(filters = {}, { after = 0, limit = 500 } = {}) {
   const { where, params } = exceptionFilterClause(filters);
-  const cap = Math.max(1, Math.min(20000, Number(max) || 5000));
+  const size = Math.max(1, Math.min(2000, Number(limit) || 500));
+  const cursor = Number.parseInt(after, 10) || 0;
+  const clause = where ? where + ' AND id > @after' : ' WHERE id > @after';
   return withConnection(async conn => {
     const rows = await execSql(conn,
-      'SELECT TOP (' + (cap + 1) + ') ' + EXCEPTION_LIST_COLUMNS + ' FROM recon_exceptions' + where + ' ORDER BY id',
-      params);
-    return { exceptions: rows.slice(0, cap).map(mapException), truncated: rows.length > cap };
+      'SELECT TOP (' + size + ') ' + EXCEPTION_LIST_COLUMNS + ' FROM recon_exceptions' + clause + ' ORDER BY id',
+      [...params, int('after', cursor)]);
+    return {
+      exceptions: rows.map(mapException),
+      nextAfter: rows.length ? rows[rows.length - 1].id : null,
+      done: rows.length < size,
+    };
   });
+}
+
+/**
+ * Every exception a filter covers.
+ *
+ * Kept for callers that genuinely want the whole set in memory. `max` is a
+ * safety valve, not a policy: the bulk action pages instead, so that it can act on
+ * a set of any size and report progress while it does.
+ */
+async function listExceptionsForAction(filters = {}, { max = 5000 } = {}) {
+  const cap = Math.max(1, Math.min(200000, Number(max) || 5000));
+  const collected = [];
+  let after = 0;
+  for (;;) {
+    const page = await listExceptionPage(filters, { after, limit: 1000 });
+    collected.push(...page.exceptions);
+    after = page.nextAfter;
+    if (page.done || collected.length >= cap || after === null) {
+      return { exceptions: collected.slice(0, cap), truncated: collected.length > cap };
+    }
+  }
 }
 
 async function getExceptionById(id) {
@@ -1156,7 +1197,7 @@ module.exports = {
   createRun, completeRun, listRuns, getRunById, getRunOutcomeCounts,
   normalizeLegacyRows,
   recordExceptions, listRunFindings, hasRunFindings, listFindingsForRuns,
-  listExceptions, countExceptions, listExceptionsForAction,
+  listExceptions, countExceptions, listExceptionsForAction, listExceptionPage,
   getExceptionById, getExceptionsByIds, getExceptionEvents,
   batchUpdateExceptions,
   updateExceptionStatus, assignException, commentOnException,

@@ -172,8 +172,8 @@
     Bulk decisions follow the same lifecycle as single ones: an exception that cannot make the transition is named rather than forced,
     closing needs a reason, and every change is written to that exception's own history.
     <strong>Apply to</strong> chooses between the rows ticked here and every exception the current filter covers — the whole rule rather
-    than the page, which matters because this list is capped. Applying to a whole set needs the filter narrowed to at least a rule,
-    status, severity or type first.
+    than the page, which matters because this list is capped. A whole-set change has no size limit: it is applied in pages and reports
+    its progress while it runs. It needs the filter narrowed to at least a rule, status, severity or type first.
   </div>
 </div>
 
@@ -304,20 +304,87 @@ async function applyBulk() {
     var data = await resp.json();
     if (!data.success) { result.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeText(data.message) + '</div>'; return; }
 
-    // Exceptions that could not take the change are named — "38 of 50 updated"
-    // without saying which twelve is not something anyone can act on.
-    var skipped = (data.skipped || []).map(function(s) {
-      return '<li>' + escapeText(s.key) + ' — ' + escapeText(s.message) + '</li>';
-    }).join('');
-    result.innerHTML = '<div class="alert alert-' + (skipped ? 'warning' : 'success') + ' py-2 small mb-0">' +
-      data.updated + ' of ' + data.considered + ' exception(s) updated' +
-      (data.unchanged ? ', ' + data.unchanged + ' already had these values' : '') + '.' +
-      (data.truncated ? '<br>The set was larger than one action can cover; run it again to continue.' : '') +
-      (skipped ? '<br>Not changed:<ul class="mb-0">' + skipped + '</ul>' : ' Reloading...') + '</div>';
-    setTimeout(function() { window.location.reload(); }, skipped ? 5000 : 700);
+    // A whole-filter change runs as a job because the set has no upper bound; the
+    // page follows it rather than waiting on a request that cannot return in time.
+    if (data.jobId) { followJob(data.jobId, data.total); return; }
+    showBulkOutcome(data);
   } catch (e) {
     result.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeText(e.message) + '</div>';
   }
+}
+
+function skippedList(skipped) {
+  // Exceptions that could not take the change are named — "38 of 50 updated"
+  // without saying which twelve is not something anyone can act on.
+  return (skipped || []).slice(0, 25).map(function(s) {
+    return '<li>' + escapeText(s.key) + ' — ' + escapeText(s.message) + '</li>';
+  }).join('');
+}
+
+function showBulkOutcome(data) {
+  var result = document.getElementById('bulkResult');
+  var skipped = skippedList(data.skipped);
+  var more = (data.skipped || []).length > 25 ? '<li>… and ' + ((data.skipped || []).length - 25) + ' more</li>' : '';
+  result.innerHTML = '<div class="alert alert-' + (skipped ? 'warning' : 'success') + ' py-2 small mb-0">' +
+    data.updated + ' of ' + data.considered + ' exception(s) updated' +
+    (data.unchanged ? ', ' + data.unchanged + ' already had these values' : '') + '.' +
+    (skipped ? '<br>Not changed:<ul class="mb-0">' + skipped + more + '</ul>' : ' Reloading...') + '</div>';
+  setTimeout(function() { window.location.reload(); }, skipped ? 6000 : 700);
+}
+
+function formatSeconds(total) {
+  var s = Math.max(0, Math.floor(total || 0));
+  if (s < 60) return s + 's';
+  return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+}
+
+/** Polls a bulk job and shows how far it has got. */
+function followJob(jobId, total) {
+  var result = document.getElementById('bulkResult');
+  var render = function(job) {
+    var percent = job.percent === null || job.percent === undefined ? 0 : job.percent;
+    result.innerHTML =
+      '<div class="small text-muted mb-1">' +
+        '<span class="spinner-border spinner-border-sm me-1"></span>' + escapeText(job.message || 'Working...') +
+        (job.etaSeconds !== null && job.etaSeconds !== undefined ? ' · about ' + formatSeconds(job.etaSeconds) + ' left' : '') +
+      '</div>' +
+      '<div class="progress" style="height: 16px;">' +
+        '<div class="progress-bar progress-bar-striped progress-bar-animated" style="width:' + percent + '%">' +
+          percent + '%</div></div>' +
+      '<div class="small text-muted mt-1">' +
+        (job.counters.updated || 0) + ' updated · ' + (job.counters.unchanged || 0) + ' unchanged · ' +
+        (job.counters.skipped || 0) + ' not changed</div>';
+  };
+
+  render({ percent: 0, message: 'Starting on ' + total + ' exception(s)...', counters: {} });
+
+  var poll = setInterval(async function() {
+    try {
+      var resp = await fetch('/reconciliation/jobs/' + jobId);
+      var job = await resp.json();
+      if (!job.success) {
+        clearInterval(poll);
+        result.innerHTML = '<div class="alert alert-warning py-2 small mb-0">' + escapeText(job.message) + '</div>';
+        return;
+      }
+      if (job.live) { render(job); return; }
+
+      clearInterval(poll);
+      if (job.status !== 'completed') {
+        result.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' +
+          escapeText(job.message || 'The update did not finish.') +
+          '<br>' + (job.counters.updated || 0) + ' exception(s) were updated before it stopped.</div>';
+        return;
+      }
+      showBulkOutcome({
+        considered: job.total, updated: job.counters.updated || 0,
+        unchanged: job.counters.unchanged || 0, skipped: job.problems || [],
+      });
+    } catch (e) {
+      clearInterval(poll);
+      result.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeText(e.message) + '</div>';
+    }
+  }, 1000);
 }
 </script>
 <%- include('../partials/footer') %>

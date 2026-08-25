@@ -2739,7 +2739,11 @@ test('counting and acting on a filter build the same predicate as listing it', a
   const counted = await withFakeSql(() => [{ total: 42 }], () => reconRepo.countExceptions(filters));
   const acted = await withFakeSql(() => [], () => reconRepo.listExceptionsForAction(filters));
 
-  const clauseOf = sql => sql.slice(sql.indexOf(' WHERE '), sql.indexOf(' ORDER BY ') === -1 ? undefined : sql.indexOf(' ORDER BY '));
+  // The action pages by id, so its statement carries an extra keyset predicate on
+  // top of the filter. The filter itself must still be identical.
+  const clauseOf = sql => sql
+    .slice(sql.indexOf(' WHERE '), sql.indexOf(' ORDER BY ') === -1 ? undefined : sql.indexOf(' ORDER BY '))
+    .replace(/ AND id > @after$/, '');
   assert.equal(clauseOf(listed.executed[0].sql), clauseOf(acted.executed[0].sql));
   assert.equal(clauseOf(listed.executed[0].sql), clauseOf(counted.executed[0].sql));
   assert.equal(counted.result, 42);
@@ -2752,38 +2756,61 @@ test('acting on a whole filter reports when the set was larger than one action c
   assert.equal(result.truncated, true);
 });
 
-test('a whole-filter bulk action acts on the rule, not just the loaded page', async () => {
-  // The list is capped, so acting only on what it rendered would silently miss the
-  // rest of the rule.
-  const rows = Array.from({ length: 700 }, (_, i) => ({
-    id: i + 1, business_key: 'INV-' + i, status: 'open', severity: 'medium', owner: null,
-  }));
+test('a whole-filter bulk action covers the rule with no size limit, reporting progress', async () => {
+  // The list is capped and the old action stopped at 5,000. It now pages through
+  // the whole set as a job, so the size of the rule is not a limit on the decision.
+  const total = 12000;
   const original = {
-    listExceptionsForAction: reconRepo.listExceptionsForAction,
+    countExceptions: reconRepo.countExceptions,
+    listExceptionPage: reconRepo.listExceptionPage,
     batchUpdateExceptions: reconRepo.batchUpdateExceptions,
-    getExceptionsByIds: reconRepo.getExceptionsByIds,
   };
-  let usedFilters = null;
-  reconRepo.listExceptionsForAction = async filters => {
-    usedFilters = filters;
-    return { exceptions: rows, truncated: false };
+  reconRepo.countExceptions = async () => total;
+
+  let served = 0;
+  const seenFilters = [];
+  reconRepo.listExceptionPage = async (filters, { limit }) => {
+    seenFilters.push(filters);
+    const size = Math.min(limit, total - served);
+    const exceptions = Array.from({ length: size }, (_, i) => ({
+      id: served + i + 1, business_key: 'INV-' + (served + i), status: 'open', severity: 'medium', owner: null,
+    }));
+    served += size;
+    return { exceptions, nextAfter: served, done: served >= total };
   };
-  reconRepo.batchUpdateExceptions = async exceptions => exceptions.map(e => ({ id: e.id, success: true, changed: true }));
-  reconRepo.getExceptionsByIds = async () => { throw new Error('the selection path must not be used'); };
+  let updated = 0;
+  reconRepo.batchUpdateExceptions = async exceptions => {
+    updated += exceptions.length;
+    return exceptions.map(e => ({ id: e.id, success: true, changed: true }));
+  };
 
   const server = await new Promise(resolve => {
     const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
   });
   try {
-    const body = await postJson(server, '/reconciliation/exceptions/batch', {
+    const started = await postJson(server, '/reconciliation/exceptions/batch', {
       scope: 'filter', ids: [1, 2], filters: { ruleId: 9, all: '' },
       assignOwner: true, owner: 'Ann',
     });
-    assert.equal(body.success, true);
-    assert.equal(body.considered, 700, 'the whole rule, not the two ticked rows');
-    assert.equal(body.updated, 700);
-    assert.equal(usedFilters.ruleId, 9);
-    assert.equal(usedFilters.openOnly, true);
+    assert.equal(started.success, true);
+    assert.ok(started.jobId, 'a whole-set change runs as a job');
+    assert.equal(started.total, total);
+
+    // Follow it the way the page does.
+    let job;
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      job = await request(server, '/reconciliation/jobs/' + started.jobId).then(r => JSON.parse(r.body));
+      if (!job.live) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    assert.equal(job.status, 'completed');
+    assert.equal(job.total, total);
+    assert.equal(job.done, total, 'every exception the filter covers was processed');
+    assert.equal(job.counters.updated, total);
+    assert.equal(updated, total);
+    assert.equal(seenFilters[0].ruleId, 9);
+    assert.equal(seenFilters[0].openOnly, true);
   } finally {
     Object.assign(reconRepo, original);
     await new Promise(resolve => server.close(resolve));
@@ -3167,4 +3194,143 @@ test('a bulk action reads only the columns it needs, not the whole exception', a
   assert.ok(!/SELECT \* FROM recon_exceptions/.test(executed[0].sql),
     'a bulk decision never looks at the captured values, so it must not read them');
   assert.match(executed[0].sql, /WHERE id IN \(@e0, @e1, @e2\)/);
+});
+
+// ── Filtering to one run ──
+test('filtering to a run asks what that run found, not what it last touched', async () => {
+  // `last_run_id` means "the most recent run that saw this exception". For the
+  // newest run that is everything it touched, so the filter looked like it worked;
+  // for any earlier run it silently answered a different question.
+  const { executed } = await withFakeSql(() => [], () => reconRepo.listExceptions({ runId: 3 }));
+  const sql = executed[0].sql;
+
+  assert.match(sql, /id IN \(SELECT f\.exception_id FROM recon_run_findings f WHERE f\.run_id=@run\)/);
+  // Runs recorded before findings were kept have none, so they keep the old meaning
+  // rather than showing an empty list.
+  assert.match(sql, /NOT EXISTS \(SELECT 1 FROM recon_run_findings f2 WHERE f2\.run_id=@run\)/);
+  assert.equal(executed[0].params.find(param => param.name === 'run').value, 3);
+});
+
+test('a run page and its count agree on which exceptions belong to the run', async () => {
+  const listed = await withFakeSql(() => [], () => reconRepo.listExceptionPage({ runId: 3 }, { after: 0 }));
+  const counted = await withFakeSql(() => [{ total: 9 }], () => reconRepo.countExceptions({ runId: 3 }));
+  assert.match(listed.executed[0].sql, /recon_run_findings/);
+  assert.match(counted.executed[0].sql, /recon_run_findings/);
+  assert.equal(counted.result, 9);
+});
+
+test('paging walks the set by id rather than by offset', async () => {
+  // Keyset paging costs the same at page five hundred as at page one, and is not
+  // disturbed by the rows the action is itself updating.
+  const full = await withFakeSql(
+    () => [{ id: 41 }, { id: 42 }],
+    () => reconRepo.listExceptionPage({ ruleId: 9 }, { after: 40, limit: 2 })
+  );
+  assert.match(full.executed[0].sql, /AND id > @after ORDER BY id/);
+  assert.ok(!/OFFSET/.test(full.executed[0].sql));
+  assert.equal(full.executed[0].params.find(param => param.name === 'after').value, 40);
+  assert.equal(full.result.nextAfter, 42, 'the next page continues from the last id seen');
+  assert.equal(full.result.done, false, 'a full page could still have more behind it');
+
+  // Only a short page proves the end of the set.
+  const short = await withFakeSql(
+    () => [{ id: 43 }],
+    () => reconRepo.listExceptionPage({ ruleId: 9 }, { after: 42, limit: 2 })
+  );
+  assert.equal(short.result.done, true);
+});
+
+// ── Job progress ──
+const jobProgress = require('../src/services/jobProgressService');
+
+test('a job reports how far it has got and what is left', () => {
+  const job = jobProgress.createJob({ kind: 'test', total: 100 });
+  job.startedAt = Date.now() - 10000;
+
+  jobProgress.advanceJob(job, 25, 'quarter done');
+  const quarter = jobProgress.summarize(job);
+  assert.equal(quarter.percent, 25);
+  assert.equal(quarter.done, 25);
+  assert.equal(quarter.live, true);
+  assert.equal(quarter.message, 'quarter done');
+  assert.ok(quarter.etaSeconds > 0, 'an estimate once there is enough behind us');
+
+  jobProgress.finishJob(job, { status: 'completed', result: { updated: 100 } });
+  const finished = jobProgress.summarize(job);
+  assert.equal(finished.live, false);
+  assert.equal(finished.etaSeconds, null, 'nothing left to estimate');
+  assert.deepEqual(finished.result, { updated: 100 });
+});
+
+test('a job with no known size reports what it has done rather than inventing a percentage', () => {
+  const job = jobProgress.createJob({ kind: 'test' });
+  jobProgress.advanceJob(job, 7);
+  const summary = jobProgress.summarize(job);
+  assert.equal(summary.total, null);
+  assert.equal(summary.percent, null);
+  assert.equal(summary.done, 7);
+});
+
+test('a job whose worker died is reported as interrupted, not as still running', () => {
+  const job = jobProgress.createJob({ kind: 'test', total: 10 });
+  const now = Date.now() + jobProgress.STALE_MS + 1000;
+  const summary = jobProgress.summarize(job, now);
+  assert.equal(summary.status, 'interrupted');
+  assert.equal(summary.live, false);
+  assert.match(summary.message, /stopped reporting progress/);
+});
+
+test('work that throws marks its job failed rather than becoming an unhandled rejection', async () => {
+  const job = jobProgress.runJob({ kind: 'test', total: 1 }, async () => {
+    throw new Error('the source went away');
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const summary = jobProgress.summarize(jobProgress.getJob(job.id));
+  assert.equal(summary.status, 'failed');
+  assert.equal(summary.message, 'the source went away');
+});
+
+test('a finished job is dropped once nobody could still be polling it', () => {
+  const job = jobProgress.createJob({ kind: 'test' });
+  jobProgress.finishJob(job, { status: 'completed' });
+  job.finishedAt = Date.now() - jobProgress.RETAIN_MS - 1000;
+
+  jobProgress._private.sweep();
+  assert.equal(jobProgress.getJob(job.id), null);
+});
+
+test('progress for a job this process never had is reported honestly', async () => {
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = JSON.parse((await request(server, '/reconciliation/jobs/nope-123')).body);
+    assert.equal(body.success, false);
+    assert.equal(body.status, 'unknown');
+    assert.match(body.message, /No progress is being reported/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('a run\'s exception list is served a page at a time so it can be loaded with progress', async () => {
+  const original = reconRepo.listExceptionPage;
+  reconRepo.listExceptionPage = async (filters, { after, limit }) => {
+    assert.equal(filters.runId, 7);
+    assert.equal(Number(limit), 500);
+    return { exceptions: [{ id: Number(after) + 1, business_key: 'K' }], nextAfter: Number(after) + 1, done: true };
+  };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = JSON.parse((await request(server, '/reconciliation/runs/7/exceptions?after=40&limit=500')).body);
+    assert.equal(body.success, true);
+    assert.equal(body.exceptions[0].id, 41);
+    assert.equal(body.done, true);
+  } finally {
+    reconRepo.listExceptionPage = original;
+    await new Promise(resolve => server.close(resolve));
+  }
 });
