@@ -526,6 +526,115 @@ router.get('/runs/:id', async (req, res) => {
   }
 });
 
+/**
+ * What deleting a run would remove, so the confirmation can say it.
+ *
+ * Deleting is not undoable and the effect is not obvious — an exception is shared
+ * between the runs that saw it, so only the ones with no other sighting go.
+ */
+router.get('/runs/:id/deletion-impact', async (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    const run = await repo.getRunById(id);
+    if (!run) return res.json({ success: false, message: 'Run not found.' });
+    const impact = await repo.getRunDeletionImpact(id);
+    res.json({ success: true, run: { id: run.id, ruleName: run.rule_name, startedAt: run.started_at }, ...impact });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * Deletes a run and everything belonging only to it.
+ *
+ * Job-backed: a run with many findings takes longer than a request should wait, and
+ * a destructive action is exactly the kind a person wants to watch finish.
+ */
+router.delete('/runs/:id', async (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    const run = await repo.getRunById(id);
+    if (!run) return res.json({ success: false, message: 'Run not found.' });
+
+    const impact = await repo.getRunDeletionImpact(id);
+    const job = jobs.runJob({
+      kind: 'run-delete', actor: actorOf(req),
+      total: impact.exceptionsToDelete + impact.exceptionsToKeep + 1,
+      label: 'Deleting run #' + id,
+    }, async (running) => {
+      running.counters = { exceptions: 0, repaired: 0, findings: 0 };
+      const removed = await repo.deleteRun(id, {
+        onProgress: (progress) => {
+          if (progress.stage === 'exceptions') {
+            running.counters.exceptions = progress.done;
+            jobs.updateJob(running, { done: progress.done, message: 'Removing exceptions only this run saw...' });
+          } else if (progress.stage === 'repaired') {
+            running.counters.repaired = progress.done;
+            jobs.updateJob(running, {
+              done: running.counters.exceptions + progress.done,
+              message: 'Repointing exceptions other runs also saw...',
+            });
+          } else if (progress.stage === 'findings') {
+            running.counters.findings = progress.done;
+            jobs.updateJob(running, { message: 'Removing the run\'s findings...' });
+          }
+        },
+      });
+      jobs.updateJob(running, { done: running.total, message: 'Run #' + id + ' deleted.' });
+      return removed;
+    });
+
+    res.json({ success: true, jobId: job.id, impact });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * Deletes every run of a rule, or every run there is.
+ *
+ * Deleting them one at a time in order keeps each exception's sightings correct as
+ * it goes, rather than needing a separate repair pass at the end.
+ */
+router.post('/runs/delete-all', async (req, res) => {
+  try {
+    const ruleId = req.body.ruleId ? Number.parseInt(req.body.ruleId, 10) : null;
+    const confirmed = req.body.confirm === true || req.body.confirm === 'true';
+    if (!ruleId && !confirmed) {
+      // Deleting the entire run history is not something to do by accident.
+      return res.json({ success: false, message: 'Deleting every run of every rule needs an explicit confirmation.' });
+    }
+
+    const runIds = await repo.listRunIds({ ruleId });
+    if (!runIds.length) return res.json({ success: false, message: 'There are no runs to delete.' });
+
+    const job = jobs.runJob({
+      kind: 'run-delete-all', actor: actorOf(req), total: runIds.length,
+      label: 'Deleting ' + runIds.length + ' run(s)',
+    }, async (running) => {
+      running.counters = { runs: 0, exceptions: 0, repaired: 0, findings: 0 };
+      for (const runId of runIds) {
+        try {
+          const removed = await repo.deleteRun(runId);
+          running.counters.exceptions += removed.exceptions;
+          running.counters.repaired += removed.repaired;
+          running.counters.findings += removed.findings;
+        } catch (err) {
+          // One run that will not delete should not stop the rest.
+          running.problems.push({ key: 'Run #' + runId, message: err.message });
+        }
+        running.counters.runs += 1;
+        jobs.advanceJob(running, 1, running.counters.runs + ' of ' + runIds.length + ' run(s) deleted');
+      }
+      return { ...running.counters };
+    });
+
+    res.json({ success: true, jobId: job.id, total: runIds.length });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
 /** One page of the exceptions a run found, for the run detail page to stream in. */
 router.get('/runs/:id/exceptions', async (req, res) => {
   try {
