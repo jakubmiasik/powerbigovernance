@@ -505,12 +505,31 @@ router.get('/runs/:id', async (req, res) => {
     const id = Number.parseInt(req.params.id, 10);
     const run = await repo.getRunById(id);
     if (!run) return res.render('error', { title: 'Error', user: req.user, message: 'Run not found.' });
-    const exceptions = await repo.listExceptions({ runId: id });
+    const [exceptions, outcomeCounts] = await Promise.all([
+      repo.listExceptions({ runId: id }),
+      repo.getRunOutcomeCounts(id),
+    ]);
     view(res, 'reconciliation/run-detail', {
+      outcomeCounts,
       title: 'Run #' + id, user: req.user, run, exceptions, outcomeDefs: OUTCOME_DEFS,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
+  }
+});
+
+/**
+ * Converts the JSON documents written before the reconciliation schema was
+ * normalised. On request rather than at startup, because the readers already fall
+ * back to the documents and converting everything at boot would delay startup by
+ * however much history the install has.
+ */
+router.post('/normalize', async (req, res) => {
+  try {
+    const result = await repo.normalizeLegacyRows({ maxExceptions: req.body && req.body.maxExceptions });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
   }
 });
 

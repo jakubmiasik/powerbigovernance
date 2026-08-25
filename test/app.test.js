@@ -2138,13 +2138,20 @@ test('a bulk decision records owner, severity and status as separate history ent
 
   assert.equal(result[0].success, true);
   assert.equal(result[0].changed, true);
-  const events = executed.filter(entry => /INSERT INTO recon_exception_events/.test(entry.sql));
-  assert.equal(events.length, 3, 'assignment, severity change and status change are each auditable');
+
+  // The three entries are written in one multi-row statement now, so the property
+  // to assert is that all three exist — not how many statements carried them.
+  const eventWrites = executed.filter(entry => /INSERT INTO recon_exception_events/.test(entry.sql));
+  assert.equal(eventWrites.length, 1, 'history is written in one batch');
+  const actions = eventWrites[0].params.filter(param => /^a\d+$/.test(param.name)).map(param => param.value);
+  assert.deepEqual(actions.sort(), ['assigned', 'severity-change', 'status-change'],
+    'assignment, severity change and status change are each auditable');
 
   const update = executed.find(entry => /UPDATE recon_exceptions/.test(entry.sql));
   assert.match(update.sql, /owner=@owner/);
   assert.match(update.sql, /severity=@severity/);
   assert.match(update.sql, /status=@status/);
+  assert.match(update.sql, /WHERE id IN \(@i0\)/, 'the update targets a bound id set');
 });
 
 test('a bulk decision that matches what an exception already says writes nothing', async () => {
@@ -2937,4 +2944,227 @@ test('the home page states the prerequisites rather than only linking to them', 
   // an undifferentiated wall of advice.
   assert.match(html, /badge bg-danger">required/);
   assert.match(html, /badge bg-secondary">optional/);
+});
+
+// ── Reconciliation in third normal form ──
+test('a rule\'s compare fields are written as rows, not one JSON column', async () => {
+  const rule = {
+    name: 'Invoices', sourceAId: 1, sourceBId: 2, datasetA: 'A', datasetB: 'B',
+    keyFieldA: 'Id', keyFieldB: 'Id',
+    compareFields: [
+      { label: 'Net', a: { kind: 'field', value: 'NetAmount' }, b: { kind: 'field', value: 'Net' }, type: 'number', tolerance: 0.01 },
+      { label: 'Currency', a: { kind: 'field', value: 'Ccy' }, b: { kind: 'constant', value: 'EUR' }, type: 'string' },
+    ],
+  };
+  const { executed } = await withFakeSql(sql => (/OUTPUT INSERTED.id/.test(sql) ? [{ id: 7 }] : []),
+    () => reconRepo.createRule(rule, 'tester'));
+
+  const insert = executed.find(entry => /INSERT INTO recon_rules/.test(entry.sql));
+  assert.ok(!/compare_fields/.test(insert.sql), 'the rule row no longer carries a JSON field list');
+
+  const fieldWrite = executed.find(entry => /INSERT INTO recon_rule_fields/.test(entry.sql));
+  assert.ok(fieldWrite, 'the fields are written to their own table');
+  assert.match(fieldWrite.sql, /VALUES \(.*\), \(.*\)/, 'both fields go in one statement');
+  const values = fieldWrite.params.map(param => param.value);
+  assert.ok(values.includes('NetAmount') && values.includes('EUR'));
+  assert.ok(values.includes('constant'), 'the operand kind is a column, not buried in a document');
+});
+
+test('a rule version snapshot still carries the fields the row no longer holds', async () => {
+  const { executed } = await withFakeSql(sql => {
+    if (/OUTPUT INSERTED.id/.test(sql)) return [{ id: 7 }];
+    if (/SELECT \* FROM recon_rules/.test(sql)) return [{ id: 7, name: 'Invoices', fields_normalized: 1 }];
+    if (/FROM recon_rule_fields/.test(sql)) {
+      return [{ rule_id: 7, ordinal: 0, label: 'Net', value_type: 'number', a_kind: 'field', a_value: 'NetAmount', b_kind: 'field', b_value: 'Net' }];
+    }
+    return [];
+  }, () => reconRepo.createRule({ name: 'Invoices', compareFields: [{ label: 'Net' }] }, 'tester'));
+
+  const version = executed.find(entry => /INSERT INTO recon_rule_versions/.test(entry.sql));
+  const snapshot = JSON.parse(version.params.find(param => param.name === 'snapshot').value);
+  assert.equal(snapshot.compareFields.length, 1, 'the audit snapshot must not lose the definition');
+  assert.equal(snapshot.compareFields[0].a.value, 'NetAmount');
+});
+
+test('a legacy rule still reads its fields from the JSON it was written with', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/FROM recon_rule_fields/.test(sql)) return [];
+    return [{
+      id: 3, name: 'Legacy', fields_normalized: 0,
+      compare_fields: JSON.stringify([{ label: 'Net', fieldA: 'NetAmount', fieldB: 'Net' }]),
+    }];
+  }, () => reconRepo.getRuleById(3));
+
+  assert.equal(result.compareFields.length, 1);
+  assert.equal(result.compareFields[0].fieldA, 'NetAmount');
+});
+
+test('exception values and differences are written as rows, in batches', async () => {
+  const exceptions = Array.from({ length: 30 }, (_, i) => ({
+    businessKey: 'INV-' + i, outcome: 'value_mismatch', severity: 'medium',
+    valuesA: { Net: 100 + i, Currency: 'EUR' },
+    valuesB: { Net: 101 + i, Currency: 'EUR' },
+    differences: [{ field: 'Net', reason: 'differs by 1', difference: 1 }],
+  }));
+
+  const { executed } = await withFakeSql(sql => (/OUTPUT INSERTED.id/.test(sql) ? [{ id: 42 }] : []),
+    () => reconRepo.recordExceptions(5, { id: 9, name: 'R' }, exceptions));
+
+  const exceptionInsert = executed.find(entry => /INSERT INTO recon_exceptions/.test(entry.sql));
+  assert.ok(!/values_a/.test(exceptionInsert.sql), 'the exception row no longer carries JSON documents');
+  assert.match(exceptionInsert.sql, /values_normalized/);
+
+  // 30 exceptions × 4 values and 30 differences, written in a handful of statements
+  // rather than one each.
+  const valueWrites = executed.filter(entry => /INSERT INTO recon_exception_values/.test(entry.sql));
+  const differenceWrites = executed.filter(entry => /INSERT INTO recon_exception_differences/.test(entry.sql));
+  assert.equal(valueWrites.length, 1);
+  assert.equal(differenceWrites.length, 1);
+  assert.equal(valueWrites[0].params.length, 30 * 4 * 4, 'four values per exception, four parameters each');
+
+  const findingWrites = executed.filter(entry => /INSERT INTO recon_run_findings/.test(entry.sql));
+  assert.equal(findingWrites.length, 1, 'findings are batched too');
+});
+
+test('an exception detail read assembles values from rows', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/FROM recon_exception_values/.test(sql)) {
+      return [
+        { exception_id: 1, side: 'a', field_label: 'Net', value: '100' },
+        { exception_id: 1, side: 'b', field_label: 'Net', value: '101' },
+      ];
+    }
+    if (/FROM recon_exception_differences/.test(sql)) {
+      return [{ exception_id: 1, field_label: 'Net', reason: 'differs by 1', delta: 1 }];
+    }
+    return [{ id: 1, business_key: 'INV-1', status: 'open', severity: 'medium', values_normalized: 1 }];
+  }, () => reconRepo.getExceptionById(1));
+
+  assert.deepEqual(result.valuesA, { Net: '100' });
+  assert.deepEqual(result.valuesB, { Net: '101' });
+  assert.equal(result.differences[0].field, 'Net');
+  assert.equal(result.differences[0].difference, 1);
+});
+
+test('an exception written before the tables existed still reads its stored JSON', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/FROM recon_exception_values|FROM recon_exception_differences/.test(sql)) return [];
+    return [{
+      id: 2, business_key: 'INV-2', status: 'open', values_normalized: 0,
+      values_a: JSON.stringify({ Net: 100 }), values_b: JSON.stringify({ Net: 105 }),
+      differences: JSON.stringify([{ field: 'Net', difference: 5 }]),
+    }];
+  }, () => reconRepo.getExceptionById(2));
+
+  assert.deepEqual(result.valuesA, { Net: 100 });
+  assert.equal(result.differences[0].difference, 5);
+});
+
+test('run outcome counts are rows, with the stored document as the fallback', async () => {
+  const fromRows = await withFakeSql(sql => (/FROM recon_run_outcome_counts/.test(sql)
+    ? [{ outcome: 'value_mismatch', total: 4 }, { outcome: 'duplicate', total: 1 }]
+    : []), () => reconRepo.getRunOutcomeCounts(5));
+  assert.deepEqual(fromRows.result, { value_mismatch: 4, duplicate: 1 });
+
+  const fromDocument = await withFakeSql(sql => (/FROM recon_run_outcome_counts/.test(sql)
+    ? []
+    : [{ counts_json: JSON.stringify({ duplicate: 2 }) }]), () => reconRepo.getRunOutcomeCounts(6));
+  assert.deepEqual(fromDocument.result, { duplicate: 2 });
+});
+
+// ── The bulk update is set-based ──
+test('a bulk change costs a handful of statements however many exceptions it covers', async () => {
+  // This is what the refactor is for. Fifty exceptions used to cost about a hundred
+  // round trips — one update and one history insert each.
+  const exceptions = Array.from({ length: 50 }, (_, i) => ({
+    id: i + 1, business_key: 'INV-' + i, status: 'open', severity: 'medium', owner: null,
+  }));
+  const { result, executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    exceptions, { assignOwner: true, owner: 'Ann', toStatus: 'acknowledged', actor: 'tester' }
+  ));
+
+  assert.equal(result.length, 50);
+  assert.ok(result.every(entry => entry.success && entry.changed));
+  assert.ok(executed.length <= 5, 'expected a handful of statements, got ' + executed.length);
+
+  const updates = executed.filter(entry => /UPDATE recon_exceptions/.test(entry.sql));
+  assert.equal(updates.length, 1, 'one update covers every exception needing the same change');
+  assert.match(updates[0].sql, /WHERE id IN \(@i0, @i1/);
+  assert.equal(updates[0].params.filter(param => /^i\d+$/.test(param.name)).length, 50);
+
+  const events = executed.filter(entry => /INSERT INTO recon_exception_events/.test(entry.sql));
+  assert.equal(events.length, 1, 'and one statement writes all the history');
+  assert.equal(events[0].params.filter(param => /^e\d+$/.test(param.name)).length, 100,
+    'two events per exception — the owner and the status — all still recorded');
+});
+
+test('exceptions needing different parts of the same change are grouped, not looped', async () => {
+  // Some already have the owner, some already have the severity. Each distinct
+  // combination becomes one statement.
+  const exceptions = [
+    { id: 1, status: 'open', severity: 'low', owner: null },
+    { id: 2, status: 'open', severity: 'high', owner: null },
+    { id: 3, status: 'open', severity: 'low', owner: 'Ann' },
+    { id: 4, status: 'open', severity: 'high', owner: 'Ann' },
+  ];
+  const { result, executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    exceptions, { assignOwner: true, owner: 'Ann', severity: 'high', actor: 'tester' }
+  ));
+
+  const updates = executed.filter(entry => /UPDATE recon_exceptions/.test(entry.sql));
+  assert.equal(updates.length, 3, 'owner+severity, owner only, severity only');
+  // The one already matching in both respects is reported as unchanged rather than
+  // rewritten.
+  assert.equal(result.find(entry => entry.id === 4).changed, false);
+  assert.ok(result.every(entry => entry.success));
+});
+
+test('a large selection is chunked so it stays under the parameter cap', async () => {
+  const exceptions = Array.from({ length: 5000 }, (_, i) => ({ id: i + 1, status: 'open', severity: 'low' }));
+  const { executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    exceptions, { severity: 'high', actor: 'tester' }
+  ));
+
+  for (const entry of executed) {
+    assert.ok(entry.params.length <= 2001, 'no statement may exceed the parameter cap');
+  }
+  const updates = executed.filter(entry => /UPDATE recon_exceptions/.test(entry.sql));
+  assert.ok(updates.length > 1 && updates.length < 10, 'chunked, not one per row');
+});
+
+test('planning a change decides per exception what actually moves', () => {
+  const { planExceptionChange } = reconRepo._private;
+  const change = { assignOwner: true, owner: 'Ann', severity: 'high', toStatus: 'resolved', actor: 'tester' };
+
+  const moves = planExceptionChange({ id: 1, owner: null, severity: 'low', status: 'open' }, change);
+  assert.deepEqual(moves.parts.sort(), ['close', 'owner', 'severity']);
+  assert.equal(moves.events.length, 3);
+
+  const settled = planExceptionChange({ id: 2, owner: 'Ann', severity: 'high', status: 'resolved' }, change);
+  assert.deepEqual(settled.parts, []);
+  assert.equal(settled.changed, false, 'a change that matches what is already there does nothing');
+
+  // A comment with no other change is still worth recording.
+  const commented = planExceptionChange({ id: 3, owner: 'Ann', severity: 'high', status: 'resolved' },
+    { ...change, comment: 'checked again' });
+  assert.equal(commented.events.length, 1);
+  assert.equal(commented.events[0].action, 'comment');
+});
+
+test('closing sets the resolution date and reopening clears it', () => {
+  const { exceptionUpdateFor } = reconRepo._private;
+  const closing = exceptionUpdateFor(['close'], { toStatus: 'resolved', reason: 'Corrected' });
+  assert.ok(closing.assignments.includes('resolved_at=SYSUTCDATETIME()'));
+  assert.ok(closing.assignments.includes('resolution_reason=@reason'));
+
+  const reopening = exceptionUpdateFor(['reopen'], { toStatus: 'open' });
+  assert.ok(reopening.assignments.includes('resolved_at=NULL'));
+  assert.ok(!reopening.assignments.some(a => a.startsWith('resolution_reason')));
+});
+
+test('a bulk action reads only the columns it needs, not the whole exception', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.getExceptionsByIds([1, 2, 3]));
+  assert.ok(!/SELECT \* FROM recon_exceptions/.test(executed[0].sql),
+    'a bulk decision never looks at the captured values, so it must not read them');
+  assert.match(executed[0].sql, /WHERE id IN \(@e0, @e1, @e2\)/);
 });

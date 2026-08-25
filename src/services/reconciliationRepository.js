@@ -33,9 +33,58 @@ function int(name, value) {
   return { name, type: TYPES.Int, value: Number.isFinite(parsed) ? parsed : null };
 }
 
+function dec(name, value) {
+  const parsed = Number(value);
+  return { name, type: TYPES.Decimal, value: Number.isFinite(parsed) ? parsed : null, precision: 28, scale: 10 };
+}
+function bit(name, value) {
+  return { name, type: TYPES.Bit, value: value ? 1 : 0 };
+}
+
 function parseJson(value, fallback) {
   if (!value) return fallback;
   try { return JSON.parse(value); } catch { return fallback; }
+}
+
+// SQL Server refuses a request carrying more than 2100 parameters, so every write
+// that scales with the number of rows is chunked by how many parameters each row
+// costs rather than by a fixed row count.
+const MAX_PARAMS = 2000;
+
+function chunkByParams(rows, paramsPerRow) {
+  const size = Math.max(1, Math.floor(MAX_PARAMS / Math.max(1, paramsPerRow)));
+  const chunks = [];
+  for (let start = 0; start < rows.length; start += size) chunks.push(rows.slice(start, start + size));
+  return chunks;
+}
+
+/**
+ * One multi-row INSERT per chunk instead of one statement per row.
+ *
+ * This is the difference between a run recording a thousand exceptions in a few
+ * round trips and doing it in a few thousand.
+ */
+async function insertRows(conn, table, columns, rows, valuesFor) {
+  if (!rows.length) return;
+  for (const chunk of chunkByParams(rows, columns.length)) {
+    const params = [];
+    const tuples = chunk.map((row, index) => {
+      const rowParams = valuesFor(row, index);
+      params.push(...rowParams);
+      return '(' + rowParams.map(param => '@' + param.name).join(', ') + ')';
+    });
+    await execSql(conn, 'INSERT INTO ' + table + ' (' + columns.join(', ') + ') VALUES ' + tuples.join(', '), params);
+  }
+}
+
+/** `WHERE id IN (…)` with the ids bound, chunked to stay under the parameter cap. */
+function idChunks(ids) {
+  return chunkByParams(ids, 1);
+}
+
+function idPredicate(ids, prefix = 'i') {
+  const params = ids.map((id, index) => int(prefix + index, id));
+  return { clause: params.map(param => '@' + param.name).join(', '), params };
 }
 
 // ── Sources ──
@@ -124,12 +173,71 @@ async function deleteSource(id) {
 }
 
 // ── Rules ──
-function mapRule(row) {
-  if (!row) return null;
+//
+// A rule's compare fields are rows, not a JSON array. That makes "which rules
+// compare this column" answerable, lets one field change without rewriting the
+// whole definition, and keeps the shape the engine reads identical either way.
+
+const RULE_FIELD_COLUMNS = ['rule_id', 'ordinal', 'label', 'value_type', 'tolerance', 'tolerance_days',
+  'a_kind', 'a_value', 'b_kind', 'b_value'];
+
+/** A stored field row → the operand shape the engine and the form both use. */
+function mapRuleField(row) {
   return {
-    ...row,
-    compareFields: parseJson(row.compare_fields, []),
+    label: row.label,
+    type: row.value_type,
+    tolerance: row.tolerance === null || row.tolerance === undefined ? undefined : Number(row.tolerance),
+    toleranceDays: row.tolerance_days === null || row.tolerance_days === undefined ? undefined : Number(row.tolerance_days),
+    a: { kind: row.a_kind || 'field', value: row.a_value },
+    b: { kind: row.b_kind || 'field', value: row.b_value },
   };
+}
+
+function ruleFieldParams(ruleId, field, index) {
+  const a = field.a || { kind: 'field', value: field.fieldA };
+  const b = field.b || { kind: 'field', value: field.fieldB };
+  return [
+    int('r' + index, ruleId), int('o' + index, index), str('l' + index, field.label || null),
+    str('t' + index, field.type || 'string'),
+    dec('tol' + index, field.tolerance), int('td' + index, field.toleranceDays),
+    str('ak' + index, a.kind || 'field'), str('av' + index, a.value === undefined ? null : String(a.value)),
+    str('bk' + index, b.kind || 'field'), str('bv' + index, b.value === undefined ? null : String(b.value)),
+  ];
+}
+
+/** Replaces a rule's fields. Delete then insert, so editing converges. */
+async function writeRuleFields(conn, ruleId, compareFields) {
+  await execSql(conn, 'DELETE FROM recon_rule_fields WHERE rule_id=@id', [int('id', ruleId)]);
+  await insertRows(conn, 'recon_rule_fields', RULE_FIELD_COLUMNS, compareFields || [],
+    (field, index) => ruleFieldParams(ruleId, field, index));
+  await execSql(conn, 'UPDATE recon_rules SET fields_normalized=1 WHERE id=@id', [int('id', ruleId)]);
+}
+
+/**
+ * Attaches each rule's compare fields.
+ *
+ * A rule written before the fields were rows still carries them in its JSON column,
+ * so it is read from there — `fields_normalized` is what distinguishes a converted
+ * rule with no fields from one that predates the table.
+ */
+async function attachRuleFields(conn, rules) {
+  if (!rules.length) return rules;
+  const byRule = new Map();
+  for (const chunk of idChunks(rules.map(rule => rule.id))) {
+    const { clause, params } = idPredicate(chunk);
+    const rows = await execSql(conn,
+      'SELECT * FROM recon_rule_fields WHERE rule_id IN (' + clause + ') ORDER BY rule_id, ordinal', params);
+    for (const row of rows) {
+      if (!byRule.has(row.rule_id)) byRule.set(row.rule_id, []);
+      byRule.get(row.rule_id).push(mapRuleField(row));
+    }
+  }
+  return rules.map(rule => ({
+    ...rule,
+    compareFields: rule.fields_normalized
+      ? (byRule.get(rule.id) || [])
+      : (byRule.get(rule.id) || parseJson(rule.compare_fields, [])),
+  }));
 }
 
 async function listRules({ status } = {}) {
@@ -138,14 +246,16 @@ async function listRules({ status } = {}) {
       ? 'SELECT * FROM recon_rules WHERE status=@status ORDER BY name'
       : 'SELECT * FROM recon_rules ORDER BY CASE status WHEN \'active\' THEN 0 WHEN \'draft\' THEN 1 ELSE 2 END, name';
     const rows = await execSql(conn, sql, status ? [str('status', status)] : []);
-    return rows.map(mapRule);
+    return attachRuleFields(conn, rows);
   });
 }
 
 async function getRuleById(id) {
   return withConnection(async conn => {
     const rows = await execSql(conn, 'SELECT * FROM recon_rules WHERE id=@id', [int('id', id)]);
-    return mapRule(rows[0]);
+    if (!rows.length) return null;
+    const [rule] = await attachRuleFields(conn, rows);
+    return rule;
   });
 }
 
@@ -156,7 +266,6 @@ function ruleParams(rule) {
     int('sourceA', rule.sourceAId), int('sourceB', rule.sourceBId),
     str('datasetA', rule.datasetA), str('datasetB', rule.datasetB),
     str('keyA', rule.keyFieldA), str('keyB', rule.keyFieldB),
-    str('fields', JSON.stringify(rule.compareFields || [])),
     str('dupes', rule.duplicateHandling || 'exception'),
     str('keys', rule.incompleteKeyHandling || 'exception'),
     int('rowLimit', rule.rowLimit),
@@ -168,10 +277,14 @@ function ruleParams(rule) {
 async function recordRuleVersion(conn, ruleId, version, actor, note) {
   const rows = await execSql(conn, 'SELECT * FROM recon_rules WHERE id=@id', [int('id', ruleId)]);
   if (!rows.length) return;
+  // The snapshot stays a document — it is an immutable copy of a definition at a
+  // point in time, not something anyone queries into. But it now has to include the
+  // compare fields explicitly, because the rule row no longer carries them.
+  const [rule] = await attachRuleFields(conn, rows);
   await execSql(conn, `INSERT INTO recon_rule_versions (rule_id, version, snapshot, change_note, changed_by)
     VALUES (@id, @version, @snapshot, @note, @by)`, [
     int('id', ruleId), int('version', version),
-    str('snapshot', JSON.stringify(rows[0])), str('note', note), str('by', actor),
+    str('snapshot', JSON.stringify(rule)), str('note', note), str('by', actor),
   ]);
 }
 
@@ -180,14 +293,17 @@ async function createRule(rule, actor) {
     const rows = await execSql(conn, `INSERT INTO recon_rules
       (name, description, business_area, owner, priority, status, version,
        source_a_id, source_b_id, dataset_a, dataset_b, key_field_a, key_field_b,
-       compare_fields, duplicate_handling, incomplete_key_handling, row_limit, created_by, updated_by)
+       duplicate_handling, incomplete_key_handling, row_limit, created_by, updated_by)
       OUTPUT INSERTED.id
       VALUES (@name, @description, @area, @owner, @priority, 'draft', 1,
        @sourceA, @sourceB, @datasetA, @datasetB, @keyA, @keyB,
-       @fields, @dupes, @keys, @rowLimit, @by, @by)`,
+       @dupes, @keys, @rowLimit, @by, @by)`,
     [...ruleParams(rule), str('by', actor)]);
     const id = rows[0] ? rows[0].id : null;
-    if (id) await recordRuleVersion(conn, id, 1, actor, 'Rule created');
+    if (id) {
+      await writeRuleFields(conn, id, rule.compareFields);
+      await recordRuleVersion(conn, id, 1, actor, 'Rule created');
+    }
     return id;
   });
 }
@@ -199,9 +315,10 @@ async function updateRule(id, rule, actor, note) {
     await execSql(conn, `UPDATE recon_rules SET name=@name, description=@description, business_area=@area,
       owner=@owner, priority=@priority, source_a_id=@sourceA, source_b_id=@sourceB,
       dataset_a=@datasetA, dataset_b=@datasetB, key_field_a=@keyA, key_field_b=@keyB,
-      compare_fields=@fields, duplicate_handling=@dupes, incomplete_key_handling=@keys,
+      duplicate_handling=@dupes, incomplete_key_handling=@keys,
       row_limit=@rowLimit, version=@version, updated_at=SYSUTCDATETIME(), updated_by=@by WHERE id=@id`,
     [...ruleParams(rule), int('id', id), int('version', nextVersion), str('by', actor)]);
+    await writeRuleFields(conn, id, rule.compareFields);
     await recordRuleVersion(conn, id, nextVersion, actor, note || 'Rule updated');
     return nextVersion;
   });
@@ -269,7 +386,10 @@ async function batchUpdateRules(ids, change, actor) {
 }
 
 async function deleteRule(id) {
-  return withConnection(conn => execSql(conn, 'DELETE FROM recon_rules WHERE id=@id', [int('id', id)]));
+  return withConnection(async conn => {
+    await execSql(conn, 'DELETE FROM recon_rule_fields WHERE rule_id=@id', [int('id', id)]);
+    await execSql(conn, 'DELETE FROM recon_rules WHERE id=@id', [int('id', id)]);
+  });
 }
 
 /** Distinct owners already in use, so assignment offers real names before free text. */
@@ -300,15 +420,109 @@ async function createRun({ ruleId, ruleVersion, ruleName, runBy }) {
 }
 
 async function completeRun(runId, { status, summary, error }) {
-  return withConnection(conn => execSql(conn, `UPDATE recon_runs SET status=@status,
-    records_a=@ra, records_b=@rb, keys_compared=@keys, matched=@matched, exception_count=@exceptions,
-    counts_json=@counts, error_message=@error, completed_at=SYSUTCDATETIME() WHERE id=@id`, [
-    int('id', runId), str('status', status),
-    int('ra', summary ? summary.recordsA : null), int('rb', summary ? summary.recordsB : null),
-    int('keys', summary ? summary.keysCompared : null), int('matched', summary ? summary.matched : null),
-    int('exceptions', summary ? summary.exceptions : null),
-    str('counts', summary ? JSON.stringify(summary.counts) : null), str('error', error || null),
-  ]));
+  return withConnection(async conn => {
+    await execSql(conn, `UPDATE recon_runs SET status=@status,
+      records_a=@ra, records_b=@rb, keys_compared=@keys, matched=@matched, exception_count=@exceptions,
+      error_message=@error, completed_at=SYSUTCDATETIME() WHERE id=@id`, [
+      int('id', runId), str('status', status),
+      int('ra', summary ? summary.recordsA : null), int('rb', summary ? summary.recordsB : null),
+      int('keys', summary ? summary.keysCompared : null), int('matched', summary ? summary.matched : null),
+      int('exceptions', summary ? summary.exceptions : null), str('error', error || null),
+    ]);
+
+    // Per-outcome counts are rows, so "how has value_mismatch trended" is a query
+    // rather than a parse of every run's document.
+    await execSql(conn, 'DELETE FROM recon_run_outcome_counts WHERE run_id=@id', [int('id', runId)]);
+    const counts = Object.entries((summary && summary.counts) || {});
+    await insertRows(conn, 'recon_run_outcome_counts', ['run_id', 'outcome', 'total'], counts,
+      ([outcome, total], index) => [int('r' + index, runId), str('o' + index, outcome), int('t' + index, total)]);
+  });
+}
+
+/** The per-outcome counts for one run, falling back to the stored document. */
+async function getRunOutcomeCounts(runId) {
+  return withConnection(async conn => {
+    try {
+      const rows = await execSql(conn,
+        'SELECT outcome, total FROM recon_run_outcome_counts WHERE run_id=@id ORDER BY outcome', [int('id', runId)]);
+      if (rows.length) return Object.fromEntries(rows.map(row => [row.outcome, Number(row.total)]));
+    } catch (err) {
+      if (!(err.message || '').includes('Invalid object name')) throw err;
+    }
+    const runs = await execSql(conn, 'SELECT counts_json FROM recon_runs WHERE id=@id', [int('id', runId)]);
+    return parseJson(runs[0] && runs[0].counts_json, {});
+  });
+}
+
+/**
+ * Moves the JSON documents written before this schema into their tables.
+ *
+ * On request rather than at startup: converting every historic rule and exception
+ * at boot would mean parsing every stored document before the app could serve
+ * anything, and the readers already fall back to the JSON meanwhile.
+ */
+async function normalizeLegacyRows({ maxExceptions = 2000 } = {}) {
+  return withConnection(async conn => {
+    const result = { rules: 0, exceptions: 0, runs: 0, remainingExceptions: 0 };
+
+    const rules = await execSql(conn,
+      'SELECT id, compare_fields FROM recon_rules WHERE fields_normalized=0 AND compare_fields IS NOT NULL');
+    for (const rule of rules) {
+      await writeRuleFields(conn, rule.id, parseJson(rule.compare_fields, []));
+      result.rules += 1;
+    }
+
+    const runs = await execSql(conn, `SELECT r.id, r.counts_json FROM recon_runs r
+      WHERE r.counts_json IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM recon_run_outcome_counts c WHERE c.run_id = r.id)`);
+    for (const run of runs) {
+      const counts = Object.entries(parseJson(run.counts_json, {}));
+      await insertRows(conn, 'recon_run_outcome_counts', ['run_id', 'outcome', 'total'], counts,
+        ([outcome, total], index) => [int('r' + index, run.id), str('o' + index, outcome), int('t' + index, total)]);
+      result.runs += 1;
+    }
+
+    const cap = Math.max(1, Math.min(20000, Number(maxExceptions) || 2000));
+    const exceptions = await execSql(conn,
+      'SELECT TOP (' + cap + ') id, values_a, values_b, differences FROM recon_exceptions WHERE values_normalized=0');
+    const valueRows = [];
+    const differenceRows = [];
+    for (const exception of exceptions) {
+      for (const [side, json] of [['a', exception.values_a], ['b', exception.values_b]]) {
+        for (const [label, value] of Object.entries(parseJson(json, {}) || {})) {
+          valueRows.push({ exceptionId: exception.id, side, label, value: value === null ? null : String(value) });
+        }
+      }
+      for (const difference of parseJson(exception.differences, []) || []) {
+        differenceRows.push({
+          exceptionId: exception.id, label: difference.field,
+          reason: difference.reason || null, delta: difference.difference,
+        });
+      }
+      result.exceptions += 1;
+    }
+
+    await insertRows(conn, 'recon_exception_values', ['exception_id', 'side', 'field_label', 'value'],
+      valueRows, (row, index) => [
+        int('e' + index, row.exceptionId), str('s' + index, row.side),
+        str('f' + index, row.label), str('v' + index, row.value),
+      ]);
+    await insertRows(conn, 'recon_exception_differences', ['exception_id', 'field_label', 'reason', 'delta'],
+      differenceRows, (row, index) => [
+        int('e' + index, row.exceptionId), str('f' + index, row.label),
+        str('r' + index, row.reason), dec('d' + index, row.delta),
+      ]);
+
+    for (const chunk of idChunks(exceptions.map(exception => exception.id))) {
+      const predicate = idPredicate(chunk);
+      await execSql(conn,
+        'UPDATE recon_exceptions SET values_normalized=1 WHERE id IN (' + predicate.clause + ')', predicate.params);
+    }
+
+    const remaining = await execSql(conn, 'SELECT COUNT(*) AS total FROM recon_exceptions WHERE values_normalized=0');
+    result.remainingExceptions = remaining[0] ? Number(remaining[0].total) : 0;
+    return result;
+  });
 }
 
 async function listRuns({ ruleId, limit = 100 } = {}) {
@@ -346,13 +560,36 @@ async function recordExceptions(runId, rule, exceptions) {
   const reopened = [];
 
   await withConnection(async conn => {
-    const recordFinding = (exceptionId, fingerprint, exception, isNew) => execSql(conn,
-      `INSERT INTO recon_run_findings (run_id, rule_id, exception_id, fingerprint, business_key, outcome, severity, is_new)
-       VALUES (@run, @rule, @exception, @fp, @key, @outcome, @severity, @isNew)`, [
-        int('run', runId), int('rule', rule.id), int('exception', exceptionId), str('fp', fingerprint),
-        str('key', String(exception.businessKey)), str('outcome', exception.outcome),
-        str('severity', exception.severity), int('isNew', isNew ? 1 : 0),
-      ]);
+    const findings = [];
+    const events = [];
+    // Exception id → the values and differences it should end up with. Collected as
+    // the run walks its findings, then written in a handful of statements rather
+    // than three per exception.
+    const valueRows = [];
+    const differenceRows = [];
+    const touchedIds = [];
+
+    const collectDetail = (exceptionId, exception) => {
+      if (!exceptionId) return;
+      touchedIds.push(exceptionId);
+      for (const side of ['a', 'b']) {
+        const values = side === 'a' ? exception.valuesA : exception.valuesB;
+        for (const [label, value] of Object.entries(values || {})) {
+          valueRows.push({
+            exceptionId, side, label,
+            value: value === null || value === undefined ? null : String(value),
+          });
+        }
+      }
+      for (const difference of exception.differences || []) {
+        differenceRows.push({
+          exceptionId,
+          label: difference.field,
+          reason: difference.reason || null,
+          delta: difference.difference,
+        });
+      }
+    };
 
     for (const exception of exceptions) {
       const fingerprint = exceptionFingerprint(rule.id, exception);
@@ -360,101 +597,167 @@ async function recordExceptions(runId, rule, exceptions) {
         str('fp', fingerprint),
       ]);
 
-      const valuesA = JSON.stringify(exception.valuesA || null);
-      const valuesB = JSON.stringify(exception.valuesB || null);
-      const differences = JSON.stringify(exception.differences || []);
-
       if (!existing.length) {
         const rows = await execSql(conn, `INSERT INTO recon_exceptions
           (fingerprint, rule_id, rule_name, business_area, first_run_id, last_run_id, business_key,
-           outcome, severity, status, values_a, values_b, differences)
+           outcome, severity, status, values_normalized)
           OUTPUT INSERTED.id
-          VALUES (@fp, @rule, @ruleName, @area, @run, @run, @key, @outcome, @severity, 'open', @va, @vb, @diff)`, [
+          VALUES (@fp, @rule, @ruleName, @area, @run, @run, @key, @outcome, @severity, 'open', 1)`, [
           str('fp', fingerprint), int('rule', rule.id), str('ruleName', rule.name), str('area', rule.business_area),
           int('run', runId), str('key', String(exception.businessKey)), str('outcome', exception.outcome),
-          str('severity', exception.severity), str('va', valuesA), str('vb', valuesB), str('diff', differences),
+          str('severity', exception.severity),
         ]);
         const id = rows[0] ? rows[0].id : null;
         if (id) {
           created.push(id);
-          await addExceptionEvent(conn, id, {
-            action: 'identified', toStatus: 'open', actor: 'reconciliation run',
+          events.push({
+            exceptionId: id, action: 'identified', toStatus: 'open', actor: 'reconciliation run',
             comment: 'Identified by run #' + runId,
           });
         }
-        await recordFinding(id, fingerprint, exception, true);
+        collectDetail(id, exception);
+        findings.push({ exceptionId: id, fingerprint, exception, isNew: true });
         continue;
       }
 
       const row = existing[0];
       const wasClosed = CLOSED_STATUSES.has(String(row.status));
       await execSql(conn, `UPDATE recon_exceptions SET last_run_id=@run, last_seen_at=SYSUTCDATETIME(),
-        occurrence_count=occurrence_count+1, values_a=@va, values_b=@vb, differences=@diff, severity=@severity
+        occurrence_count=occurrence_count+1, severity=@severity, values_normalized=1
         ${wasClosed ? ", status='open', resolved_at=NULL" : ''} WHERE id=@id`, [
-        int('id', row.id), int('run', runId), str('va', valuesA), str('vb', valuesB),
-        str('diff', differences), str('severity', exception.severity),
+        int('id', row.id), int('run', runId), str('severity', exception.severity),
       ]);
 
       if (wasClosed) {
         reopened.push(row.id);
-        await addExceptionEvent(conn, row.id, {
-          action: 'reopened', fromStatus: row.status, toStatus: 'open', actor: 'reconciliation run',
+        events.push({
+          exceptionId: row.id, action: 'reopened', fromStatus: row.status, toStatus: 'open',
+          actor: 'reconciliation run',
           comment: 'Seen again by run #' + runId + ' after being ' + row.status,
         });
       } else {
         updated.push(row.id);
       }
-      await recordFinding(row.id, fingerprint, exception, false);
+      collectDetail(row.id, exception);
+      findings.push({ exceptionId: row.id, fingerprint, exception, isNew: false });
     }
+
+    // The captured values replace whatever the previous run recorded, so a
+    // recurring exception shows what it looks like now rather than accumulating.
+    for (const chunk of idChunks(touchedIds)) {
+      const { clause, params } = idPredicate(chunk);
+      await execSql(conn, 'DELETE FROM recon_exception_values WHERE exception_id IN (' + clause + ')', params);
+      await execSql(conn, 'DELETE FROM recon_exception_differences WHERE exception_id IN (' + clause + ')',
+        idPredicate(chunk).params);
+    }
+
+    await insertRows(conn, 'recon_exception_values', ['exception_id', 'side', 'field_label', 'value'],
+      valueRows, (row, index) => [
+        int('e' + index, row.exceptionId), str('s' + index, row.side),
+        str('f' + index, row.label), str('v' + index, row.value),
+      ]);
+
+    await insertRows(conn, 'recon_exception_differences', ['exception_id', 'field_label', 'reason', 'delta'],
+      differenceRows, (row, index) => [
+        int('e' + index, row.exceptionId), str('f' + index, row.label),
+        str('r' + index, row.reason), dec('d' + index, row.delta),
+      ]);
+
+    await insertEvents(conn, events);
+
+    await insertRows(conn, 'recon_run_findings',
+      ['run_id', 'rule_id', 'exception_id', 'fingerprint', 'business_key', 'outcome', 'severity', 'is_new'],
+      findings, (finding, index) => [
+        int('run' + index, runId), int('rule' + index, rule.id), int('exc' + index, finding.exceptionId),
+        str('fp' + index, finding.fingerprint), str('key' + index, String(finding.exception.businessKey)),
+        str('out' + index, finding.exception.outcome), str('sev' + index, finding.exception.severity),
+        bit('new' + index, finding.isNew),
+      ]);
   });
 
   return { created: created.length, updated: updated.length, reopened: reopened.length };
 }
 
-/** What one run found, in the shape the comparison and per-run summary read. */
-async function listRunFindings(runId) {
-  return withConnection(async conn => {
-    try {
-      return await execSql(conn,
-        'SELECT run_id, rule_id, exception_id, fingerprint, business_key, outcome, severity, is_new FROM recon_run_findings WHERE run_id=@run',
-        [int('run', runId)]);
-    } catch (err) {
-      // Runs recorded before findings were kept have none; that is not an error,
-      // but it must not be presented as "this run found nothing".
-      if ((err.message || '').includes('Invalid object name')) return [];
-      throw err;
-    }
-  });
+async function addExceptionEvent(conn, exceptionId, event) {
+  return insertEvents(conn, [{ ...event, exceptionId }]);
 }
 
-/** True when this run predates per-run findings, so its detail cannot be shown. */
-async function hasRunFindings(runId) {
-  return withConnection(async conn => {
-    try {
-      const rows = await execSql(conn, 'SELECT TOP 1 id FROM recon_run_findings WHERE run_id=@run', [int('run', runId)]);
-      return rows.length > 0;
-    } catch {
-      return false;
-    }
-  });
-}
-
-async function addExceptionEvent(conn, exceptionId, { action, fromStatus, toStatus, comment, actor }) {
-  await execSql(conn, `INSERT INTO recon_exception_events (exception_id, action, from_status, to_status, comment, actor)
-    VALUES (@id, @action, @from, @to, @comment, @actor)`, [
-    int('id', exceptionId), str('action', action), str('from', fromStatus || null),
-    str('to', toStatus || null), str('comment', comment || null), str('actor', actor || 'system'),
-  ]);
+/**
+ * Writes history entries in bulk.
+ *
+ * A bulk decision produces one event per exception per part of the change. Writing
+ * them one statement at a time is what made a large bulk update slow; the audit
+ * trail is identical either way.
+ */
+async function insertEvents(conn, events) {
+  return insertRows(conn, 'recon_exception_events',
+    ['exception_id', 'action', 'from_status', 'to_status', 'comment', 'actor'],
+    events, (event, index) => [
+      int('e' + index, event.exceptionId), str('a' + index, event.action),
+      str('f' + index, event.fromStatus || null), str('t' + index, event.toStatus || null),
+      str('c' + index, event.comment || null), str('by' + index, event.actor || 'system'),
+    ]);
 }
 
 function mapException(row) {
   if (!row) return null;
-  return {
-    ...row,
-    valuesA: parseJson(row.values_a, null),
-    valuesB: parseJson(row.values_b, null),
-    differences: parseJson(row.differences, []),
-  };
+  return { ...row };
+}
+
+/**
+ * Attaches the captured values and differences to exceptions that need them.
+ *
+ * Only the detail view does. The list and every bulk action work without them,
+ * which is the point of them being rows rather than columns on the exception.
+ * An exception written before the tables existed still carries its JSON, so it is
+ * read from there — `values_normalized` distinguishes converted from legacy.
+ */
+async function attachExceptionDetail(conn, exceptions) {
+  if (!exceptions.length) return exceptions;
+  const values = new Map();
+  const differences = new Map();
+
+  for (const chunk of idChunks(exceptions.map(exception => exception.id))) {
+    const predicate = idPredicate(chunk);
+    const valueRows = await execSql(conn,
+      'SELECT exception_id, side, field_label, value FROM recon_exception_values WHERE exception_id IN ('
+      + predicate.clause + ') ORDER BY field_label', predicate.params);
+    for (const row of valueRows) {
+      if (!values.has(row.exception_id)) values.set(row.exception_id, { a: {}, b: {} });
+      values.get(row.exception_id)[row.side][row.field_label] = row.value;
+    }
+
+    const differencePredicate = idPredicate(chunk);
+    const differenceRows = await execSql(conn,
+      'SELECT exception_id, field_label, reason, delta FROM recon_exception_differences WHERE exception_id IN ('
+      + differencePredicate.clause + ') ORDER BY field_label', differencePredicate.params);
+    for (const row of differenceRows) {
+      if (!differences.has(row.exception_id)) differences.set(row.exception_id, []);
+      differences.get(row.exception_id).push({
+        field: row.field_label,
+        reason: row.reason,
+        difference: row.delta === null || row.delta === undefined ? null : Number(row.delta),
+      });
+    }
+  }
+
+  return exceptions.map(exception => {
+    const stored = values.get(exception.id);
+    if (exception.values_normalized || stored || differences.has(exception.id)) {
+      return {
+        ...exception,
+        valuesA: stored ? stored.a : {},
+        valuesB: stored ? stored.b : {},
+        differences: differences.get(exception.id) || [],
+      };
+    }
+    return {
+      ...exception,
+      valuesA: parseJson(exception.values_a, null),
+      valuesB: parseJson(exception.values_b, null),
+      differences: parseJson(exception.differences, []),
+    };
+  });
 }
 
 /**
@@ -524,7 +827,9 @@ async function listExceptionsForAction(filters = {}, { max = 5000 } = {}) {
 async function getExceptionById(id) {
   return withConnection(async conn => {
     const rows = await execSql(conn, 'SELECT * FROM recon_exceptions WHERE id=@id', [int('id', id)]);
-    return mapException(rows[0]);
+    if (!rows.length) return null;
+    const [exception] = await attachExceptionDetail(conn, rows.map(mapException));
+    return exception;
   });
 }
 
@@ -566,67 +871,121 @@ async function commentOnException(id, comment, actor) {
 }
 
 /**
- * Applies owner, severity and status to one exception on a connection the caller
- * owns, recording an event for each part that actually changed.
+ * Works out what a change actually does to one exception.
  *
- * Severity is set by the engine from the outcome, but a business decides what is
- * material to it — an amount mismatch under a threshold may not warrant the same
- * attention as a missing invoice. Overriding it is a judgement worth recording,
- * which is why it lands in the audit trail like any other decision.
+ * Pure: the decision is the same for every exception, but whether each part of it
+ * changes anything is not, and that is what determines both the update and the
+ * history entries.
  */
-async function applyExceptionChange(conn, exception, { owner, assignOwner, severity, toStatus, comment, reason, actor }) {
-  const assignments = [];
-  const params = [int('id', exception.id)];
+function planExceptionChange(exception, { owner, assignOwner, severity, toStatus, comment, actor }) {
+  const parts = [];
   const events = [];
 
   if (assignOwner && (owner || null) !== (exception.owner || null)) {
-    assignments.push('owner=@owner');
-    params.push(str('owner', owner || null));
-    events.push({ action: 'assigned', comment: owner ? 'Assigned to ' + owner : 'Owner cleared', actor });
+    parts.push('owner');
+    events.push({
+      exceptionId: exception.id, action: 'assigned', actor,
+      comment: owner ? 'Assigned to ' + owner : 'Owner cleared',
+    });
   }
   if (severity && severity !== exception.severity) {
-    assignments.push('severity=@severity');
-    params.push(str('severity', severity));
-    events.push({ action: 'severity-change', comment: 'Severity ' + exception.severity + ' → ' + severity, actor });
+    parts.push('severity');
+    events.push({
+      exceptionId: exception.id, action: 'severity-change', actor,
+      comment: 'Severity ' + exception.severity + ' → ' + severity,
+    });
   }
   if (toStatus && toStatus !== exception.status) {
-    const closing = CLOSED_STATUSES.has(toStatus);
-    assignments.push('status=@status', 'resolved_at=' + (closing ? 'SYSUTCDATETIME()' : 'NULL'));
+    parts.push(CLOSED_STATUSES.has(toStatus) ? 'close' : 'reopen');
+    events.push({
+      exceptionId: exception.id, action: 'status-change',
+      fromStatus: exception.status, toStatus, comment, actor,
+    });
+  } else if (comment) {
+    events.push({ exceptionId: exception.id, action: 'comment', comment, actor });
+  }
+
+  return { parts, events, changed: parts.length > 0 || events.length > 0 };
+}
+
+/** The SET clause and its parameters for one combination of changing parts. */
+function exceptionUpdateFor(parts, { owner, severity, toStatus, reason }) {
+  const assignments = [];
+  const params = [];
+  if (parts.includes('owner')) {
+    assignments.push('owner=@owner');
+    params.push(str('owner', owner || null));
+  }
+  if (parts.includes('severity')) {
+    assignments.push('severity=@severity');
+    params.push(str('severity', severity));
+  }
+  if (parts.includes('close') || parts.includes('reopen')) {
+    assignments.push('status=@status', 'resolved_at=' + (parts.includes('close') ? 'SYSUTCDATETIME()' : 'NULL'));
     params.push(str('status', toStatus));
     if (reason) {
       assignments.push('resolution_reason=@reason');
       params.push(str('reason', reason));
     }
-    events.push({ action: 'status-change', fromStatus: exception.status, toStatus, comment, actor });
-  } else if (comment) {
-    events.push({ action: 'comment', comment, actor });
   }
-
-  if (assignments.length) {
-    await execSql(conn, 'UPDATE recon_exceptions SET ' + assignments.join(', ') + ' WHERE id=@id', params);
-  }
-  for (const event of events) {
-    await addExceptionEvent(conn, exception.id, event);
-  }
-  return events.length;
+  return { assignments, params };
 }
 
 /**
- * Applies the same decision to several exceptions on one connection. Each is
- * written separately so one failure does not discard the rest, and every one gets
- * its own history entries — a bulk action must not be less auditable than the same
- * decisions taken one at a time.
+ * Applies the same decision to several exceptions.
+ *
+ * The decision is uniform, so the work is grouped by which parts of it actually
+ * change something and each group is written with one statement. Fifty exceptions
+ * used to cost around a hundred round trips — one update and one history insert
+ * each — which is what made a bulk change on a whole rule slow. It is now a handful
+ * of statements regardless of how many exceptions are involved, and the audit trail
+ * is unchanged: every exception still gets its own history entries.
  */
 async function batchUpdateExceptions(exceptions, change) {
+  const plans = exceptions.map(exception => ({ exception, plan: planExceptionChange(exception, change) }));
+
   return withConnection(async conn => {
     const results = [];
-    for (const exception of exceptions) {
-      try {
-        const changes = await applyExceptionChange(conn, exception, change);
-        results.push({ id: exception.id, success: true, changed: changes > 0 });
-      } catch (err) {
-        results.push({ id: exception.id, success: false, message: err.message });
+    // Group by which parts change. At most a handful of distinct combinations.
+    const groups = new Map();
+    for (const { exception, plan } of plans) {
+      if (!plan.parts.length) continue;
+      const key = plan.parts.slice().sort().join('+');
+      if (!groups.has(key)) groups.set(key, { parts: plan.parts, ids: [] });
+      groups.get(key).ids.push(exception.id);
+    }
+
+    const failed = new Set();
+    for (const group of groups.values()) {
+      const { assignments, params } = exceptionUpdateFor(group.parts, change);
+      if (!assignments.length) continue;
+      for (const chunk of chunkByParams(group.ids, 1)) {
+        const predicate = idPredicate(chunk);
+        try {
+          await execSql(conn,
+            'UPDATE recon_exceptions SET ' + assignments.join(', ') + ' WHERE id IN (' + predicate.clause + ')',
+            [...params, ...predicate.params]);
+        } catch (err) {
+          // A failed chunk marks only its own exceptions, so the rest still land.
+          for (const id of chunk) failed.add(id);
+          console.warn('[Reconciliation] Bulk update chunk failed:', err.message);
+        }
       }
+    }
+
+    const events = plans
+      .filter(({ exception }) => !failed.has(exception.id))
+      .flatMap(({ plan }) => plan.events);
+    try {
+      await insertEvents(conn, events);
+    } catch (err) {
+      console.warn('[Reconciliation] Bulk history write failed:', err.message);
+    }
+
+    for (const { exception, plan } of plans) {
+      results.push(failed.has(exception.id)
+        ? { id: exception.id, success: false, message: 'The update could not be applied.' }
+        : { id: exception.id, success: true, changed: plan.changed });
     }
     return results;
   });
@@ -637,12 +996,44 @@ async function getExceptionsByIds(ids) {
   const wanted = (ids || []).map(id => Number.parseInt(id, 10)).filter(Number.isFinite);
   if (!wanted.length) return [];
   return withConnection(async conn => {
-    // Parameterised one id at a time rather than interpolated into an IN list, so
-    // the values never reach the statement as text.
-    const params = wanted.map((id, index) => int('e' + index, id));
-    const placeholders = wanted.map((_, index) => '@e' + index).join(', ');
-    const rows = await execSql(conn, 'SELECT * FROM recon_exceptions WHERE id IN (' + placeholders + ')', params);
-    return rows.map(mapException);
+    const found = [];
+    // Ids are bound, never interpolated, and chunked so a large selection stays
+    // under the parameter cap. Only the columns a bulk decision needs are read.
+    for (const chunk of idChunks(wanted)) {
+      const { clause, params } = idPredicate(chunk, 'e');
+      const rows = await execSql(conn,
+        'SELECT ' + EXCEPTION_LIST_COLUMNS + ' FROM recon_exceptions WHERE id IN (' + clause + ')', params);
+      found.push(...rows.map(mapException));
+    }
+    return found;
+  });
+}
+
+/** What one run found, in the shape the comparison and per-run summary read. */
+async function listRunFindings(runId) {
+  return withConnection(async conn => {
+    try {
+      return await execSql(conn,
+        'SELECT run_id, rule_id, exception_id, fingerprint, business_key, outcome, severity, is_new FROM recon_run_findings WHERE run_id=@run',
+        [int('run', runId)]);
+    } catch (err) {
+      // Runs recorded before findings were kept have none; that is not an error,
+      // but it must not be presented as "this run found nothing".
+      if ((err.message || '').includes('Invalid object name')) return [];
+      throw err;
+    }
+  });
+}
+
+/** True when this run predates per-run findings, so its detail cannot be shown. */
+async function hasRunFindings(runId) {
+  return withConnection(async conn => {
+    try {
+      const rows = await execSql(conn, 'SELECT TOP 1 id FROM recon_run_findings WHERE run_id=@run', [int('run', runId)]);
+      return rows.length > 0;
+    } catch {
+      return false;
+    }
   });
 }
 
@@ -762,7 +1153,8 @@ module.exports = {
   listSources, getSourceById, saveSource, saveSourceSchema, deleteSource,
   listRules, getRuleById, createRule, updateRule, setRuleStatus, deleteRule, getRuleVersions,
   setRuleStatusAndOwner, batchUpdateRules, listOwners,
-  createRun, completeRun, listRuns, getRunById,
+  createRun, completeRun, listRuns, getRunById, getRunOutcomeCounts,
+  normalizeLegacyRows,
   recordExceptions, listRunFindings, hasRunFindings, listFindingsForRuns,
   listExceptions, countExceptions, listExceptionsForAction,
   getExceptionById, getExceptionsByIds, getExceptionEvents,
@@ -770,4 +1162,5 @@ module.exports = {
   updateExceptionStatus, assignException, commentOnException,
   getDashboardData,
   EXCEPTION_STATUS,
+  _private: { planExceptionChange, exceptionUpdateFor, chunkByParams },
 };
