@@ -1202,8 +1202,71 @@ async function deleteRun(runId, { onProgress = () => {} } = {}) {
     await execSql(conn, 'UPDATE recon_exceptions SET first_run_id=NULL WHERE first_run_id=@run', [int('run', runId)]);
 
     await execSql(conn, 'DELETE FROM recon_runs WHERE id=@run', [int('run', runId)]);
+
+    // Anything the run left without evidence goes too. Exceptions recorded before
+    // per-run findings existed have no findings row, so they are invisible to the
+    // attribution above and would otherwise outlive the run that produced them.
+    const orphanRows = await execSql(conn,
+      'SELECT TOP (5000) e.id FROM recon_exceptions e WHERE' + ORPHAN_PREDICATE);
+    if (orphanRows.length) {
+      const orphanIdList = orphanRows.map(row => row.id);
+      for (const chunk of idChunks(orphanIdList)) {
+        for (const table of ['recon_exception_values', 'recon_exception_differences', 'recon_exception_events']) {
+          const predicate = idPredicate(chunk);
+          await execSql(conn, 'DELETE FROM ' + table + ' WHERE exception_id IN (' + predicate.clause + ')', predicate.params);
+        }
+        const predicate = idPredicate(chunk);
+        await execSql(conn, 'DELETE FROM recon_exceptions WHERE id IN (' + predicate.clause + ')', predicate.params);
+        removed.exceptions += chunk.length;
+      }
+      onProgress({ stage: 'orphans', done: orphanIdList.length });
+    }
+
     onProgress({ stage: 'done', ...removed });
     return removed;
+  });
+}
+
+/**
+ * Exceptions that no longer have a run behind them.
+ *
+ * An exception is evidence of what a run found. Once no run references it and no
+ * findings record it, there is nothing left that says it was ever observed — it is
+ * a leftover, not a finding. Deleting a run used to consider only exceptions its
+ * findings pointed at, so anything recorded before per-run findings existed
+ * survived its own run's deletion and kept appearing in the current state.
+ */
+async function countOrphanedExceptions() {
+  return withConnection(async conn => {
+    const rows = await execSql(conn, ORPHAN_COUNT_SQL);
+    return rows[0] ? Number(rows[0].total) : 0;
+  });
+}
+
+const ORPHAN_PREDICATE = `
+  NOT EXISTS (SELECT 1 FROM recon_run_findings f WHERE f.exception_id = e.id)
+  AND NOT EXISTS (SELECT 1 FROM recon_runs r WHERE r.id = e.last_run_id)
+  AND NOT EXISTS (SELECT 1 FROM recon_runs r2 WHERE r2.id = e.first_run_id)`;
+
+const ORPHAN_COUNT_SQL = 'SELECT COUNT(*) AS total FROM recon_exceptions e WHERE' + ORPHAN_PREDICATE;
+
+async function deleteOrphanedExceptions({ batchSize = 1000 } = {}) {
+  return withConnection(async conn => {
+    let removed = 0;
+    for (;;) {
+      const rows = await execSql(conn,
+        'SELECT TOP (' + Math.max(1, Math.min(5000, batchSize)) + ') e.id FROM recon_exceptions e WHERE' + ORPHAN_PREDICATE);
+      if (!rows.length) return removed;
+
+      const ids = rows.map(row => row.id);
+      for (const table of ['recon_exception_values', 'recon_exception_differences', 'recon_exception_events']) {
+        const predicate = idPredicate(ids);
+        await execSql(conn, 'DELETE FROM ' + table + ' WHERE exception_id IN (' + predicate.clause + ')', predicate.params);
+      }
+      const predicate = idPredicate(ids);
+      await execSql(conn, 'DELETE FROM recon_exceptions WHERE id IN (' + predicate.clause + ')', predicate.params);
+      removed += ids.length;
+    }
   });
 }
 
@@ -1232,6 +1295,81 @@ async function listFindingsForRuns(runIds) {
       if ((err.message || '').includes('Invalid object name')) return [];
       throw err;
     }
+  });
+}
+
+/**
+ * Rules and, beneath each, the runs that contributed to what is standing now.
+ *
+ * The flat "rules with open exceptions" list answered how many, never which run
+ * they came from — so a rule with a spike looked the same as one with a long tail.
+ * Two queries: one row per rule, one row per rule and run, joined in memory. Two
+ * reads rather than one per rule.
+ *
+ * `status` narrows both to one exception status; without it, everything still open.
+ */
+async function getRulesOverview({ status = null } = {}) {
+  return withConnection(async conn => {
+    const params = status ? [str('status', status)] : [];
+    const filter = status ? 'e.status=@status' : "e.status NOT IN ('resolved','accepted')";
+
+    const rules = await execSql(conn, `
+      SELECT e.rule_id, MAX(e.rule_name) AS rule_name, MAX(e.business_area) AS business_area,
+             COUNT(*) AS total,
+             SUM(CASE WHEN e.severity='high' THEN 1 ELSE 0 END) AS high,
+             SUM(CASE WHEN e.severity='medium' THEN 1 ELSE 0 END) AS medium,
+             SUM(CASE WHEN e.severity='low' THEN 1 ELSE 0 END) AS low,
+             MAX(e.occurrence_count) AS worst_recurrence,
+             MAX(e.last_seen_at) AS last_seen
+      FROM recon_exceptions e
+      WHERE ${filter}
+      GROUP BY e.rule_id
+      ORDER BY COUNT(*) DESC`, params);
+
+    // Which run each standing exception came from, so a rule expands into its runs.
+    // An exception seen by several runs counts under each of them: the question is
+    // "what did this run contribute", not "which run owns it".
+    const byRun = await execSql(conn, `
+      SELECT f.rule_id, f.run_id, COUNT(DISTINCT f.exception_id) AS total,
+             MAX(r.started_at) AS started_at, MAX(r.rule_version) AS rule_version
+      FROM recon_run_findings f
+      JOIN recon_exceptions e ON e.id = f.exception_id
+      LEFT JOIN recon_runs r ON r.id = f.run_id
+      WHERE ${filter}
+      GROUP BY f.rule_id, f.run_id
+      ORDER BY f.rule_id, MAX(r.started_at) DESC`, status ? [str('status', status)] : []);
+
+    const runsByRule = new Map();
+    for (const row of byRun) {
+      if (!runsByRule.has(row.rule_id)) runsByRule.set(row.rule_id, []);
+      runsByRule.get(row.rule_id).push({
+        runId: row.run_id,
+        total: Number(row.total),
+        startedAt: row.started_at,
+        ruleVersion: row.rule_version,
+        // A run whose row is gone still shows its contribution, labelled as deleted
+        // rather than silently dropped.
+        deleted: row.started_at === null || row.started_at === undefined,
+      });
+    }
+
+    return rules.map(rule => {
+      const runs = runsByRule.get(rule.rule_id) || [];
+      const attributed = runs.reduce((sum, run) => sum + run.total, 0);
+      return {
+        ruleId: rule.rule_id,
+        ruleName: rule.rule_name,
+        businessArea: rule.business_area,
+        total: Number(rule.total),
+        high: Number(rule.high), medium: Number(rule.medium), low: Number(rule.low),
+        worstRecurrence: Number(rule.worst_recurrence),
+        lastSeen: rule.last_seen,
+        runs,
+        // Exceptions with no findings behind them — recorded before per-run findings
+        // existed. Saying so beats a hierarchy that quietly does not add up.
+        unattributed: Math.max(0, Number(rule.total) - attributed),
+      };
+    });
   });
 }
 
@@ -1335,13 +1473,14 @@ module.exports = {
   setRuleStatusAndOwner, batchUpdateRules, listOwners,
   createRun, completeRun, listRuns, getRunById, getRunOutcomeCounts,
   deleteRun, getRunDeletionImpact, listRunIds,
+  countOrphanedExceptions, deleteOrphanedExceptions,
   normalizeLegacyRows,
   recordExceptions, listRunFindings, hasRunFindings, listFindingsForRuns,
   listExceptions, countExceptions, listExceptionsForAction, listExceptionPage,
   getExceptionById, getExceptionsByIds, getExceptionEvents,
   batchUpdateExceptions,
   updateExceptionStatus, assignException, commentOnException,
-  getDashboardData,
+  getDashboardData, getRulesOverview,
   EXCEPTION_STATUS,
   _private: { planExceptionChange, exceptionUpdateFor, chunkByParams },
 };

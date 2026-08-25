@@ -3503,3 +3503,171 @@ test('deleting all runs of a rule keeps going when one will not delete', async (
     await new Promise(resolve => server.close(resolve));
   }
 });
+
+// ── Exceptions left behind by a deleted run ──
+test('an exception with no run behind it is recognised as a leftover', async () => {
+  // Deleting a run only ever considered exceptions its findings pointed at, so
+  // anything recorded before per-run findings existed outlived its own run and kept
+  // appearing in the current state.
+  const { executed, result } = await withFakeSql(() => [{ total: 7 }], () => reconRepo.countOrphanedExceptions());
+  const sql = executed[0].sql;
+  assert.match(sql, /NOT EXISTS \(SELECT 1 FROM recon_run_findings f WHERE f\.exception_id = e\.id\)/);
+  assert.match(sql, /NOT EXISTS \(SELECT 1 FROM recon_runs r WHERE r\.id = e\.last_run_id\)/);
+  assert.match(sql, /NOT EXISTS \(SELECT 1 FROM recon_runs r2 WHERE r2\.id = e\.first_run_id\)/);
+  assert.equal(result, 7);
+});
+
+test('an exception whose run still exists is not treated as a leftover', async () => {
+  // The predicate requires all three: no findings, and neither run reference alive.
+  const { executed } = await withFakeSql(() => [], () => reconRepo.countOrphanedExceptions());
+  const sql = executed[0].sql.replace(/\s+/g, ' ');
+  assert.ok(sql.includes('AND NOT EXISTS'), 'the conditions are combined, not alternatives');
+  assert.equal((sql.match(/AND NOT EXISTS/g) || []).length, 2);
+});
+
+test('purging leftovers removes their detail and history too', async () => {
+  let served = false;
+  const { executed, result } = await withFakeSql(sql => {
+    if (/SELECT TOP \(\d+\) e\.id FROM recon_exceptions/.test(sql)) {
+      if (served) return [];
+      served = true;
+      return [{ id: 1 }, { id: 2 }];
+    }
+    return [];
+  }, () => reconRepo.deleteOrphanedExceptions());
+
+  assert.equal(result, 2);
+  for (const table of ['recon_exception_values', 'recon_exception_differences', 'recon_exception_events']) {
+    assert.ok(executed.some(entry => new RegExp('DELETE FROM ' + table + ' WHERE exception_id IN').test(entry.sql)));
+  }
+  assert.ok(executed.some(entry => /DELETE FROM recon_exceptions WHERE id IN/.test(entry.sql)));
+});
+
+test('deleting a run sweeps what it leaves without evidence', async () => {
+  let orphansServed = false;
+  const { executed } = await withFakeSql(sql => {
+    if (/SELECT TOP \(5000\) e\.id FROM recon_exceptions/.test(sql)) {
+      if (orphansServed) return [];
+      orphansServed = true;
+      return [{ id: 99 }];
+    }
+    return [];
+  }, () => reconRepo.deleteRun(5));
+
+  // The sweep happens after the run row goes, so the "no live run" test is true.
+  const order = executed.map(entry => entry.sql);
+  const runDeleted = order.findIndex(sql => /DELETE FROM recon_runs WHERE id=@run/.test(sql));
+  const orphanScan = order.findIndex(sql => /SELECT TOP \(5000\) e\.id FROM recon_exceptions/.test(sql));
+  assert.ok(runDeleted !== -1 && orphanScan > runDeleted, 'the sweep must run after the run is gone');
+
+  const orphanDelete = executed.filter(entry => /DELETE FROM recon_exceptions WHERE id IN/.test(entry.sql));
+  assert.ok(orphanDelete.some(entry => entry.params.some(param => param.value === 99)));
+});
+
+test('leftovers can be purged from the dashboard for an install already in that state', async () => {
+  const original = reconRepo.deleteOrphanedExceptions;
+  reconRepo.deleteOrphanedExceptions = async () => 12;
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/reconciliation/exceptions/purge-orphans', {});
+    assert.equal(body.success, true);
+    assert.equal(body.removed, 12);
+  } finally {
+    reconRepo.deleteOrphanedExceptions = original;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+// ── Rules Overview ──
+test('the rules overview breaks each rule down by the runs behind it', async () => {
+  const { result, executed } = await withFakeSql(sql => {
+    if (/FROM recon_run_findings f/.test(sql)) {
+      return [
+        { rule_id: 9, run_id: 5, total: 8, started_at: '2026-08-10T10:00:00Z', rule_version: 2 },
+        { rule_id: 9, run_id: 3, total: 6, started_at: '2026-08-01T10:00:00Z', rule_version: 1 },
+      ];
+    }
+    return [{
+      rule_id: 9, rule_name: 'Invoices', business_area: 'Finance', total: 12,
+      high: 3, medium: 8, low: 1, worst_recurrence: 4, last_seen: '2026-08-10T10:00:00Z',
+    }];
+  }, () => reconRepo.getRulesOverview());
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].total, 12);
+  assert.equal(result[0].runs.length, 2);
+  assert.equal(result[0].runs[0].runId, 5);
+  assert.equal(result[0].runs[0].total, 8);
+
+  // The two reads are one per level, not one per rule.
+  assert.equal(executed.length, 2);
+});
+
+test('exceptions no run accounts for are reported rather than quietly missing', async () => {
+  // 12 standing, 8 attributable — the hierarchy must add up or say why it does not.
+  const { result } = await withFakeSql(sql => {
+    if (/FROM recon_run_findings f/.test(sql)) {
+      return [{ rule_id: 9, run_id: 5, total: 8, started_at: '2026-08-10T10:00:00Z', rule_version: 1 }];
+    }
+    return [{ rule_id: 9, rule_name: 'Invoices', total: 12, high: 0, medium: 12, low: 0, worst_recurrence: 1 }];
+  }, () => reconRepo.getRulesOverview());
+
+  assert.equal(result[0].unattributed, 4);
+});
+
+test('a run whose row is gone still shows its contribution, labelled as deleted', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/FROM recon_run_findings f/.test(sql)) {
+      return [{ rule_id: 9, run_id: 3, total: 6, started_at: null, rule_version: null }];
+    }
+    return [{ rule_id: 9, rule_name: 'Invoices', total: 6, high: 0, medium: 6, low: 0, worst_recurrence: 1 }];
+  }, () => reconRepo.getRulesOverview());
+
+  assert.equal(result[0].runs[0].deleted, true);
+  assert.equal(result[0].runs[0].total, 6);
+  assert.equal(result[0].unattributed, 0);
+});
+
+test('the overview filters to one status, applying it at both levels', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.getRulesOverview({ status: 'acknowledged' }));
+  assert.equal(executed.length, 2);
+  for (const entry of executed) {
+    assert.match(entry.sql, /e\.status=@status/, 'both levels must agree on the filter');
+    assert.equal(entry.params[0].value, 'acknowledged');
+  }
+});
+
+test('without a status the overview means everything still open', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.getRulesOverview());
+  for (const entry of executed) {
+    assert.match(entry.sql, /e\.status NOT IN \('resolved','accepted'\)/);
+    assert.equal(entry.params.length, 0);
+  }
+});
+
+test('the dashboard offers the rule hierarchy only when it is not scoped to a run', async () => {
+  const original = { getRulesOverview: reconRepo.getRulesOverview, getDashboardData: reconRepo.getDashboardData, listRuns: reconRepo.listRuns, countOrphanedExceptions: reconRepo.countOrphanedExceptions };
+  let overviewCalls = 0;
+  reconRepo.getRulesOverview = async () => { overviewCalls += 1; return []; };
+  reconRepo.getDashboardData = async () => ({ rules: [], exceptionsByStatus: [], exceptionsByOutcome: [], exceptionsBySeverity: [], byRule: [], recentRuns: [], byOwner: [], ageing: {}, problems: [], scoped: false });
+  reconRepo.listRuns = async () => [];
+  reconRepo.countOrphanedExceptions = async () => 0;
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const unscoped = await request(server, '/reconciliation');
+    assert.match(unscoped.body, /Rules Overview/);
+    assert.equal(overviewCalls, 1);
+
+    // Scoped to a run, the breakdown would be a single row per rule, so it is not built.
+    await request(server, '/reconciliation?runId=5');
+    assert.equal(overviewCalls, 1, 'the hierarchy is not built for a run-scoped page');
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
