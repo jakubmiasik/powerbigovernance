@@ -13,6 +13,11 @@ const { encryptSecret, isEncryptionConfigured } = require('../services/secretCry
 const { compareRuns, compareAcrossRules, latestPairsByRule, VERDICT_DEFS, SEVERITY_LEVELS } = require('../services/reconciliationComparisonService');
 const analysisModel = require('../services/analysisModelRepository');
 const { RECONCILIATION_HELP } = require('../services/qualityGuideService');
+const jobs = require('../services/jobProgressService');
+
+// How many exceptions one pass of a bulk action handles. Small enough that progress
+// moves visibly, large enough that the per-batch overhead stays negligible.
+const BULK_PAGE_SIZE = Math.max(50, Number.parseInt(process.env.RECON_BULK_PAGE_SIZE || '500', 10) || 500);
 
 const SOURCE_KIND = { FABRIC: 'fabric-sql', EXTERNAL: 'external-sql' };
 
@@ -505,29 +510,31 @@ router.get('/runs/:id', async (req, res) => {
     const id = Number.parseInt(req.params.id, 10);
     const run = await repo.getRunById(id);
     if (!run) return res.render('error', { title: 'Error', user: req.user, message: 'Run not found.' });
-    const [exceptions, outcomeCounts] = await Promise.all([
-      repo.listExceptions({ runId: id }),
+
+    // The page renders immediately with the counts and the size of the list; the
+    // list itself is fetched page by page, so a run with tens of thousands of
+    // findings shows progress instead of a blank wait.
+    const [outcomeCounts, exceptionTotal] = await Promise.all([
       repo.getRunOutcomeCounts(id),
+      repo.countExceptions({ runId: id }).catch(() => null),
     ]);
     view(res, 'reconciliation/run-detail', {
-      outcomeCounts,
-      title: 'Run #' + id, user: req.user, run, exceptions, outcomeDefs: OUTCOME_DEFS,
+      title: 'Run #' + id, user: req.user, run, outcomeCounts, exceptionTotal, outcomeDefs: OUTCOME_DEFS,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
   }
 });
 
-/**
- * Converts the JSON documents written before the reconciliation schema was
- * normalised. On request rather than at startup, because the readers already fall
- * back to the documents and converting everything at boot would delay startup by
- * however much history the install has.
- */
-router.post('/normalize', async (req, res) => {
+/** One page of the exceptions a run found, for the run detail page to stream in. */
+router.get('/runs/:id/exceptions', async (req, res) => {
   try {
-    const result = await repo.normalizeLegacyRows({ maxExceptions: req.body && req.body.maxExceptions });
-    res.json({ success: true, ...result });
+    const id = Number.parseInt(req.params.id, 10);
+    const page = await repo.listExceptionPage({ runId: id }, {
+      after: req.query.after,
+      limit: req.query.limit,
+    });
+    res.json({ success: true, ...page });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
@@ -581,6 +588,78 @@ router.get('/exceptions', async (req, res) => {
  * the reason. Silently skipping them, or forcing the transition, would both put the
  * audit trail at odds with the process it is meant to evidence.
  */
+/**
+ * Validates a bulk decision. Shared by the immediate and the job-backed paths so
+ * they cannot disagree about what is allowed.
+ */
+function readBulkChange(body) {
+  const assignOwner = body.assignOwner === true || body.assignOwner === 'true';
+  const owner = (body.owner || '').trim() || null;
+  const severity = body.severity || null;
+  const toStatus = body.status || null;
+  const comment = (body.comment || '').trim() || null;
+  const reason = (body.reason || '').trim() || null;
+
+  if (!assignOwner && !severity && !toStatus && !comment) {
+    return { problem: 'Choose an owner, a severity, a status, or add a comment.' };
+  }
+  if (severity && !SEVERITY_LEVELS.includes(severity)) return { problem: 'Unknown severity.' };
+  if (toStatus && !STATUS_BY_KEY.has(toStatus)) return { problem: 'Unknown status.' };
+  // Closing requires a recorded reason whether one exception is closed or fifty
+  // thousand.
+  if (toStatus && (toStatus === EXCEPTION_STATUS.RESOLVED || toStatus === EXCEPTION_STATUS.ACCEPTED) && !reason) {
+    return { problem: 'Record why these exceptions are being closed.' };
+  }
+  return { change: { assignOwner, owner, severity, toStatus, comment, reason } };
+}
+
+/**
+ * Applies a decision to one batch, enforcing the lifecycle per exception.
+ *
+ * A selection routinely mixes statuses, so a move to "resolved" is legitimate for
+ * the open ones and not for those already closed; the ones that can move do, and the
+ * rest are named with the reason.
+ */
+async function applyBulkBatch(exceptions, change, actor) {
+  const eligible = [];
+  const skipped = [];
+  for (const exception of exceptions) {
+    if (change.toStatus && change.toStatus !== exception.status
+        && !isStatusTransitionAllowed(exception.status, change.toStatus)) {
+      skipped.push({
+        id: exception.id, key: exception.business_key,
+        message: 'Cannot move from "' + exception.status + '" to "' + change.toStatus + '".',
+      });
+      continue;
+    }
+    eligible.push(exception);
+  }
+
+  const results = eligible.length ? await repo.batchUpdateExceptions(eligible, { ...change, actor }) : [];
+  const byId = new Map(eligible.map(exception => [Number(exception.id), exception]));
+  const failed = results.filter(result => !result.success).map(result => ({
+    id: result.id,
+    key: (byId.get(result.id) || {}).business_key || ('#' + result.id),
+    message: result.message,
+  }));
+
+  return {
+    considered: exceptions.length,
+    updated: results.filter(result => result.success && result.changed).length,
+    unchanged: results.filter(result => result.success && !result.changed).length,
+    skipped: skipped.concat(failed),
+  };
+}
+
+/**
+ * Applies one decision to several exceptions.
+ *
+ * A selection of specific rows is applied immediately. "Everything matching the
+ * filter" starts a job instead and returns its id: the set has no upper bound, so
+ * the request cannot wait for it, and a person applying a decision to tens of
+ * thousands of rows deserves to see it move rather than a spinner that may or may
+ * not still be alive.
+ */
 router.post('/exceptions/batch', async (req, res) => {
   try {
     const scope = req.body.scope === 'filter' ? 'filter' : 'selection';
@@ -591,91 +670,76 @@ router.post('/exceptions/batch', async (req, res) => {
       return res.json({ success: false, message: 'Select at least one exception.' });
     }
 
-    const assignOwner = req.body.assignOwner === true || req.body.assignOwner === 'true';
-    const owner = (req.body.owner || '').trim() || null;
-    const severity = req.body.severity || null;
-    const toStatus = req.body.status || null;
-    const comment = (req.body.comment || '').trim() || null;
-    const reason = (req.body.reason || '').trim() || null;
+    const { problem, change } = readBulkChange(req.body);
+    if (problem) return res.json({ success: false, message: problem });
+    const actor = actorOf(req);
 
-    if (!assignOwner && !severity && !toStatus && !comment) {
-      return res.json({ success: false, message: 'Choose an owner, a severity, a status, or add a comment.' });
-    }
-    if (severity && !SEVERITY_LEVELS.includes(severity)) {
-      return res.json({ success: false, message: 'Unknown severity.' });
-    }
-    if (toStatus && !STATUS_BY_KEY.has(toStatus)) {
-      return res.json({ success: false, message: 'Unknown status.' });
-    }
-    // Closing requires a recorded reason whether one exception is closed or fifty.
-    if (toStatus && (toStatus === EXCEPTION_STATUS.RESOLVED || toStatus === EXCEPTION_STATUS.ACCEPTED) && !reason) {
-      return res.json({ success: false, message: 'Record why these exceptions are being closed.' });
+    if (scope === 'selection') {
+      const exceptions = await repo.getExceptionsByIds(ids);
+      const found = new Map(exceptions.map(exception => [Number(exception.id), exception]));
+      const missing = ids.filter(id => !found.has(id)).map(id => ({ id, key: '#' + id, message: 'No longer exists.' }));
+      const batch = await applyBulkBatch(exceptions, change, actor);
+      return res.json({
+        success: true, scope, considered: ids.length,
+        updated: batch.updated, unchanged: batch.unchanged,
+        skipped: batch.skipped.concat(missing),
+      });
     }
 
-    // Two scopes. "selection" acts on the rows the user ticked; "filter" acts on
-    // every exception the current filter covers — the whole rule, not just the page
-    // the list happened to load.
-    let exceptions;
-    let truncated = false;
-    let targetIds;
-    if (scope === 'filter') {
-      const filters = readExceptionFilters(req.body.filters || {});
-      if (!filters.ruleId && !filters.status && !filters.severity && !filters.outcome && !filters.runId) {
-        // Acting on every exception in the system is almost never what someone
-        // means, and it is not undoable. Require the set to be narrowed first.
-        return res.json({ success: false, message: 'Narrow the list to a rule, status, severity or type before applying to the whole set.' });
+    const filters = readExceptionFilters(req.body.filters || {});
+    if (!filters.ruleId && !filters.status && !filters.severity && !filters.outcome && !filters.runId) {
+      // Acting on every exception in the system is almost never what someone means,
+      // and it is not undoable. Require the set to be narrowed first.
+      return res.json({ success: false, message: 'Narrow the list to a rule, status, severity or type before applying to the whole set.' });
+    }
+
+    const total = await repo.countExceptions(filters);
+    if (!total) return res.json({ success: false, message: 'The current filter covers no exceptions.' });
+
+    const job = jobs.runJob({
+      kind: 'exception-bulk', actor, total,
+      label: 'Updating ' + total + ' exception(s)',
+    }, async (running) => {
+      running.counters = { updated: 0, unchanged: 0, skipped: 0 };
+      let after = 0;
+      for (;;) {
+        // Paged by id, so the set is walked once and a page costs the same at the
+        // end as at the beginning.
+        const page = await repo.listExceptionPage(filters, { after, limit: BULK_PAGE_SIZE });
+        if (!page.exceptions.length) break;
+
+        const batch = await applyBulkBatch(page.exceptions, change, actor);
+        running.counters.updated += batch.updated;
+        running.counters.unchanged += batch.unchanged;
+        running.counters.skipped += batch.skipped.length;
+        running.problems.push(...batch.skipped);
+
+        jobs.advanceJob(running, page.exceptions.length,
+          running.done + page.exceptions.length + ' of ' + total + ' processed');
+
+        after = page.nextAfter;
+        if (page.done || after === null) break;
       }
-      const found = await repo.listExceptionsForAction(filters);
-      exceptions = found.exceptions;
-      truncated = found.truncated;
-      targetIds = exceptions.map(exception => Number(exception.id));
-      if (!exceptions.length) return res.json({ success: false, message: 'The current filter covers no exceptions.' });
-    } else {
-      exceptions = await repo.getExceptionsByIds(ids);
-      targetIds = ids;
-    }
-
-    const found = new Map(exceptions.map(exception => [Number(exception.id), exception]));
-
-    const eligible = [];
-    const skipped = [];
-    for (const id of targetIds) {
-      const exception = found.get(id);
-      if (!exception) { skipped.push({ id, key: '#' + id, message: 'No longer exists.' }); continue; }
-      if (toStatus && toStatus !== exception.status && !isStatusTransitionAllowed(exception.status, toStatus)) {
-        skipped.push({
-          id, key: exception.business_key,
-          message: 'Cannot move from "' + exception.status + '" to "' + toStatus + '".',
-        });
-        continue;
-      }
-      eligible.push(exception);
-    }
-
-    const results = eligible.length
-      ? await repo.batchUpdateExceptions(eligible, {
-        owner, assignOwner, severity, toStatus, comment, reason, actor: actorOf(req),
-      })
-      : [];
-
-    const failed = results.filter(result => !result.success).map(result => ({
-      id: result.id,
-      key: (found.get(result.id) || {}).business_key || ('#' + result.id),
-      message: result.message,
-    }));
-
-    res.json({
-      success: true,
-      scope,
-      considered: targetIds.length,
-      updated: results.filter(result => result.success && result.changed).length,
-      unchanged: results.filter(result => result.success && !result.changed).length,
-      skipped: skipped.concat(failed),
-      truncated,
+      return { ...running.counters };
     });
+
+    res.json({ success: true, scope, jobId: job.id, total });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
+});
+
+/** Progress for a job this process is running. */
+router.get('/jobs/:id', (req, res) => {
+  const summary = jobs.summarize(jobs.getJob(req.params.id));
+  if (!summary) {
+    return res.json({
+      success: false,
+      status: 'unknown',
+      message: 'No progress is being reported for this job. It may have finished a while ago, or been started by an application instance that has since stopped.',
+    });
+  }
+  res.json({ success: true, ...summary });
 });
 
 /** How many exceptions the current filter covers, for the whole-set option's label. */
