@@ -2828,3 +2828,113 @@ test('closing in bulk succeeds once a reason is supplied', async () => {
     await new Promise(resolve => server.close(resolve));
   }
 });
+
+// ── Quality section: guidance content and routing ──
+const guide = require('../src/services/qualityGuideService');
+
+test('every help topic is complete enough to render', () => {
+  // The partial walks these structures directly, so a topic missing a section would
+  // render a broken modal rather than fail loudly.
+  assert.ok(guide.HELP_TOPICS.length >= 2);
+  for (const topic of guide.HELP_TOPICS) {
+    assert.ok(topic.key && topic.title && topic.summary, topic.key + ' needs an identity');
+    assert.ok(topic.steps.length >= 3, topic.key + ' needs steps');
+    assert.ok(topic.steps.every(step => step.title && step.body));
+    assert.ok(topic.outcomes.length >= 3, topic.key + ' needs outcomes');
+    assert.ok(topic.outcomes.every(row => row.length === 2));
+    assert.ok(topic.sample.title && topic.sample.lines.length && topic.sample.reading,
+      topic.key + ' needs a worked example');
+  }
+  assert.deepEqual(guide.HELP_TOPICS.map(t => t.key).sort(), ['mdm', 'reconciliation']);
+  assert.equal(guide.HELP_BY_KEY.get('mdm').title, guide.MDM_HELP.title);
+});
+
+test('prerequisites are grouped by where the permission is granted', () => {
+  const keys = guide.PREREQUISITES.map(group => group.key);
+  // Each group is one administrator and one portal, which is how someone actually
+  // goes about obtaining them.
+  for (const expected of ['entra', 'fabric-tenant', 'fabric-admin', 'capacity', 'sql', 'hosting']) {
+    assert.ok(keys.includes(expected), 'missing the ' + expected + ' group');
+  }
+  for (const group of guide.PREREQUISITES) {
+    assert.ok(group.title && group.icon, group.key + ' needs a title and icon');
+    assert.ok(group.items.length, group.key + ' needs items');
+    assert.ok(group.items.every(item => typeof item.text === 'string' && typeof item.required === 'boolean'));
+    assert.ok(group.items.some(item => item.required), group.key + ' should say what is actually required');
+  }
+});
+
+test('the prerequisites name the permissions whose absence is hardest to diagnose', () => {
+  const text = guide.PREREQUISITES
+    .flatMap(group => group.items.map(item => item.text))
+    .join(' ')
+    .toLowerCase();
+
+  // Each of these fails silently or misleadingly, which is why they are stated.
+  assert.match(text, /contributor role on each fabric or power bi embedded capacity/);
+  assert.match(text, /tenant\.read\.all/);
+  assert.match(text, /admin consent/);
+  assert.match(text, /service principals can use fabric apis/);
+  assert.match(text, /workspace member/);
+  assert.match(text, /lakehouse sql endpoint is read-only/);
+  assert.match(text, /always on/);
+
+  const required = guide.requiredPrerequisites();
+  assert.ok(required.length >= 10);
+  assert.ok(required.every(entry => entry.group && entry.text));
+});
+
+test('source registration moved to Quality and the old links still resolve', async () => {
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    // Reconciliation and master data read the same registered systems, so
+    // registration belongs to neither of them.
+    const moved = await request(server, '/reconciliation/sources');
+    assert.equal(moved.statusCode, 301);
+    assert.equal(moved.headers.location, '/quality/sources');
+
+    assert.equal((await request(server, '/quality')).statusCode, 200);
+    assert.equal((await request(server, '/quality/sources')).statusCode, 200);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('the Quality landing page offers both guides and the shared registration', async () => {
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = (await request(server, '/quality')).body;
+    assert.match(body, /helpModal-reconciliation/);
+    assert.match(body, /helpModal-mdm/);
+    assert.match(body, /\/quality\/sources/);
+    // The guides' worked examples reach the page, not just their titles.
+    assert.match(body, /Business key: ERP\.InvoiceNumber/);
+    assert.match(body, /Trust order: SAP, CRM, Legacy/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('the home page states the prerequisites rather than only linking to them', async () => {
+  // `/` serves the sign-in landing page to an anonymous request, so the signed-in
+  // view is rendered directly with the locals its route supplies.
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/home.ejs', {
+    title: 'Home', user: { name: 'tester' }, currentUser: { name: 'tester' },
+    authEnabled: false, pagePath: '/', breadcrumb: [],
+    availableRuns: [], currentRun: null, hideRunSelector: true,
+    prerequisites: guide.PREREQUISITES,
+  }, {});
+
+  assert.match(html, /prerequisitesModal/);
+  assert.match(html, /Contributor role on each Fabric or Power BI Embedded capacity/);
+  assert.match(html, /Service principals can use Fabric APIs/);
+  // Required and optional are distinguished, so the list is a checklist rather than
+  // an undifferentiated wall of advice.
+  assert.match(html, /badge bg-danger">required/);
+  assert.match(html, /badge bg-secondary">optional/);
+});

@@ -11,10 +11,14 @@
 %>
 <div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
   <div>
-    <h2><i class="bi bi-diagram-3 me-2"></i>Master Data</h2>
+    <h2><i class="bi bi-fingerprint me-2"></i>Master Data</h2>
     <p class="text-muted mb-0">Turn raw records from many systems into one agreed version of each customer, product or supplier.</p>
   </div>
   <div class="d-flex gap-2 flex-wrap">
+    <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#helpModal-mdm">
+      <i class="bi bi-question-circle me-1"></i>How it works
+    </button>
+    <a href="/quality/sources" class="btn btn-sm btn-outline-secondary"><i class="bi bi-database me-1"></i>Sources</a>
     <a href="/mdm/runs" class="btn btn-sm btn-outline-primary"><i class="bi bi-clock-history me-1"></i>Runs</a>
     <a href="/mdm/models/new" class="btn btn-sm btn-primary"><i class="bi bi-plus me-1"></i>New model</a>
   </div>
@@ -223,4 +227,5 @@ async function removeModel(id) {
   });
 }
 </script>
+<%- include('../partials/help-modal', { helpTopic: helpTopic }) %>
 <%- include('../partials/footer') %>

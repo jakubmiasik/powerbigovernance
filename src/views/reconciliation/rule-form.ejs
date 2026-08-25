@@ -18,7 +18,7 @@
 <% if (!sources.length) { %>
   <div class="alert alert-warning">
     <i class="bi bi-exclamation-triangle me-2"></i>No sources registered yet.
-    <a href="/reconciliation/sources">Register the two systems</a> you want to compare first.
+    <a href="/quality/sources">Register the two systems</a> you want to compare first.
   </div>
 <% } %>
 
@@ -199,7 +199,7 @@ async function loadDatasets(side, restore) {
 
   datasetSelect.innerHTML = '<option value="">Loading...</option>';
   try {
-    var resp = await fetch('/reconciliation/sources/' + sourceId + '/datasets');
+    var resp = await fetch('/quality/sources/' + sourceId + '/datasets');
     var data = await resp.json();
     if (!data.success) { datasetSelect.innerHTML = '<option value="">' + (data.message || 'Failed') + '</option>'; return; }
     datasetsBySide[side] = data.datasets || [];

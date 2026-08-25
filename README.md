@@ -17,9 +17,13 @@ A web application to investigate and govern Power BI workspaces, reports, datase
 
 ## Prerequisites
 
-- **Node.js** 18+ 
+- **Node.js** 18+
 - **Entra ID App Registration** (for Power BI API access via service principal)
-- **Power BI Admin** permissions (for admin-level APIs)
+- **Power BI / Fabric Administrator** to grant the tenant settings the service principal needs
+- **Azure Contributor** on each capacity the app should pause, resume or scale — a Fabric Administrator alone cannot do this
+- An **Azure SQL database** for the application's own storage
+
+The Home page carries the full checklist, grouped by where each permission is granted, in a **Prerequisites** panel. It is worth reading before the first scan: a missing permission rarely announces itself — the admin APIs return an empty list rather than an error when consent is missing, and a capacity action fails as "unauthorized" long after the capacity appeared in the inventory.
 
 ## Setup
 
@@ -130,10 +134,13 @@ src/
 
 Verifies that records representing the same business event exist and agree across two systems — an invoice in an ERP and the same invoice in the reporting platform, for example.
 
+Reconciliation and master data sit together under **Quality** in the navigation, because they are two uses of the same registered systems. A system is registered once at `/quality/sources` and both read it; `/quality` is the landing page showing what is configured. Each discipline has a **How it works** button explaining the steps, what it produces, and a worked example.
+
 | Page | Purpose |
 |---|---|
+| `/quality` | What is configured across both disciplines, and the guides |
+| `/quality/sources` | Register the systems reconciliation and master data read — the only place registration happens |
 | `/reconciliation` | Oversight: active rules, open exceptions by type, severity, owner and age, rules with recurring discrepancies, recent runs. A dropdown scopes the whole page to what a single run found |
-| `/reconciliation/sources` | Register the systems to compare and browse their datasets and fields |
 | `/reconciliation/rules` | Create, version, activate and retire controls; change status or assign an owner across several at once; run one or more of them |
 | `/reconciliation/runs` | Full run history: what was checked, when, under which rule version, and what it produced |
 | `/reconciliation/compare` | Every rule's latest run against its previous one, and any two runs of the same rule side by side |
@@ -165,6 +172,7 @@ Turns raw records that arrived from several source systems into one agreed versi
 | Page | Purpose |
 |---|---|
 | `/mdm` | Models, headline numbers, recent runs |
+| `/quality/sources` | Where the raw table's system and the destination are registered |
 | `/mdm/models/:id` | Define the raw table, the fields, how records are matched, which value survives, and where to publish |
 | `/mdm/runs` | Full run history: which model version produced which golden records, and whether it was published |
 | `/mdm/runs/:id` | The golden records with per-value provenance, the crosswalk back to source records, and the pairs a steward still has to decide |

@@ -7,6 +7,7 @@ const sqlSource = require('../services/sqlSourceService');
 const mdm = require('../services/mdmService');
 const { createPowerBIService } = require('../services/powerbiService');
 const { getSqlTokenForSP } = require('../services/authService');
+const { MDM_HELP } = require('../services/qualityGuideService');
 
 // Master data is not tied to an analysis scan, so the global "Service Principal /
 // Scan" bar would imply a relationship that does not exist.
@@ -86,9 +87,9 @@ async function tokenOptionsFor(source) {
 router.get('/', async (req, res) => {
   try {
     const [models, overview] = await Promise.all([repo.listModels(), repo.getOverview()]);
-    view(res, 'mdm/index', { title: 'Master Data', user: req.user, models, overview, error: null });
+    view(res, 'mdm/index', { title: 'Master Data', user: req.user, models, overview, helpTopic: MDM_HELP, error: null });
   } catch (err) {
-    view(res, 'mdm/index', { title: 'Master Data', user: req.user, models: [], overview: null, error: err.message });
+    view(res, 'mdm/index', { title: 'Master Data', user: req.user, models: [], overview: null, helpTopic: MDM_HELP, error: err.message });
   }
 });
 
