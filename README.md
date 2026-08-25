@@ -224,7 +224,28 @@ The same facts are now also written in third normal form — `analysis_workspace
 - Exception listing selects only the columns it renders. The stored values and differences are large JSON documents the list never shows.
 - Indexes were added for predicates the newer features query on but had no support for: exceptions by rule and status, exceptions by owner, golden records by model, crosswalk by source record.
 
-Not every JSON column is worth normalising, and the ones left alone were left alone deliberately. A rule's compare-field definition, an exception's captured values, a golden record's provenance and a run's progress snapshot are each read as a whole, by one owner, and never filtered on — normalising those would add joins and buy nothing.
+### Reconciliation
+
+The reconciliation engine is fully normalised. What used to be four JSON columns are now tables:
+
+| Was | Is | Why |
+|---|---|---|
+| `recon_rules.compare_fields` | `recon_rule_fields` | One row per compare field, with the operand kind and tolerance as columns. Changing one field no longer rewrites the whole definition, and "which rules compare this column" becomes answerable |
+| `recon_exceptions.values_a` / `values_b` | `recon_exception_values` | One row per field per side. The list and every bulk action work without them, which is the point |
+| `recon_exceptions.differences` | `recon_exception_differences` | One row per disagreeing field, indexed by field — so "which field mismatches most often" is a query |
+| `recon_runs.counts_json` | `recon_run_outcome_counts` | One row per outcome, so trends across runs are a query rather than a parse of every run |
+
+**Bulk updates are set-based.** Applying a decision to fifty exceptions used to cost about a hundred round trips — one `UPDATE` and one history insert each — which is what made changing a whole rule slow. The decision is uniform, so the work is now grouped by which parts of it actually change something and each group is one statement, chunked to stay under SQL Server's 2100-parameter limit. Fifty exceptions cost three statements; five thousand cost a handful. Every exception still gets its own history entries.
+
+Run ingest is batched the same way: values, differences, findings and history each go in one multi-row insert per chunk rather than one statement per row.
+
+`recon_rule_versions.snapshot` stays a document deliberately — it is an immutable copy of a definition at a point in time, not something anyone queries into. It now carries the compare fields explicitly, since the rule row no longer does.
+
+Rows written before this schema keep working: readers fall back to the stored JSON, and `fields_normalized` / `values_normalized` distinguish a converted row with nothing in it from one that predates the tables. `POST /reconciliation/normalize` converts them, on request rather than at startup.
+
+### What was left as JSON, deliberately
+
+A golden record's provenance and a run's progress snapshot are each read as a whole, by one owner, and never filtered on. Splitting them would add joins and buy nothing — 3NF is worth it where you query the parts.
 
 ## Operational Notes
 

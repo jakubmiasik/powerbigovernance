@@ -1,7 +1,8 @@
 <%- include('../partials/header') %>
 <%
-  var counts = {};
-  try { counts = JSON.parse(run.counts_json || '{}'); } catch (e) { counts = {}; }
+  // Per-outcome counts come from their own table now, with the run's stored document
+  // as the fallback for runs recorded before it existed.
+  var counts = outcomeCounts || {};
 %>
 <div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
   <div>

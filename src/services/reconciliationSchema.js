@@ -232,6 +232,105 @@ const RECONCILIATION_MIGRATIONS = [
       END
     `,
   },
+  // ── Third normal form for what used to be JSON documents ──
+  //
+  // A rule's compare fields, an exception's captured values and differences, and a
+  // run's per-outcome counts were each stored as one JSON column. That made every
+  // write rewrite a whole document to change one part of it, made a bulk update
+  // read and rewrite data it never looked at, and made questions like "which field
+  // mismatches most often" unanswerable.
+  //
+  // Each is now a table: one row per field, per value, per difference, per outcome.
+  {
+    label: 'create recon_rule_fields',
+    sql: `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_rule_fields') AND type = 'U')
+      BEGIN
+        CREATE TABLE recon_rule_fields (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          rule_id INT NOT NULL,
+          ordinal INT NOT NULL,
+          label NVARCHAR(255) NULL,
+          value_type NVARCHAR(30) NULL,
+          tolerance DECIMAL(28,10) NULL,
+          tolerance_days INT NULL,
+          a_kind NVARCHAR(20) NOT NULL DEFAULT 'field',
+          a_value NVARCHAR(MAX) NULL,
+          b_kind NVARCHAR(20) NOT NULL DEFAULT 'field',
+          b_value NVARCHAR(MAX) NULL
+        );
+        CREATE UNIQUE INDEX UX_recon_rule_fields ON recon_rule_fields (rule_id, ordinal);
+      END
+    `,
+  },
+  {
+    label: 'create recon_exception_values',
+    sql: `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_exception_values') AND type = 'U')
+      BEGIN
+        CREATE TABLE recon_exception_values (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          exception_id INT NOT NULL,
+          side CHAR(1) NOT NULL,
+          field_label NVARCHAR(255) NOT NULL,
+          value NVARCHAR(MAX) NULL
+        );
+        CREATE UNIQUE INDEX UX_recon_exception_values ON recon_exception_values (exception_id, side, field_label);
+      END
+    `,
+  },
+  {
+    label: 'create recon_exception_differences',
+    sql: `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_exception_differences') AND type = 'U')
+      BEGIN
+        CREATE TABLE recon_exception_differences (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          exception_id INT NOT NULL,
+          field_label NVARCHAR(255) NOT NULL,
+          reason NVARCHAR(500) NULL,
+          delta DECIMAL(28,10) NULL
+        );
+        CREATE UNIQUE INDEX UX_recon_exception_differences ON recon_exception_differences (exception_id, field_label);
+        -- Which field disagrees most often across the estate: a question the JSON
+        -- document could not answer at all.
+        CREATE INDEX IX_recon_exception_differences_field ON recon_exception_differences (field_label);
+      END
+    `,
+  },
+  {
+    label: 'create recon_run_outcome_counts',
+    sql: `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_run_outcome_counts') AND type = 'U')
+      BEGIN
+        CREATE TABLE recon_run_outcome_counts (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          run_id INT NOT NULL,
+          outcome NVARCHAR(50) NOT NULL,
+          total INT NOT NULL DEFAULT 0
+        );
+        CREATE UNIQUE INDEX UX_recon_run_outcome_counts ON recon_run_outcome_counts (run_id, outcome);
+      END
+    `,
+  },
+  // Records which rows have been converted, so a reader can tell "this exception
+  // genuinely captured no values" from "this exception predates the tables".
+  {
+    label: 'add recon_exceptions.values_normalized',
+    sql: `
+      IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_exceptions') AND type = 'U')
+         AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_exceptions') AND name = N'values_normalized')
+        ALTER TABLE recon_exceptions ADD values_normalized BIT NOT NULL DEFAULT 0;
+    `,
+  },
+  {
+    label: 'add recon_rules.fields_normalized',
+    sql: `
+      IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_rules') AND type = 'U')
+         AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_rules') AND name = N'fields_normalized')
+        ALTER TABLE recon_rules ADD fields_normalized BIT NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 module.exports = { RECONCILIATION_MIGRATIONS };
