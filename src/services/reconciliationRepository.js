@@ -1078,6 +1078,145 @@ async function hasRunFindings(runId) {
   });
 }
 
+/**
+ * What deleting a run would remove.
+ *
+ * A destructive action should say what it will do before it does it, and the answer
+ * here is not obvious: an exception is a standing item keyed by fingerprint, seen by
+ * one or more runs. Deleting a run removes only the exceptions that no other run
+ * ever saw — the rest lose one sighting and keep their history.
+ */
+async function getRunDeletionImpact(runId) {
+  return withConnection(async conn => {
+    const rows = await execSql(conn, 'SELECT COUNT(*) AS total FROM recon_run_findings WHERE run_id=@run', [int('run', runId)]);
+    const findings = rows[0] ? Number(rows[0].total) : 0;
+
+    const orphaned = await execSql(conn, `
+      SELECT COUNT(*) AS total FROM (
+        SELECT f.exception_id FROM recon_run_findings f
+        WHERE f.run_id=@run AND f.exception_id IS NOT NULL
+        GROUP BY f.exception_id
+        HAVING NOT EXISTS (
+          SELECT 1 FROM recon_run_findings other
+          WHERE other.exception_id = f.exception_id AND other.run_id <> @run
+        )
+      ) AS solitary`, [int('run', runId)]);
+
+    const shared = await execSql(conn, `
+      SELECT COUNT(DISTINCT f.exception_id) AS total FROM recon_run_findings f
+      WHERE f.run_id=@run AND f.exception_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM recon_run_findings other
+          WHERE other.exception_id = f.exception_id AND other.run_id <> @run
+        )`, [int('run', runId)]);
+
+    // A run recorded before findings were kept has none, so nothing can be
+    // attributed to it and its exceptions are left alone.
+    return {
+      findings,
+      exceptionsToDelete: orphaned[0] ? Number(orphaned[0].total) : 0,
+      exceptionsToKeep: shared[0] ? Number(shared[0].total) : 0,
+      attributable: findings > 0,
+    };
+  });
+}
+
+/**
+ * Deletes a run and everything that belongs only to it.
+ *
+ * Exceptions are shared between runs, so they are handled in two groups: those no
+ * surviving run ever saw are removed along with their values, differences and
+ * history; those other runs also saw keep everything and have their first and last
+ * sighting recomputed from the findings that remain. Leaving them pointing at a
+ * deleted run would make the exception look as if it came from nowhere.
+ *
+ * `onProgress` is called as each stage completes, so a caller can report it.
+ */
+async function deleteRun(runId, { onProgress = () => {} } = {}) {
+  return withConnection(async conn => {
+    const removed = { findings: 0, exceptions: 0, repaired: 0, values: 0, events: 0 };
+
+    const solitary = await execSql(conn, `
+      SELECT f.exception_id FROM recon_run_findings f
+      WHERE f.run_id=@run AND f.exception_id IS NOT NULL
+      GROUP BY f.exception_id
+      HAVING NOT EXISTS (
+        SELECT 1 FROM recon_run_findings other
+        WHERE other.exception_id = f.exception_id AND other.run_id <> @run
+      )`, [int('run', runId)]);
+    const orphanIds = solitary.map(row => row.exception_id);
+
+    const sharedRows = await execSql(conn, `
+      SELECT DISTINCT f.exception_id FROM recon_run_findings f
+      WHERE f.run_id=@run AND f.exception_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM recon_run_findings other
+          WHERE other.exception_id = f.exception_id AND other.run_id <> @run
+        )`, [int('run', runId)]);
+    const sharedIds = sharedRows.map(row => row.exception_id);
+
+    onProgress({ stage: 'planned', orphans: orphanIds.length, shared: sharedIds.length });
+
+    // Exceptions nothing else saw go entirely, with their detail and history.
+    for (const chunk of idChunks(orphanIds)) {
+      for (const table of ['recon_exception_values', 'recon_exception_differences', 'recon_exception_events']) {
+        const predicate = idPredicate(chunk);
+        await execSql(conn, 'DELETE FROM ' + table + ' WHERE exception_id IN (' + predicate.clause + ')', predicate.params);
+      }
+      const predicate = idPredicate(chunk);
+      await execSql(conn, 'DELETE FROM recon_exceptions WHERE id IN (' + predicate.clause + ')', predicate.params);
+      removed.exceptions += chunk.length;
+      onProgress({ stage: 'exceptions', done: removed.exceptions, total: orphanIds.length });
+    }
+
+    // The run's own rows go before the survivors are repaired, so the recomputation
+    // sees only the sightings that remain.
+    const findingCount = await execSql(conn, 'SELECT COUNT(*) AS total FROM recon_run_findings WHERE run_id=@run', [int('run', runId)]);
+    removed.findings = findingCount[0] ? Number(findingCount[0].total) : 0;
+    await execSql(conn, 'DELETE FROM recon_run_findings WHERE run_id=@run', [int('run', runId)]);
+    await execSql(conn, 'DELETE FROM recon_run_outcome_counts WHERE run_id=@run', [int('run', runId)]);
+    onProgress({ stage: 'findings', done: removed.findings });
+
+    // Survivors: first and last sighting, and the occurrence count, come from the
+    // findings that are left.
+    for (const chunk of idChunks(sharedIds)) {
+      const predicate = idPredicate(chunk);
+      await execSql(conn, `
+        UPDATE e SET
+          e.first_run_id = s.first_run,
+          e.last_run_id = s.last_run,
+          e.occurrence_count = s.sightings
+        FROM recon_exceptions e
+        JOIN (
+          SELECT exception_id, MIN(run_id) AS first_run, MAX(run_id) AS last_run, COUNT(*) AS sightings
+          FROM recon_run_findings WHERE exception_id IN (` + predicate.clause + `)
+          GROUP BY exception_id
+        ) AS s ON s.exception_id = e.id`, predicate.params);
+      removed.repaired += chunk.length;
+      onProgress({ stage: 'repaired', done: removed.repaired, total: sharedIds.length });
+    }
+
+    // Any exception still pointing at the deleted run — one from before findings
+    // existed — is detached rather than left referencing something gone.
+    await execSql(conn, 'UPDATE recon_exceptions SET last_run_id=NULL WHERE last_run_id=@run', [int('run', runId)]);
+    await execSql(conn, 'UPDATE recon_exceptions SET first_run_id=NULL WHERE first_run_id=@run', [int('run', runId)]);
+
+    await execSql(conn, 'DELETE FROM recon_runs WHERE id=@run', [int('run', runId)]);
+    onProgress({ stage: 'done', ...removed });
+    return removed;
+  });
+}
+
+/** The runs of one rule, or every run, oldest first so deletion is deterministic. */
+async function listRunIds({ ruleId } = {}) {
+  return withConnection(async conn => {
+    const rows = await execSql(conn,
+      'SELECT id FROM recon_runs' + (ruleId ? ' WHERE rule_id=@rule' : '') + ' ORDER BY id',
+      ruleId ? [int('rule', ruleId)] : []);
+    return rows.map(row => row.id);
+  });
+}
+
 /** Findings for several runs in one read, so a per-rule overview is one query. */
 async function listFindingsForRuns(runIds) {
   const wanted = (runIds || []).map(id => Number.parseInt(id, 10)).filter(Number.isFinite);
@@ -1195,6 +1334,7 @@ module.exports = {
   listRules, getRuleById, createRule, updateRule, setRuleStatus, deleteRule, getRuleVersions,
   setRuleStatusAndOwner, batchUpdateRules, listOwners,
   createRun, completeRun, listRuns, getRunById, getRunOutcomeCounts,
+  deleteRun, getRunDeletionImpact, listRunIds,
   normalizeLegacyRows,
   recordExceptions, listRunFindings, hasRunFindings, listFindingsForRuns,
   listExceptions, countExceptions, listExceptionsForAction, listExceptionPage,

@@ -97,6 +97,55 @@ function filterCapacities(input) {
   });
 }
 
+/**
+ * Follows a background job to completion.
+ *
+ * Shared because more than one page starts work that outlives its request — a bulk
+ * decision, deleting a run — and they should all report it the same way. `onUpdate`
+ * renders progress; `onDone` is given the final summary.
+ */
+function pollJob(jobId, onUpdate, onDone, intervalMs) {
+  var timer = setInterval(async function() {
+    try {
+      var resp = await fetch('/reconciliation/jobs/' + encodeURIComponent(jobId));
+      var job = await resp.json();
+      if (!job.success) {
+        clearInterval(timer);
+        onDone({ status: 'unknown', message: job.message, counters: {}, problems: [] });
+        return;
+      }
+      if (job.live) { onUpdate(job); return; }
+      clearInterval(timer);
+      onDone(job);
+    } catch (e) {
+      clearInterval(timer);
+      onDone({ status: 'failed', message: e.message, counters: {}, problems: [] });
+    }
+  }, intervalMs || 1000);
+  return timer;
+}
+
+function formatJobSeconds(total) {
+  var s = Math.max(0, Math.floor(total || 0));
+  if (s < 60) return s + 's';
+  return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+}
+
+/** A progress bar plus message, the same shape wherever a job is being watched. */
+function jobProgressHtml(job, extra) {
+  var percent = job.percent === null || job.percent === undefined ? 0 : job.percent;
+  var eta = (job.etaSeconds !== null && job.etaSeconds !== undefined)
+    ? ' · about ' + formatJobSeconds(job.etaSeconds) + ' left' : '';
+  var text = document.createElement('div');
+  text.textContent = (job.message || 'Working...') + eta;
+  return '<div class="small text-muted mb-1"><span class="spinner-border spinner-border-sm me-1"></span>' +
+      text.innerHTML + '</div>' +
+    '<div class="progress" style="height: 16px;">' +
+      '<div class="progress-bar progress-bar-striped progress-bar-animated" style="width:' + percent + '%">' +
+        percent + '%</div></div>' +
+    (extra ? '<div class="small text-muted mt-1">' + extra + '</div>' : '');
+}
+
 function showPageReloading(message) {
   var overlay = document.getElementById('reloadOverlay');
   var text = document.getElementById('reloadOverlayText');

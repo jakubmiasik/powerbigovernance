@@ -142,7 +142,7 @@ Reconciliation and master data sit together under **Quality** in the navigation,
 | `/quality/sources` | Register the systems reconciliation and master data read — the only place registration happens |
 | `/reconciliation` | Oversight: active rules, open exceptions by type, severity, owner and age, rules with recurring discrepancies, recent runs. A dropdown scopes the whole page to what a single run found |
 | `/reconciliation/rules` | Create, version, activate and retire controls; change status or assign an owner across several at once; run one or more of them |
-| `/reconciliation/runs` | Full run history: what was checked, when, under which rule version, and what it produced |
+| `/reconciliation/runs` | Full run history: what was checked, when, under which rule version, and what it produced. Runs can be deleted individually, per rule, or entirely |
 | `/reconciliation/compare` | Every rule's latest run against its previous one, and any two runs of the same rule side by side |
 | `/reconciliation/exceptions` | Investigate, assign, comment and resolve discrepancies, one at a time or in bulk |
 
@@ -157,7 +157,9 @@ Exceptions can be worked in bulk, either on the rows ticked or on **everything t
 
 Filtering to a run means **what that run found**, read from the findings it recorded. It previously meant `last_run_id` — the most recent run that saw each exception — which coincides with the newest run and silently answers a different question for every earlier one.
 
-A run's detail page loads its exception list a page at a time with a progress bar, so a run with a large number of findings shows the list filling rather than nothing at all. Assign an owner, change severity, move status, or add a comment to all of them at once. Severity is set by the engine from the outcome, but what is material is a business judgement, so overriding it is recorded like any other decision. Bulk changes follow the same lifecycle as single ones: an exception that cannot make the transition is named rather than forced, closing needs a reason, and each exception gets its own history entries.
+A run's detail page loads its exception list a page at a time with a progress bar, so a run with a large number of findings shows the list filling rather than nothing at all.
+
+**Deleting a run** removes the run, its findings and its outcome counts. Exceptions are shared between the runs that saw them, so they are handled in two groups: those no surviving run ever recorded are deleted along with their values, differences and history; those other runs also saw are kept, with their first and last sighting and occurrence count recomputed from the findings that remain — leaving them pointing at a deleted run would make an exception look as if it came from nowhere. The confirmation says how many fall into each group before anything happens, and the deletion runs as a job with progress. Runs of one rule, or every run, can be deleted the same way; clearing the entire history requires an explicit confirmation. Assign an owner, change severity, move status, or add a comment to all of them at once. Severity is set by the engine from the outcome, but what is material is a business judgement, so overriding it is recorded like any other decision. Bulk changes follow the same lifecycle as single ones: an exception that cannot make the transition is named rather than forced, closing needs a reason, and each exception gets its own history entries.
 
 The comparison page opens on **every rule's latest completed run against the one before it** — exception count and change, how many items are newly failing, fixed and still failing, current severity mix, and a verdict per rule. A rule that has run only once is listed with what that run found and no comparison, since a control nobody has re-run is exactly the one worth noticing. Any two runs of the same rule can then be opened in detail.
 

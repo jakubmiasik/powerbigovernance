@@ -3334,3 +3334,172 @@ test('a run\'s exception list is served a page at a time so it can be loaded wit
     await new Promise(resolve => server.close(resolve));
   }
 });
+
+// ── Deleting a reconciliation run ──
+test('deleting a run removes only the exceptions no other run ever saw', async () => {
+  // An exception is a standing item keyed by fingerprint, seen by one or more runs.
+  // Deleting a run must not take with it the items other runs still evidence.
+  const { executed } = await withFakeSql(sql => {
+    if (/HAVING NOT EXISTS/.test(sql)) return [{ exception_id: 11 }, { exception_id: 12 }];
+    if (/SELECT DISTINCT f\.exception_id/.test(sql)) return [{ exception_id: 20 }];
+    if (/COUNT\(\*\) AS total FROM recon_run_findings/.test(sql)) return [{ total: 3 }];
+    return [];
+  }, () => reconRepo.deleteRun(5));
+
+  const deletedExceptions = executed.find(entry => /DELETE FROM recon_exceptions WHERE id IN/.test(entry.sql));
+  assert.deepEqual(deletedExceptions.params.map(param => param.value), [11, 12],
+    'only the solitary exceptions go');
+
+  // Their detail and history go with them; leaving those behind would orphan rows.
+  for (const table of ['recon_exception_values', 'recon_exception_differences', 'recon_exception_events']) {
+    assert.ok(executed.some(entry => new RegExp('DELETE FROM ' + table + ' WHERE exception_id IN').test(entry.sql)),
+      table + ' should be cleared for the deleted exceptions');
+  }
+
+  // The shared one is kept and repointed, not deleted.
+  assert.ok(!deletedExceptions.params.some(param => param.value === 20));
+  const repair = executed.find(entry => /UPDATE e SET/.test(entry.sql));
+  assert.match(repair.sql, /MIN\(run_id\) AS first_run, MAX\(run_id\) AS last_run, COUNT\(\*\) AS sightings/);
+  assert.deepEqual(repair.params.map(param => param.value), [20]);
+});
+
+test('a run\'s own rows go before the survivors are recomputed', async () => {
+  // The recomputation must see only the sightings that remain, or it would count
+  // the run being deleted.
+  const { executed } = await withFakeSql(sql => {
+    if (/HAVING NOT EXISTS/.test(sql)) return [];
+    if (/SELECT DISTINCT f\.exception_id/.test(sql)) return [{ exception_id: 20 }];
+    return [];
+  }, () => reconRepo.deleteRun(5));
+
+  const sqlOrder = executed.map(entry => entry.sql);
+  const findingsDeleted = sqlOrder.findIndex(sql => /DELETE FROM recon_run_findings WHERE run_id=@run/.test(sql));
+  const repaired = sqlOrder.findIndex(sql => /UPDATE e SET/.test(sql));
+  assert.ok(findingsDeleted !== -1 && repaired !== -1);
+  assert.ok(findingsDeleted < repaired, 'findings are removed first');
+
+  assert.ok(sqlOrder.some(sql => /DELETE FROM recon_run_outcome_counts WHERE run_id=@run/.test(sql)));
+  assert.ok(sqlOrder.some(sql => /DELETE FROM recon_runs WHERE id=@run/.test(sql)));
+});
+
+test('an exception still pointing at the deleted run is detached, not left dangling', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.deleteRun(5));
+  assert.ok(executed.some(entry => /UPDATE recon_exceptions SET last_run_id=NULL WHERE last_run_id=@run/.test(entry.sql)));
+  assert.ok(executed.some(entry => /UPDATE recon_exceptions SET first_run_id=NULL WHERE first_run_id=@run/.test(entry.sql)));
+});
+
+test('deletion reports its effect before it happens', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/FROM \(\s*SELECT f\.exception_id/.test(sql)) return [{ total: 2 }];
+    if (/COUNT\(DISTINCT f\.exception_id\)/.test(sql)) return [{ total: 1 }];
+    return [{ total: 3 }];
+  }, () => reconRepo.getRunDeletionImpact(5));
+
+  assert.equal(result.findings, 3);
+  assert.equal(result.exceptionsToDelete, 2);
+  assert.equal(result.exceptionsToKeep, 1);
+  assert.equal(result.attributable, true);
+});
+
+test('a run recorded before findings existed reports that nothing can be attributed to it', async () => {
+  const { result } = await withFakeSql(() => [{ total: 0 }], () => reconRepo.getRunDeletionImpact(5));
+  assert.equal(result.attributable, false, 'its exceptions must be left alone rather than guessed at');
+  assert.equal(result.exceptionsToDelete, 0);
+});
+
+test('deleting a run runs as a job and reports what it removed', async () => {
+  const original = { getRunById: reconRepo.getRunById, getRunDeletionImpact: reconRepo.getRunDeletionImpact, deleteRun: reconRepo.deleteRun };
+  reconRepo.getRunById = async () => ({ id: 5, rule_name: 'Invoices', started_at: new Date() });
+  reconRepo.getRunDeletionImpact = async () => ({ findings: 40, exceptionsToDelete: 30, exceptionsToKeep: 10, attributable: true });
+  reconRepo.deleteRun = async (runId, { onProgress }) => {
+    onProgress({ stage: 'planned', orphans: 30, shared: 10 });
+    onProgress({ stage: 'exceptions', done: 30, total: 30 });
+    onProgress({ stage: 'findings', done: 40 });
+    onProgress({ stage: 'repaired', done: 10, total: 10 });
+    return { findings: 40, exceptions: 30, repaired: 10 };
+  };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const started = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: '127.0.0.1', port: server.address().port, path: '/reconciliation/runs/5', method: 'DELETE',
+      }, res => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', chunk => { text += chunk; });
+        res.on('end', () => resolve(JSON.parse(text)));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    assert.equal(started.success, true);
+    assert.ok(started.jobId);
+    assert.equal(started.impact.exceptionsToDelete, 30);
+
+    let job;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      job = JSON.parse((await request(server, '/reconciliation/jobs/' + started.jobId)).body);
+      if (!job.live) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(job.status, 'completed');
+    assert.equal(job.counters.exceptions, 30);
+    assert.equal(job.counters.repaired, 10);
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('deleting every run of every rule needs an explicit confirmation', async () => {
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    // Clearing the whole history is not something to do by accident.
+    const refused = await postJson(server, '/reconciliation/runs/delete-all', {});
+    assert.equal(refused.success, false);
+    assert.match(refused.message, /explicit confirmation/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('deleting all runs of a rule keeps going when one will not delete', async () => {
+  const original = { listRunIds: reconRepo.listRunIds, deleteRun: reconRepo.deleteRun };
+  reconRepo.listRunIds = async ({ ruleId }) => {
+    assert.equal(ruleId, 9);
+    return [1, 2, 3];
+  };
+  reconRepo.deleteRun = async runId => {
+    if (runId === 2) throw new Error('still referenced');
+    return { findings: 5, exceptions: 4, repaired: 1 };
+  };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const started = await postJson(server, '/reconciliation/runs/delete-all', { ruleId: 9 });
+    assert.equal(started.total, 3);
+
+    let job;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      job = JSON.parse((await request(server, '/reconciliation/jobs/' + started.jobId)).body);
+      if (!job.live) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(job.status, 'completed');
+    assert.equal(job.counters.runs, 3, 'every run was attempted');
+    assert.equal(job.counters.exceptions, 8, 'the two that worked did their work');
+    assert.equal(job.problems.length, 1);
+    assert.match(job.problems[0].key, /Run #2/);
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
