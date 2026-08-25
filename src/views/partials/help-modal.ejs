@@ -1,0 +1,47 @@
+<%
+  // Renders one help topic from qualityGuideService. Included wherever a page wants
+  // a "How this works" button, so the same discipline reads identically everywhere.
+  var topic = helpTopic;
+%>
+<div class="modal fade" id="helpModal-<%= topic.key %>" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-question-circle me-2"></i><%= topic.title %></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted"><%= topic.summary %></p>
+
+        <h6 class="mt-4"><i class="bi bi-list-ol me-2"></i>How to use it</h6>
+        <div class="list-group list-group-flush mb-3">
+          <% topic.steps.forEach(function(step) { %>
+            <div class="list-group-item px-0 bg-transparent">
+              <div class="fw-bold small"><%= step.title %></div>
+              <div class="small text-muted"><%= step.body %></div>
+            </div>
+          <% }) %>
+        </div>
+
+        <h6 class="mt-4"><i class="bi bi-tags me-2"></i>What it produces</h6>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm mb-0">
+            <tbody>
+              <% topic.outcomes.forEach(function(row) { %>
+                <tr><td class="small fw-bold" style="width:35%;"><%= row[0] %></td><td class="small text-muted"><%= row[1] %></td></tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+
+        <h6 class="mt-4"><i class="bi bi-lightbulb me-2"></i><%= topic.sample.title %></h6>
+        <pre class="small p-3 mb-2" style="background: var(--color-surface-offset); border-radius: var(--radius-sm); white-space: pre-wrap;"><% topic.sample.lines.forEach(function(line) { %><%= line %>
+<% }) %></pre>
+        <p class="small text-muted mb-0"><strong>Reading the result:</strong> <%= topic.sample.reading %></p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>

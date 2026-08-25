@@ -1,7 +1,40 @@
 <%- include('./partials/header') %>
-<div class="mb-4">
-  <h2><i class="bi bi-house me-2"></i>Welcome to Power BI Governance</h2>
-  <p style="color: var(--color-text-muted);">Your central hub for investigating Power BI &amp; Microsoft Fabric workspaces, reports, datasets, and all available metadata across your tenant.</p>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-house me-2"></i>Welcome to Power BI Governance</h2>
+    <p class="mb-0" style="color: var(--color-text-muted);">Your central hub for investigating Power BI &amp; Microsoft Fabric workspaces, reports, datasets, and all available metadata across your tenant.</p>
+  </div>
+  <button class="btn btn-sm btn-outline-primary text-nowrap" data-bs-toggle="modal" data-bs-target="#prerequisitesModal">
+    <i class="bi bi-clipboard-check me-1"></i>Prerequisites
+  </button>
+</div>
+
+<!-- What has to be true before any of this works. Every failure mode below has been
+     hit in practice, and each one looks like an application fault from the inside:
+     an empty scan, a capacity that will not pause, a lakehouse that refuses a query. -->
+<div class="card mb-4 border-primary">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-clipboard-check me-2"></i>Before You Start — Access and Permissions</span>
+    <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#prerequisitesModal">
+      <i class="bi bi-list-check me-1"></i>Full checklist
+    </button>
+  </div>
+  <div class="card-body py-3">
+    <p class="small text-muted">
+      Scanning, capacity control and the quality features each need permissions granted in a different place. Missing one does not
+      produce a clear error — it produces an empty scan, a capacity that will not pause, or a lakehouse that refuses a query.
+    </p>
+    <div class="row g-2">
+      <% prerequisites.forEach(function(group) { %>
+        <div class="col-sm-6 col-lg-4">
+          <button class="btn btn-sm btn-outline-secondary w-100 text-start" data-bs-toggle="modal" data-bs-target="#prerequisitesModal">
+            <i class="bi <%= group.icon %> me-2"></i><%= group.title %>
+            <span class="badge bg-secondary float-end"><%= group.items.filter(function(i) { return i.required; }).length %></span>
+          </button>
+        </div>
+      <% }) %>
+    </div>
+  </div>
 </div>
 
 <div class="row g-4 mb-4">
@@ -114,4 +147,51 @@
     </div>
   </div>
 </div>
+
+<div class="modal fade" id="prerequisitesModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-clipboard-check me-2"></i>Prerequisites</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted">
+          Everything the application needs in order to scan a tenant, act on capacities, and run the quality features.
+          Grouped by where the permission is granted, because each group is one administrator and one portal.
+        </p>
+        <div class="alert alert-warning small">
+          <i class="bi bi-exclamation-triangle me-2"></i>
+          A missing permission rarely announces itself. The admin APIs return an empty list rather than an error when consent is
+          missing, a capacity action fails as "unauthorized" long after the capacity appeared in the inventory, and a lakehouse
+          query fails in a way that reads like a connection problem. If something is inexplicably empty, start here.
+        </div>
+
+        <% prerequisites.forEach(function(group) { %>
+          <h6 class="mt-4"><i class="bi <%= group.icon %> me-2"></i><%= group.title %></h6>
+          <% if (group.note) { %><p class="small text-muted mb-2"><em><%= group.note %></em></p><% } %>
+          <ul class="list-unstyled mb-0">
+            <% group.items.forEach(function(item) { %>
+              <li class="mb-2 d-flex gap-2">
+                <span class="text-nowrap">
+                  <% if (item.required) { %>
+                    <span class="badge bg-danger">required</span>
+                  <% } else { %>
+                    <span class="badge bg-secondary">optional</span>
+                  <% } %>
+                </span>
+                <span class="small"><%= item.text %></span>
+              </li>
+            <% }) %>
+          </ul>
+        <% }) %>
+      </div>
+      <div class="modal-footer justify-content-between">
+        <a href="/settings" class="btn btn-outline-primary btn-sm"><i class="bi bi-gear me-1"></i>Configuration</a>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <%- include('./partials/footer') %>

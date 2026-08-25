@@ -1,10 +1,10 @@
 <%- include('../partials/header') %>
 <div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
   <div>
-    <h2><i class="bi bi-database me-2"></i>Reconciliation Sources</h2>
-    <p class="text-muted mb-0">The business systems available for reconciliation, and the datasets and fields each one exposes.</p>
+    <h2><i class="bi bi-database me-2"></i>Quality Sources</h2>
+    <p class="text-muted mb-0">The business systems reconciliation and master data both read from, and the datasets and fields each one exposes.</p>
   </div>
-  <a href="/reconciliation" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+  <a href="/quality" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
 </div>
 
 <% if (error) { %><div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div><% } %>
@@ -192,7 +192,7 @@ async function loadCandidates() {
   candidates = [];
 
   try {
-    var resp = await fetch('/reconciliation/sources/candidates?spId=' + encodeURIComponent(spId));
+    var resp = await fetch('/quality/sources/candidates?spId=' + encodeURIComponent(spId));
     var data = await resp.json();
     if (!data.success) { select.innerHTML = '<option value="">' + (data.message || 'Could not load items') + '</option>'; return; }
 
@@ -225,7 +225,7 @@ async function registerSource() {
     spId: document.getElementById('spSelect').value
   });
   try {
-    var resp = await fetch('/reconciliation/sources', {
+    var resp = await fetch('/quality/sources', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     });
     var data = await resp.json();
@@ -258,7 +258,7 @@ function showExtResult(html) { document.getElementById('extResult').innerHTML = 
 async function testExternal() {
   showExtResult('<div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Connecting...</div>');
   try {
-    var resp = await fetch('/reconciliation/sources/external/test', {
+    var resp = await fetch('/quality/sources/external/test', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(externalBody())
     });
     var data = await resp.json();
@@ -272,7 +272,7 @@ async function testExternal() {
 async function registerExternal() {
   showExtResult('<div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Connecting and reading the schema...</div>');
   try {
-    var resp = await fetch('/reconciliation/sources/external', {
+    var resp = await fetch('/quality/sources/external', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(externalBody())
     });
     var data = await resp.json();
@@ -284,7 +284,7 @@ async function registerExternal() {
 
 async function refreshSchema(id) {
   try {
-    var resp = await fetch('/reconciliation/sources/' + id + '/refresh-schema', { method: 'POST' });
+    var resp = await fetch('/quality/sources/' + id + '/refresh-schema', { method: 'POST' });
     var data = await resp.json();
     if (data.success) { showToast('Read ' + data.datasets + ' dataset(s)', 'success'); setTimeout(function() { window.location.reload(); }, 600); }
     else showToast(data.message, 'error');
@@ -296,7 +296,7 @@ async function removeSource(id) {
     title: 'Remove source', message: 'Rules using this source will no longer run. Continue?',
     confirmText: 'Remove', confirmClass: 'btn-danger',
     onConfirm: async function() {
-      var resp = await fetch('/reconciliation/sources/' + id, { method: 'DELETE' });
+      var resp = await fetch('/quality/sources/' + id, { method: 'DELETE' });
       var data = await resp.json();
       if (data.success) window.location.reload(); else showToast(data.message, 'error');
     }

@@ -138,6 +138,7 @@ const migrateRoutes = require('./routes/migrate');
 const capacityRoutes = require('./routes/capacities');
 const reconciliationRoutes = require('./routes/reconciliation');
 const mdmRoutes = require('./routes/mdm');
+const qualityRoutes = require('./routes/quality');
 const pipelineRoutes = require('./routes/pipelines');
 const tenantSettingsRoutes = require('./routes/tenantSettings');
 
@@ -149,6 +150,7 @@ app.use('/analysis', analysisRoutes);
 app.use('/migrate', migrateRoutes);
 app.use('/capacities', capacityRoutes);
 app.use('/reconciliation', reconciliationRoutes);
+app.use('/quality', qualityRoutes);
 app.use('/mdm', mdmRoutes);
 app.use('/pipelines', pipelineRoutes);
 app.use('/tenant-settings', tenantSettingsRoutes);
