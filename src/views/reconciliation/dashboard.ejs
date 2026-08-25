@@ -194,40 +194,167 @@
   </div>
 </div>
 
-<div class="card mb-4">
-  <div class="card-header"><i class="bi bi-graph-up-arrow me-2"></i><%= scoped ? 'Rules in This Run' : 'Rules with Open Exceptions' %></div>
-  <div class="table-responsive">
-    <table class="table table-sm table-hover mb-0">
-      <thead><tr><th>Rule</th><th>Business area</th><th><%= scoped ? 'Found' : 'Open' %></th><th><%= scoped ? 'Included new items' : 'Worst recurrence' %></th><th>Last seen</th></tr></thead>
-      <tbody>
-        <% if (!(d.byRule || []).length) { %>
-          <tr><td colspan="5" class="text-muted small py-3"><%= scoped ? 'This run found no exceptions.' : 'No open exceptions. Every control that has run is clean.' %></td></tr>
-        <% } %>
-        <% (d.byRule || []).forEach(function(row) { %>
-          <tr>
-            <td><a href="/reconciliation/exceptions?ruleId=<%= row.rule_id %>"><%= row.rule_name || ('Rule #' + row.rule_id) %></a></td>
-            <td><%= row.business_area || '-' %></td>
-            <td><span class="badge bg-danger"><%= row.open_count %></span></td>
-            <td>
-              <% if (scoped) { %>
-                <%= Number(row.worst_recurrence) ? 'yes' : 'no' %>
-              <% } else { %>
-                <%= row.worst_recurrence %>×
-                <% if (Number(row.worst_recurrence) > 2) { %>
+<% if (scoped) { %>
+  <div class="card mb-4">
+    <div class="card-header"><i class="bi bi-graph-up-arrow me-2"></i>Rules in This Run</div>
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0">
+        <thead><tr><th>Rule</th><th>Business area</th><th class="text-end">Found</th><th>Included new items</th><th>Last seen</th></tr></thead>
+        <tbody>
+          <% if (!(d.byRule || []).length) { %>
+            <tr><td colspan="5" class="text-muted small py-3">This run found no exceptions.</td></tr>
+          <% } %>
+          <% (d.byRule || []).forEach(function(row) { %>
+            <tr>
+              <td><a href="/reconciliation/exceptions?ruleId=<%= row.rule_id %>"><%= row.rule_name || ('Rule #' + row.rule_id) %></a></td>
+              <td><%= row.business_area || '-' %></td>
+              <td class="text-end"><span class="badge bg-danger"><%= row.open_count %></span></td>
+              <td><%= Number(row.worst_recurrence) ? 'yes' : 'no' %></td>
+              <td class="small"><%= row.last_seen ? new Date(row.last_seen).toLocaleString() : '-' %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+<% } else { %>
+  <%
+    var overview = rulesOverview || [];
+    var overviewTotal = overview.reduce(function(sum, rule) { return sum + rule.total; }, 0);
+    var statusLabel = null;
+    (statusDefs || []).forEach(function(sd) { if (sd.key === ruleStatus) statusLabel = sd.label; });
+  %>
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span>
+        <i class="bi bi-graph-up-arrow me-2"></i>Rules Overview
+        <span class="text-muted">(<%= overview.length %> rule(s), <%= overviewTotal %> exception(s))</span>
+      </span>
+      <div class="d-flex align-items-center gap-2">
+        <label class="form-label small mb-0 text-nowrap" for="ruleStatusFilter">Status</label>
+        <select class="form-select form-select-sm" id="ruleStatusFilter" style="max-width: 220px;"
+                onchange="window.location = this.value ? '/reconciliation?ruleStatus=' + this.value : '/reconciliation'">
+          <option value="">Open (all unresolved)</option>
+          <% (statusDefs || []).forEach(function(sd) { %>
+            <option value="<%= sd.key %>" <%= ruleStatus === sd.key ? 'selected' : '' %>><%= sd.label %></option>
+          <% }) %>
+        </select>
+      </div>
+    </div>
+
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead><tr>
+          <th style="width:32px;"></th>
+          <th>Rule</th><th>Business area</th>
+          <th class="text-end"><%= statusLabel || 'Open' %></th>
+          <th>Severity</th><th class="text-end">Runs</th><th>Worst recurrence</th><th>Last seen</th>
+        </tr></thead>
+        <tbody>
+          <% if (!overview.length) { %>
+            <tr><td colspan="8" class="text-muted small py-3">
+              <%= ruleStatus ? 'No exceptions in that status.' : 'No open exceptions. Every control that has run is clean.' %>
+            </td></tr>
+          <% } %>
+          <% overview.forEach(function(rule, index) { %>
+            <tr class="<%= rule.runs.length ? '' : 'text-muted' %>">
+              <td>
+                <% if (rule.runs.length) { %>
+                  <button class="btn btn-sm p-0 px-1" type="button" data-bs-toggle="collapse"
+                          data-bs-target="#ruleRuns-<%= index %>" aria-expanded="false"
+                          title="Show which run each exception came from">
+                    <i class="bi bi-chevron-right"></i>
+                  </button>
+                <% } %>
+              </td>
+              <td><a href="/reconciliation/exceptions?ruleId=<%= rule.ruleId %><%= ruleStatus ? '&status=' + ruleStatus : '' %>"><strong><%= rule.ruleName || ('Rule #' + rule.ruleId) %></strong></a></td>
+              <td class="small"><%= rule.businessArea || '-' %></td>
+              <td class="text-end"><span class="badge bg-danger"><%= rule.total %></span></td>
+              <td class="small">
+                <% if (rule.high) { %><span class="badge bg-danger me-1"><%= rule.high %> high</span><% } %>
+                <% if (rule.medium) { %><span class="badge bg-warning me-1"><%= rule.medium %> med</span><% } %>
+                <% if (rule.low) { %><span class="badge bg-secondary"><%= rule.low %> low</span><% } %>
+              </td>
+              <td class="text-end small"><%= rule.runs.length %></td>
+              <td class="small">
+                <%= rule.worstRecurrence %>&times;
+                <% if (Number(rule.worstRecurrence) > 2) { %>
                   <span class="badge bg-warning text-dark ms-1" title="Seen in several runs — likely a systemic issue">recurring</span>
                 <% } %>
-              <% } %>
-            </td>
-            <td class="small"><%= row.last_seen ? new Date(row.last_seen).toLocaleString() : '-' %></td>
-          </tr>
-        <% }) %>
-      </tbody>
-    </table>
+              </td>
+              <td class="small"><%= rule.lastSeen ? new Date(rule.lastSeen).toLocaleString() : '-' %></td>
+            </tr>
+
+            <% if (rule.runs.length) { %>
+              <tr class="collapse" id="ruleRuns-<%= index %>">
+                <td></td>
+                <td colspan="7" class="p-0">
+                  <table class="table table-sm mb-0" style="background: var(--color-surface-2);">
+                    <thead><tr>
+                      <th class="small">Run</th><th class="small">When</th>
+                      <th class="small text-end">Exceptions from this run</th><th></th>
+                    </tr></thead>
+                    <tbody>
+                      <% rule.runs.forEach(function(run) { %>
+                        <tr>
+                          <td class="small">
+                            <% if (run.deleted) { %>
+                              <span class="text-muted">#<%= run.runId %> (deleted)</span>
+                            <% } else { %>
+                              <a href="/reconciliation/runs/<%= run.runId %>">#<%= run.runId %></a>
+                              <% if (run.ruleVersion) { %><span class="text-muted">v<%= run.ruleVersion %></span><% } %>
+                            <% } %>
+                          </td>
+                          <td class="small"><%= run.startedAt ? new Date(run.startedAt).toLocaleString() : '-' %></td>
+                          <td class="small text-end"><%= run.total %></td>
+                          <td class="text-end">
+                            <% if (!run.deleted) { %>
+                              <a href="/reconciliation?runId=<%= run.runId %>" class="btn btn-sm btn-outline-primary p-0 px-1">Scope to run</a>
+                            <% } %>
+                          </td>
+                        </tr>
+                      <% }) %>
+                      <% if (rule.unattributed) { %>
+                        <tr>
+                          <td class="small text-muted" colspan="2">
+                            Not attributable to a run — recorded before per-run findings were kept
+                          </td>
+                          <td class="small text-end text-muted"><%= rule.unattributed %></td>
+                          <td></td>
+                        </tr>
+                      <% } %>
+                    </tbody>
+                  </table>
+                </td>
+              </tr>
+            <% } %>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+    <div class="card-footer small text-muted">
+      Expand a rule to see which run each of its standing exceptions came from. An exception seen by several runs counts under each of
+      them — the question is what a run contributed, not which run owns it. A high recurrence count means the same item keeps failing
+      across runs, usually a process or integration problem rather than a record to fix once.
+    </div>
   </div>
-  <div class="card-footer small text-muted">
-    A high recurrence count means the same item keeps failing across runs — usually a process or integration problem rather than a one-off record to correct.
-  </div>
-</div>
+
+  <% if (orphanedExceptions) { %>
+    <div class="alert alert-warning">
+      <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div class="small">
+          <i class="bi bi-exclamation-triangle me-2"></i>
+          <strong><%= orphanedExceptions %></strong> exception(s) have no run behind them — their runs were deleted before deletion
+          cleared its leftovers. They still count towards the current state above.
+        </div>
+        <button class="btn btn-sm btn-outline-danger text-nowrap" onclick="purgeOrphans()">
+          <i class="bi bi-trash3 me-1"></i>Remove them
+        </button>
+      </div>
+      <div class="mt-2" id="purgeResult"></div>
+    </div>
+  <% } %>
+<% } %>
 
 <div class="card mb-4">
   <div class="card-header d-flex justify-content-between align-items-center">
@@ -256,6 +383,38 @@
     </table>
   </div>
 </div>
+
+<script>
+// Chevrons point down when their rule is expanded, so the state of the hierarchy is
+// visible without opening anything.
+document.querySelectorAll('[data-bs-toggle="collapse"]').forEach(function(button) {
+  var target = document.querySelector(button.getAttribute('data-bs-target'));
+  if (!target) return;
+  target.addEventListener('show.bs.collapse', function() {
+    button.querySelector('i').className = 'bi bi-chevron-down';
+  });
+  target.addEventListener('hide.bs.collapse', function() {
+    button.querySelector('i').className = 'bi bi-chevron-right';
+  });
+});
+
+async function purgeOrphans() {
+  var result = document.getElementById('purgeResult');
+  result.innerHTML = '<div class="small text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Removing...</div>';
+  try {
+    var resp = await fetch('/reconciliation/exceptions/purge-orphans', { method: 'POST' });
+    var data = await resp.json();
+    if (!data.success) {
+      result.innerHTML = '<div class="small text-danger">' + data.message + '</div>';
+      return;
+    }
+    result.innerHTML = '<div class="small">Removed ' + data.removed + ' exception(s). Reloading...</div>';
+    setTimeout(function() { window.location.reload(); }, 700);
+  } catch (e) {
+    result.innerHTML = '<div class="small text-danger">' + e.message + '</div>';
+  }
+}
+</script>
 
 <%- include('../partials/help-modal', { helpTopic: helpTopic }) %>
 <%- include('../partials/footer') %>

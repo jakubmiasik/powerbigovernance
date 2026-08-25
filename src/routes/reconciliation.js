@@ -115,20 +115,49 @@ async function loadSourceDatasets(source) {
 
 router.get('/', async (req, res) => {
   const runId = req.query.runId ? Number.parseInt(req.query.runId, 10) : null;
+  const ruleStatus = STATUS_BY_KEY.has(req.query.ruleStatus) ? req.query.ruleStatus : null;
+  const base = {
+    title: 'Reconciliation', user: req.user, selectedRunId: runId, ruleStatus,
+    outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, helpTopic: RECONCILIATION_HELP,
+  };
   try {
     const [data, runs] = await Promise.all([
       repo.getDashboardData({ runId }),
       repo.listRuns({ limit: 200 }),
     ]);
-    view(res, 'reconciliation/dashboard', {
-      title: 'Reconciliation', user: req.user, data, runs, selectedRunId: runId,
-      outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, helpTopic: RECONCILIATION_HELP, error: null,
-    });
+
+    // The rule hierarchy describes the standing state, so it is only built when the
+    // page is not scoped to a single run — where the run breakdown would be one row.
+    let rulesOverview = [];
+    let orphanedExceptions = 0;
+    if (!runId) {
+      rulesOverview = await repo.getRulesOverview({ status: ruleStatus }).catch(err => {
+        console.warn('[Reconciliation] Could not build the rules overview:', err.message);
+        return [];
+      });
+      orphanedExceptions = await repo.countOrphanedExceptions().catch(() => 0);
+    }
+
+    view(res, 'reconciliation/dashboard', { ...base, data, runs, rulesOverview, orphanedExceptions, error: null });
   } catch (err) {
     view(res, 'reconciliation/dashboard', {
-      title: 'Reconciliation', user: req.user, data: null, runs: [], selectedRunId: runId,
-      outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, helpTopic: RECONCILIATION_HELP, error: err.message,
+      ...base, data: null, runs: [], rulesOverview: [], orphanedExceptions: 0, error: err.message,
     });
+  }
+});
+
+/**
+ * Removes exceptions with no run behind them.
+ *
+ * Deleting a run now takes its leftovers with it, but an install that deleted runs
+ * before that needs a way to clear what was stranded.
+ */
+router.post('/exceptions/purge-orphans', async (req, res) => {
+  try {
+    const removed = await repo.deleteOrphanedExceptions();
+    res.json({ success: true, removed });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
   }
 });
 
