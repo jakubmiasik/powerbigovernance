@@ -14,39 +14,20 @@
           <div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle me-2"></i>No service principals configured. <a href="/settings">Add one in Settings</a> first.</div>
         <% } else { %>
           <div class="row align-items-end g-3">
-            <div class="col-md-5">
+            <div class="col-md-8">
               <label for="spSelect" class="form-label">Select Tenant / Service Principal</label>
-              <select class="form-select" id="spSelect" onchange="onScanSpChanged()">
+              <select class="form-select" id="spSelect">
                 <% servicePrincipals.forEach(function(sp) { %>
                   <option value="<%= sp.id %>" data-eaoid="<%= sp.enterprise_app_object_id || '' %>"><%= sp.name %> (<%= sp.tenant_id %>)</option>
                 <% }) %>
               </select>
             </div>
             <div class="col-md-4">
-              <label class="form-label" for="scanScope">What to scan</label>
-              <select class="form-select" id="scanScope" onchange="onScanScopeChanged()">
-                <option value="tenant">The whole tenant</option>
-                <option value="workspaces">Selected workspaces only</option>
-              </select>
-            </div>
-            <div class="col-md-3">
-              <button class="btn btn-primary w-100" onclick="startAnalysis()"><i class="bi bi-play-fill me-1"></i>Run Analysis</button>
-            </div>
-          </div>
-
-          <div class="mt-3 d-none" id="scanScopePicker">
-            <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
-              <input type="text" class="form-control form-control-sm" style="max-width:240px;"
-                     id="scanWorkspaceFilter" placeholder="Filter workspaces..." oninput="renderScanWorkspaces()">
-              <button class="btn btn-sm btn-outline-secondary" onclick="toggleAllScanWorkspaces(true)">Select all shown</button>
-              <button class="btn btn-sm btn-outline-secondary" onclick="toggleAllScanWorkspaces(false)">Clear</button>
-              <button class="btn btn-sm btn-outline-secondary" onclick="loadScanWorkspaces(true)" title="Read the workspace list from the tenant instead of the last scan">
-                <i class="bi bi-arrow-clockwise me-1"></i>Refresh from tenant
+              <button class="btn btn-primary w-100" onclick="startAnalysis()">
+                <i class="bi bi-play-fill me-1"></i>Run Analysis&hellip;
               </button>
-              <span class="small text-muted ms-auto" id="scanScopeCount">0 selected</span>
+              <div class="form-text text-center">You choose the scope next</div>
             </div>
-            <div class="border rounded p-2" style="max-height:240px; overflow-y:auto;" id="scanWorkspaceList"></div>
-            <div class="form-text" id="scanScopeSource"></div>
           </div>
           <div class="small text-muted mt-2">
             <i class="bi bi-info-circle me-1"></i>The scan sees every workspace through the admin APIs, but reading a
@@ -142,7 +123,6 @@
             <tr>
               <th>ID</th>
               <th>Tenant</th>
-              <th>Scope</th>
               <th>Status</th>
               <th>Workspaces</th>
               <th>Reports</th>
@@ -156,7 +136,7 @@
           </thead>
           <tbody>
             <% if (!runs.length) { %>
-              <tr data-filter="no runs"><td colspan="12" class="text-center text-muted py-3">No analysis runs yet</td></tr>
+              <tr data-filter="no runs"><td colspan="11" class="text-center text-muted py-3">No analysis runs yet</td></tr>
             <% } %>
             <% runs.forEach(function(runItem) {
                  var live = (typeof liveProgress !== 'undefined' && liveProgress) ? liveProgress[runItem.id] : null;
@@ -172,18 +152,20 @@
             %>
               <tr data-filter="<%= [runItem.id, runItem.sp_name || '', runItem.status || '', runItem.run_by || '', runItem.tenant_id || '', runItem.scopeLabel || ''].join(' ').toLowerCase() %>" data-run-id="<%= runItem.id %>">
                 <td><%= runItem.id %></td>
-                <td><strong><%= runItem.sp_name || '-' %></strong></td>
-                <td class="small">
-                  <% if (runItem.scope && runItem.scope.kind === 'workspaces') { %>
-                    <span class="badge bg-info text-dark" title="<%= runItem.scopeLabel %>">
-                      <i class="bi bi-funnel me-1"></i><%= runItem.scope.workspaces.length %> workspace<%= runItem.scope.workspaces.length === 1 ? '' : 's' %>
-                    </span>
-                  <% } else { %>
-                    <span class="badge bg-light text-dark border">Whole tenant</span>
-                  <% } %>
-                  <% if (runItem.schedule_id) { %>
-                    <span class="badge bg-secondary" title="Started by a schedule"><i class="bi bi-clock"></i></span>
-                  <% } %>
+                <td style="min-width: 180px;">
+                  <strong><%= runItem.sp_name || '-' %></strong>
+                  <div class="text-nowrap" style="font-size: 0.7rem;">
+                    <% if (runItem.scope && runItem.scope.kind === 'workspaces') { %>
+                      <span class="text-info" title="<%= runItem.scopeLabel %>">
+                        <i class="bi bi-funnel"></i> Scoped · <%= runItem.scope.workspaces.length %> workspace<%= runItem.scope.workspaces.length === 1 ? '' : 's' %>
+                      </span>
+                    <% } else { %>
+                      <span class="text-muted">Whole tenant</span>
+                    <% } %>
+                    <% if (runItem.schedule_id) { %>
+                      <span class="text-muted" title="Started by a schedule">· <i class="bi bi-clock"></i> scheduled</span>
+                    <% } %>
+                  </div>
                 </td>
                 <td style="min-width: 190px;">
                   <button class="badge bg-<%= statusColor %> border-0 run-status-badge"
@@ -304,32 +286,96 @@
 function escapeHtml(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 
 // ── Choosing what to scan ──
+//
+// One picker, opened as a modal from two places: the Run Analysis button and the
+// schedule form. They were two copies of the same list, the same filter and the
+// same selection handling, which is two places for the behaviour to drift and two
+// places to fix a bug in.
+//
 // The workspace list comes from the last tenant-wide scan by default, which costs
 // nothing. Reading it live is one API call and is the only way to see a workspace
 // created since — or to choose one at all before the first scan has ever run.
-var scanWorkspaces = [];
-var scanSelected = new Set();
-var scanSource = null;
+var scopePicker = {
+  workspaces: [],
+  selected: new Set(),
+  source: null,
+  spId: null,
+  onConfirm: null,
+  // The modal this was opened from, re-shown afterwards. Bootstrap does not
+  // support overlapping modals, so the schedule form is hidden while the picker is
+  // up and brought back when it closes.
+  returnTo: null,
+};
 
-function onScanScopeChanged() {
-  var scoped = document.getElementById('scanScope').value === 'workspaces';
-  document.getElementById('scanScopePicker').classList.toggle('d-none', !scoped);
-  if (scoped && !scanWorkspaces.length) loadScanWorkspaces(false);
+/**
+ * Asks what to scan, then calls back with the answer.
+ *
+ * `scope` seeds the dialog, so reopening it from the schedule form shows what was
+ * already chosen rather than starting again.
+ */
+function openScopePicker(options) {
+  options = options || {};
+  scopePicker.onConfirm = typeof options.onConfirm === 'function' ? options.onConfirm : null;
+  scopePicker.returnTo = options.returnTo || null;
+
+  var scope = options.scope || { kind: 'tenant', workspaces: [] };
+  scopePicker.selected = new Set((scope.workspaces || []).map(function(ws) { return ws.id; }));
+
+  document.getElementById('scopeModalTitle').textContent = options.title || 'What should this scan cover?';
+  var confirmBtn = document.getElementById('scopeConfirmBtn');
+  confirmBtn.innerHTML = options.confirmIcon || '<i class="bi bi-play-fill me-1"></i>';
+  // Appended as text rather than concatenated into innerHTML: the label is a
+  // caller's string and has no business being parsed as markup.
+  confirmBtn.append(options.confirmLabel || 'Run Analysis');
+
+  var kind = scope.kind === 'workspaces' ? 'workspaces' : 'tenant';
+  document.getElementById('scopeKindTenant').checked = kind === 'tenant';
+  document.getElementById('scopeKindWorkspaces').checked = kind === 'workspaces';
+
+  // Names chosen earlier are shown until the live list arrives, so a saved scope
+  // never briefly reads as empty.
+  scopePicker.workspaces = (scope.workspaces || []).map(function(ws) {
+    return { id: ws.id, name: ws.name || ws.id, state: 'Active' };
+  });
+  scopePicker.source = null;
+  document.getElementById('scopeFilter').value = '';
+
+  scopePicker.spId = options.spId;
+  onScopeKindChanged();
+  // Always re-read: a workspace may have appeared since the dialog was last opened,
+  // and the list is either a cheap database read or one API call.
+  loadScopeWorkspaces(false);
+
+  var picker = document.getElementById('scopeModal');
+  var parent = scopePicker.returnTo ? document.getElementById(scopePicker.returnTo) : null;
+  var parentModal = parent ? bootstrap.Modal.getInstance(parent) : null;
+  if (!parentModal) {
+    bootstrap.Modal.getOrCreateInstance(picker).show();
+    return;
+  }
+
+  // Bootstrap does not support overlapping modals: showing this one while the
+  // schedule form is still animating out leaves the two sharing a backdrop, and
+  // the one that finishes hiding takes it — and `body.modal-open` — with it. So
+  // the picker waits until the form is fully hidden.
+  parent.addEventListener('hidden.bs.modal', function once() {
+    parent.removeEventListener('hidden.bs.modal', once);
+    bootstrap.Modal.getOrCreateInstance(picker).show();
+  });
+  parentModal.hide();
 }
 
-function onScanSpChanged() {
-  // A different tenant has different workspaces; keeping the old selection would
-  // send ids that mean nothing to the principal now chosen.
-  scanWorkspaces = [];
-  scanSelected.clear();
-  if (document.getElementById('scanScope').value === 'workspaces') loadScanWorkspaces(false);
+function onScopeKindChanged() {
+  var scoped = document.getElementById('scopeKindWorkspaces').checked;
+  document.getElementById('scopeWorkspacePanel').classList.toggle('d-none', !scoped);
+  updateScopeConfirmState();
 }
 
-async function loadScanWorkspaces(live) {
-  var list = document.getElementById('scanWorkspaceList');
+async function loadScopeWorkspaces(live) {
+  var list = document.getElementById('scopeWorkspaceList');
   list.innerHTML = '<div class="text-center py-3 small text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Loading workspaces...</div>';
   try {
-    var params = new URLSearchParams({ spId: document.getElementById('spSelect').value });
+    var params = new URLSearchParams({ spId: scopePicker.spId });
     if (live) params.set('refresh', '1');
     var resp = await fetch('/analysis/workspaces?' + params.toString());
     var data = await resp.json();
@@ -337,74 +383,116 @@ async function loadScanWorkspaces(live) {
       list.innerHTML = '<div class="alert alert-warning py-2 small mb-0">' + escapeHtml(data.message) + '</div>';
       return;
     }
-    scanWorkspaces = data.workspaces || [];
-    scanSource = data;
-    renderScanWorkspaces();
+    // Anything already selected but absent from this list is kept and marked, so a
+    // saved scope naming a workspace the last scan missed is never silently dropped
+    // from the selection just by opening the dialog.
+    var known = {};
+    (data.workspaces || []).forEach(function(ws) { known[ws.id] = true; });
+    var carried = scopePicker.workspaces.filter(function(ws) {
+      return scopePicker.selected.has(ws.id) && !known[ws.id];
+    }).map(function(ws) { return { id: ws.id, name: ws.name, state: ws.state, notListed: true }; });
+
+    scopePicker.workspaces = carried.concat(data.workspaces || []);
+    scopePicker.source = data;
+    renderScopeWorkspaces();
   } catch (e) {
     list.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeHtml(e.message) + '</div>';
   }
 }
 
-function renderScanWorkspaces() {
-  var list = document.getElementById('scanWorkspaceList');
-  var needle = (document.getElementById('scanWorkspaceFilter').value || '').trim().toLowerCase();
-  var shown = scanWorkspaces.filter(function(ws) {
+function renderScopeWorkspaces() {
+  var list = document.getElementById('scopeWorkspaceList');
+  var needle = (document.getElementById('scopeFilter').value || '').trim().toLowerCase();
+  var shown = scopePicker.workspaces.filter(function(ws) {
     return !needle || (ws.name || '').toLowerCase().indexOf(needle) !== -1;
   });
 
-  if (!scanWorkspaces.length) {
+  if (!scopePicker.workspaces.length) {
     list.innerHTML = '<div class="small text-muted py-2">' +
-      escapeHtml((scanSource && scanSource.message) || 'No workspaces to choose from yet.') + '</div>';
+      escapeHtml((scopePicker.source && scopePicker.source.message) || 'No workspaces to choose from yet.') + '</div>';
   } else {
     list.innerHTML = shown.map(function(ws) {
       return '<div class="form-check">' +
-        '<input class="form-check-input scan-ws" type="checkbox" value="' + escapeHtml(ws.id) + '" id="scanws-' + escapeHtml(ws.id) + '"' +
-        (scanSelected.has(ws.id) ? ' checked' : '') + ' onchange="onScanWorkspaceToggled(this)">' +
-        '<label class="form-check-label small" for="scanws-' + escapeHtml(ws.id) + '">' + escapeHtml(ws.name) +
+        '<input class="form-check-input scope-ws" type="checkbox" value="' + escapeHtml(ws.id) + '" id="scopews-' + escapeHtml(ws.id) + '"' +
+        (scopePicker.selected.has(ws.id) ? ' checked' : '') + ' onchange="onScopeWorkspaceToggled(this)">' +
+        '<label class="form-check-label small" for="scopews-' + escapeHtml(ws.id) + '">' + escapeHtml(ws.name) +
         (ws.state && ws.state !== 'Active' ? ' <span class="text-muted">(' + escapeHtml(ws.state) + ')</span>' : '') +
+        (ws.notListed ? ' <span class="badge bg-warning text-dark">not in the last scan</span>' : '') +
         '</label></div>';
     }).join('') || '<div class="small text-muted py-2">Nothing matches that filter.</div>';
   }
 
-  var source = document.getElementById('scanScopeSource');
-  if (scanSource && scanSource.source === 'scan') {
-    source.textContent = 'From scan #' + scanSource.runId +
-      (scanSource.scannedAt ? ' on ' + new Date(scanSource.scannedAt).toLocaleDateString() : '') +
+  var source = document.getElementById('scopeSource');
+  if (scopePicker.source && scopePicker.source.source === 'scan') {
+    source.textContent = 'From scan #' + scopePicker.source.runId +
+      (scopePicker.source.scannedAt ? ' on ' + new Date(scopePicker.source.scannedAt).toLocaleDateString() : '') +
       ' — refresh to include workspaces created since.';
-  } else if (scanSource && scanSource.source === 'live') {
+  } else if (scopePicker.source && scopePicker.source.source === 'live') {
     source.textContent = 'Read from the tenant just now.';
   } else {
     source.textContent = '';
   }
-  updateScanScopeCount();
+  updateScopeConfirmState();
 }
 
-function onScanWorkspaceToggled(input) {
+function onScopeWorkspaceToggled(input) {
   // Held in a Set rather than read off the DOM, so a selection survives filtering
   // the list — ticking three, searching, and ticking a fourth must keep all four.
-  if (input.checked) scanSelected.add(input.value);
-  else scanSelected.delete(input.value);
-  updateScanScopeCount();
+  if (input.checked) scopePicker.selected.add(input.value);
+  else scopePicker.selected.delete(input.value);
+  updateScopeConfirmState();
 }
 
-function toggleAllScanWorkspaces(checked) {
-  document.querySelectorAll('.scan-ws').forEach(function(box) {
+function toggleAllScopeWorkspaces(checked) {
+  // Only the rows the filter is showing, so "select all" cannot quietly include
+  // workspaces that are not on screen.
+  document.querySelectorAll('.scope-ws').forEach(function(box) {
     box.checked = checked;
-    if (checked) scanSelected.add(box.value);
-    else scanSelected.delete(box.value);
+    if (checked) scopePicker.selected.add(box.value);
+    else scopePicker.selected.delete(box.value);
   });
-  updateScanScopeCount();
+  updateScopeConfirmState();
 }
 
-function updateScanScopeCount() {
-  document.getElementById('scanScopeCount').textContent = scanSelected.size + ' selected';
+function updateScopeConfirmState() {
+  var scoped = document.getElementById('scopeKindWorkspaces').checked;
+  document.getElementById('scopeCount').textContent = scopePicker.selected.size + ' selected';
+  // Confirming a scoped scan with nothing ticked would be refused by the server
+  // anyway; disabling the button says so before the round trip.
+  document.getElementById('scopeConfirmBtn').disabled = scoped && scopePicker.selected.size === 0;
 }
 
-function selectedScanWorkspaces() {
+/** The chosen scope, in the shape the API and the schedule form both take. */
+function currentScopeSelection() {
+  if (!document.getElementById('scopeKindWorkspaces').checked) return { kind: 'tenant', workspaces: [] };
   var byId = {};
-  scanWorkspaces.forEach(function(ws) { byId[ws.id] = ws.name; });
-  return Array.from(scanSelected).map(function(id) { return { id: id, name: byId[id] || null }; });
+  scopePicker.workspaces.forEach(function(ws) { byId[ws.id] = ws.name; });
+  return {
+    kind: 'workspaces',
+    workspaces: Array.from(scopePicker.selected).map(function(id) { return { id: id, name: byId[id] || null }; }),
+  };
 }
+
+function confirmScopePicker() {
+  var scope = currentScopeSelection();
+  var callback = scopePicker.onConfirm;
+  scopePicker.onConfirm = null;
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('scopeModal')).hide();
+  if (callback) callback(scope);
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  var modal = document.getElementById('scopeModal');
+  if (!modal) return;
+  // Whether it was confirmed or dismissed, the form it came from comes back.
+  modal.addEventListener('hidden.bs.modal', function() {
+    if (!scopePicker.returnTo) return;
+    var parent = document.getElementById(scopePicker.returnTo);
+    scopePicker.returnTo = null;
+    // By now this modal is fully gone, so the form can safely take the backdrop.
+    if (parent) bootstrap.Modal.getOrCreateInstance(parent).show();
+  });
+});
 
 var progressInterval = null;
 var activeRunId = null;
@@ -492,14 +580,32 @@ function showRunProgress(runId) {
   startPolling(runId);
 }
 
-async function startAnalysis() {
+/**
+ * Asks what to scan before starting anything.
+ *
+ * The choice used to sit on the page above the button, where it was easy to press
+ * Run Analysis without having read it — and on a large tenant the difference
+ * between the two answers is hours.
+ */
+function startAnalysis() {
+  openScopePicker({
+    title: 'What should this scan cover?',
+    spId: document.getElementById('spSelect').value,
+    scope: lastScanScope,
+    confirmLabel: 'Run Analysis',
+    onConfirm: function(scope) {
+      lastScanScope = scope;
+      runAnalysisWithScope(scope);
+    },
+  });
+}
+
+// Remembered between presses, so someone scanning the same four workspaces twice
+// does not tick them twice.
+var lastScanScope = { kind: 'tenant', workspaces: [] };
+
+async function runAnalysisWithScope(scope) {
   var spId = document.getElementById('spSelect').value;
-  var scope = document.getElementById('scanScope').value;
-  var workspaces = scope === 'workspaces' ? selectedScanWorkspaces() : [];
-  if (scope === 'workspaces' && !workspaces.length) {
-    showToast('Select at least one workspace, or scan the whole tenant.', 'error');
-    return;
-  }
 
   getProgressModal().show();
 
@@ -510,7 +616,7 @@ async function startAnalysis() {
     var response = await fetch('/analysis/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ spId: spId, scope: scope, workspaces: workspaces })
+      body: JSON.stringify({ spId: spId, scope: scope.kind, workspaces: scope.workspaces })
     });
     var data = await response.json();
 
@@ -820,21 +926,20 @@ function showInfoModal(title, html) {
   bootstrap.Modal.getOrCreateInstance(document.getElementById('infoModal')).show();
 }
 
-var scheduleWorkspaces = [];
-var scheduleSelected = new Set();
+// The scope a schedule is being given, held here rather than read off the form:
+// it is chosen in the shared picker, which is a different dialog.
+var scheduleScope = { kind: 'tenant', workspaces: [] };
 
 function openScheduleForm() {
   document.getElementById('schedName').value = '';
-  document.getElementById('schedScope').value = 'tenant';
   document.getElementById('schedType').value = 'daily';
   document.getElementById('schedHour').value = 2;
   document.getElementById('schedMinute').value = 0;
   document.getElementById('schedDay').value = 'Monday';
   document.getElementById('schedResult').innerHTML = '';
-  scheduleSelected.clear();
-  scheduleWorkspaces = [];
+  scheduleScope = { kind: 'tenant', workspaces: [] };
   onScheduleTypeChanged();
-  onScheduleScopeChanged();
+  renderScheduleScope();
   new bootstrap.Modal(document.getElementById('scheduleModal')).show();
 }
 
@@ -845,62 +950,54 @@ function onScheduleTypeChanged() {
   document.getElementById('schedDayWrap').classList.toggle('d-none', type !== 'weekly');
 }
 
-function onScheduleScopeChanged() {
-  var scoped = document.getElementById('schedScope').value === 'workspaces';
-  document.getElementById('schedScopePicker').classList.toggle('d-none', !scoped);
-  if (scoped && !scheduleWorkspaces.length) loadScheduleWorkspaces();
+/** The chosen scope, in words, on the schedule form. */
+function renderScheduleScope() {
+  var target = document.getElementById('schedScopeSummary');
+  if (scheduleScope.kind !== 'workspaces') {
+    target.innerHTML = '<span class="badge bg-light text-dark border">Whole tenant</span>';
+    return;
+  }
+  var names = scheduleScope.workspaces.map(function(ws) { return ws.name || ws.id; });
+  target.innerHTML = '<span class="badge bg-info text-dark"><i class="bi bi-funnel me-1"></i>' +
+    scheduleScope.workspaces.length + ' workspace' + (scheduleScope.workspaces.length === 1 ? '' : 's') + '</span>' +
+    '<span class="small text-muted ms-2">' + escapeHtml(names.slice(0, 4).join(', ')) +
+    (names.length > 4 ? ' and ' + (names.length - 4) + ' more' : '') + '</span>';
 }
 
-async function loadScheduleWorkspaces() {
-  var list = document.getElementById('schedWorkspaceList');
-  list.innerHTML = '<div class="text-center py-3 small text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Loading...</div>';
-  try {
-    var resp = await fetch('/analysis/workspaces?spId=' + encodeURIComponent(document.getElementById('schedSp').value));
-    var data = await resp.json();
-    if (!data.success) { list.innerHTML = '<div class="alert alert-warning py-2 small mb-0">' + escapeHtml(data.message) + '</div>'; return; }
-    scheduleWorkspaces = data.workspaces || [];
-    if (!scheduleWorkspaces.length) {
-      list.innerHTML = '<div class="small text-muted py-2">' + escapeHtml(data.message || 'No workspaces recorded yet. Run a tenant-wide scan first.') + '</div>';
-      return;
-    }
-    renderScheduleWorkspaces();
-  } catch (e) {
-    list.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeHtml(e.message) + '</div>';
+// The same dialog the Run Analysis button uses. Bootstrap does not support
+// overlapping modals, so the schedule form is hidden while the picker is up and
+// brought back when it closes — confirmed or not.
+function chooseScheduleScope() {
+  openScopePicker({
+    title: 'What should this schedule scan?',
+    spId: document.getElementById('schedSp').value,
+    scope: scheduleScope,
+    confirmLabel: 'Use this scope',
+    confirmIcon: '<i class="bi bi-check-lg me-1"></i>',
+    returnTo: 'scheduleModal',
+    onConfirm: function(scope) {
+      scheduleScope = scope;
+      renderScheduleScope();
+    },
+  });
+}
+
+function onScheduleSpChanged() {
+  // A different tenant has different workspaces; keeping the old selection would
+  // store ids that mean nothing to the principal now chosen.
+  if (scheduleScope.kind === 'workspaces') {
+    scheduleScope = { kind: 'tenant', workspaces: [] };
+    renderScheduleScope();
+    showToast('The tenant changed, so the workspace selection was cleared.', 'info');
   }
 }
 
-function renderScheduleWorkspaces() {
-  var needle = (document.getElementById('schedWorkspaceFilter').value || '').trim().toLowerCase();
-  var shown = scheduleWorkspaces.filter(function(ws) {
-    return !needle || (ws.name || '').toLowerCase().indexOf(needle) !== -1;
-  });
-  document.getElementById('schedWorkspaceList').innerHTML = shown.map(function(ws) {
-    return '<div class="form-check">' +
-      '<input class="form-check-input sched-ws" type="checkbox" value="' + escapeHtml(ws.id) + '" id="schedws-' + escapeHtml(ws.id) + '"' +
-      (scheduleSelected.has(ws.id) ? ' checked' : '') + ' onchange="onScheduleWorkspaceToggled(this)">' +
-      '<label class="form-check-label small" for="schedws-' + escapeHtml(ws.id) + '">' + escapeHtml(ws.name) + '</label></div>';
-  }).join('') || '<div class="small text-muted py-2">Nothing matches that filter.</div>';
-  document.getElementById('schedScopeCount').textContent = scheduleSelected.size + ' selected';
-}
-
-function onScheduleWorkspaceToggled(input) {
-  if (input.checked) scheduleSelected.add(input.value);
-  else scheduleSelected.delete(input.value);
-  document.getElementById('schedScopeCount').textContent = scheduleSelected.size + ' selected';
-}
-
 async function saveSchedule() {
-  var scope = document.getElementById('schedScope').value;
-  var byId = {};
-  scheduleWorkspaces.forEach(function(ws) { byId[ws.id] = ws.name; });
-
   var body = {
     name: document.getElementById('schedName').value.trim(),
     spId: document.getElementById('schedSp').value,
-    scope: scope,
-    workspaces: scope === 'workspaces'
-      ? Array.from(scheduleSelected).map(function(id) { return { id: id, name: byId[id] || null }; })
-      : [],
+    scope: scheduleScope.kind,
+    workspaces: scheduleScope.workspaces,
     scheduleType: document.getElementById('schedType').value,
     hour: parseInt(document.getElementById('schedHour').value, 10) || 0,
     minute: parseInt(document.getElementById('schedMinute').value, 10) || 0,
@@ -1008,6 +1105,61 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 
+<!-- What to scan: one dialog, opened from the Run Analysis button and the schedule form -->
+<div class="modal fade" id="scopeModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="scopeModalTitle">What should this scan cover?</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="form-check mb-2">
+          <input class="form-check-input" type="radio" name="scopeKind" id="scopeKindTenant" checked onchange="onScopeKindChanged()">
+          <label class="form-check-label" for="scopeKindTenant">
+            <strong>The whole tenant</strong>
+            <div class="small text-muted">
+              Everything the service principal can see. The complete picture, and the only kind of scan the
+              tenant-wide pages will read — but on a large tenant it is hours of API calls.
+            </div>
+          </label>
+        </div>
+        <div class="form-check mb-2">
+          <input class="form-check-input" type="radio" name="scopeKind" id="scopeKindWorkspaces" onchange="onScopeKindChanged()">
+          <label class="form-check-label" for="scopeKindWorkspaces">
+            <strong>Selected workspaces only</strong>
+            <div class="small text-muted">
+              Much faster, and enough to answer a question about a few workspaces. Governance and Grant Access
+              will keep reading the most recent whole-tenant scan rather than this one.
+            </div>
+          </label>
+        </div>
+
+        <div class="d-none" id="scopeWorkspacePanel">
+          <hr class="my-2">
+          <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
+            <input type="text" class="form-control form-control-sm" style="max-width:220px;"
+                   id="scopeFilter" placeholder="Filter workspaces..." oninput="renderScopeWorkspaces()">
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllScopeWorkspaces(true)">Select all shown</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllScopeWorkspaces(false)">Clear</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadScopeWorkspaces(true)"
+                    title="Read the workspace list from the tenant instead of the last scan">
+              <i class="bi bi-arrow-clockwise me-1"></i>Refresh from tenant
+            </button>
+            <span class="small text-muted ms-auto" id="scopeCount">0 selected</span>
+          </div>
+          <div class="border rounded p-2" style="max-height:300px; overflow-y:auto;" id="scopeWorkspaceList"></div>
+          <div class="form-text" id="scopeSource"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="scopeConfirmBtn" onclick="confirmScopePicker()"></button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Schedule editor -->
 <div class="modal fade" id="scheduleModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-lg">
@@ -1024,7 +1176,7 @@ document.addEventListener('DOMContentLoaded', function() {
           </div>
           <div class="col-md-5">
             <label class="form-label small" for="schedSp">Tenant / service principal</label>
-            <select class="form-select form-select-sm" id="schedSp" onchange="loadScheduleWorkspaces()">
+            <select class="form-select form-select-sm" id="schedSp" onchange="onScheduleSpChanged()">
               <% servicePrincipals.forEach(function(sp) { %>
                 <option value="<%= sp.id %>"><%= sp.name %></option>
               <% }) %>
@@ -1032,13 +1184,6 @@ document.addEventListener('DOMContentLoaded', function() {
           </div>
 
           <div class="col-md-4">
-            <label class="form-label small" for="schedScope">What to scan</label>
-            <select class="form-select form-select-sm" id="schedScope" onchange="onScheduleScopeChanged()">
-              <option value="tenant">The whole tenant</option>
-              <option value="workspaces">Selected workspaces only</option>
-            </select>
-          </div>
-          <div class="col-md-3">
             <label class="form-label small" for="schedType">How often</label>
             <select class="form-select form-select-sm" id="schedType" onchange="onScheduleTypeChanged()">
               <% (scheduleTypes || []).forEach(function(type) { %>
@@ -1085,13 +1230,12 @@ document.addEventListener('DOMContentLoaded', function() {
           </div>
         </div>
 
-        <div class="mt-3 d-none" id="schedScopePicker">
-          <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
-            <input type="text" class="form-control form-control-sm" style="max-width:220px;"
-                   id="schedWorkspaceFilter" placeholder="Filter workspaces..." oninput="renderScheduleWorkspaces()">
-            <span class="small text-muted ms-auto" id="schedScopeCount">0 selected</span>
-          </div>
-          <div class="border rounded p-2" style="max-height:220px; overflow-y:auto;" id="schedWorkspaceList"></div>
+        <div class="mt-3 p-2 border rounded d-flex align-items-center gap-2 flex-wrap">
+          <span class="small fw-bold">What to scan</span>
+          <span id="schedScopeSummary"></span>
+          <button type="button" class="btn btn-sm btn-outline-primary ms-auto" onclick="chooseScheduleScope()">
+            <i class="bi bi-funnel me-1"></i>Change
+          </button>
         </div>
 
         <div class="form-text mt-2">

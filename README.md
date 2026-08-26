@@ -142,7 +142,13 @@ A scan reads the tenant through the admin APIs and stores what it found. Two thi
 
 A scan used to mean the whole tenant, always. On a large tenant that is hours of API calls to answer a question about three workspaces, which is why scanning was something people did rarely rather than something they scheduled.
 
-**What to scan** on `/analysis` offers the whole tenant or a chosen set of workspaces. The picker reads its list from the last completed tenant-wide scan, which costs nothing; *Refresh from tenant* reads it live, which is one API call and the only way to see a workspace created since — or to choose one at all before the first scan has ever run.
+**Run Analysis asks before it does anything.** Pressing it opens a dialog: the whole tenant, or a chosen set of workspaces. The choice used to sit on the page above the button, where it was easy to press Run Analysis without having read it — and on a large tenant the difference between the two answers is hours. The dialog explains what each choice costs, will not let a scoped scan be confirmed with nothing ticked, and remembers what was chosen last so scanning the same four workspaces twice does not mean ticking them twice.
+
+The picker reads its workspace list from the last completed tenant-wide scan, which costs nothing; *Refresh from tenant* reads it live, which is one API call and the only way to see a workspace created since — or to choose one at all before the first scan has ever run. A workspace already selected but absent from that list is kept and marked, so a saved scope naming a workspace the last scan missed is never silently dropped just by opening the dialog.
+
+**The schedule form opens the same dialog.** It was two copies of the same list, filter and selection handling — two places for the behaviour to drift and two places to fix a bug in. Bootstrap does not support overlapping modals, so the schedule form is hidden while the picker is up and brought back when it closes, confirmed or not.
+
+Each run's coverage reads under the tenant name in the run history — `Whole tenant`, or `Scoped · 2 workspaces`, with `· scheduled` when a schedule started it. It had a column of its own, which was a column of mostly "Whole tenant".
 
 A scoped run narrows both the workspaces and the items, so every total it reports describes what was actually scanned rather than the tenant it sits in. It records the workspaces it was asked for **by name as well as id**, because a workspace deleted between runs still has to be nameable in the run history, and by then there is nothing left to look it up in. If a selected workspace is no longer visible to the service principal, the run says so in its progress log instead of quietly covering less — otherwise a nightly scoped scan shrinks week by week and nothing announces it.
 
