@@ -26,7 +26,15 @@ const RECONCILIATION_HELP = {
     },
     {
       title: '3. Choose the values to compare',
-      body: 'Each side can be a column, a SQL expression evaluated by that source (TRIM, CASE WHEN, CAST), or a fixed value to check a column against. Numeric and date comparisons take a tolerance, so differences the business has agreed are immaterial do not raise exceptions.',
+      body: 'Each side can be a column, a SQL expression evaluated by that source (TRIM, CASE WHEN, CAST), a fixed value to check a column against, or an aggregate. Numeric and date comparisons take a tolerance, so differences the business has agreed are immaterial do not raise exceptions.',
+    },
+    {
+      title: '3b. Compare across different grains',
+      body: 'When one system holds detail and the other holds a total — an analytical ledger with one row per posting against a synthetic balance with one row per account — pick "Aggregate (group by key)" on the detailed side: Sum of Amount on the left, the plain Amount field on the right, with Account as the business key. The source database does the grouping, so a million postings are added up where they live rather than being read into this application. The side that aggregates comes back as one row per key, so duplicates cannot arise there — and every value read from that side must aggregate too, or the rule is refused.',
+    },
+    {
+      title: '3c. Say what kind of control it is',
+      body: 'Each rule belongs to a group: Start-to-Start, Start-to-End, End-to-End, Point-to-Point, Left-to-Right, Right-to-Left, Aggregate-to-Detail, Period-over-Period. The group travels with every run, exception and summary, so the dashboard can answer the coverage question no individual rule can: forty Left-to-Right controls and no Right-to-Left one means nothing is checking what the target invented.',
     },
     {
       title: '4. Activate and run',
@@ -52,7 +60,13 @@ const RECONCILIATION_HELP = {
       'Compare: TRIM(ERP.Customer) ↔ Warehouse.CustomerName — shared words, weight 2',
       'Compare: ERP.NetAmount ↔ Warehouse.Net — numeric, tolerance 0.01',
       'Compare: ERP.Currency ↔ fixed value "EUR" — exact, required',
+      'Group: Left-to-Right — everything raised in the ERP must have reached the warehouse.',
       'Duplicates: raise an exception. Incomplete keys: raise an exception.',
+      '',
+      'Second example — an account balance held at two grains:',
+      'Business key: Analytics.Account ↔ Synthetic.Account',
+      'Compare: Sum of Analytics.Amount ↔ Synthetic.Amount — numeric, tolerance 0.01',
+      'Group: Aggregate-to-Detail. The left side is grouped by Account by the source database.',
     ],
     reading: 'A run reporting 1,204 keys compared, 1,180 matched and 24 exceptions means 24 invoices need someone to look. If eighteen of them are "missing from source B", that is one integration problem, not eighteen data problems — which is why the run detail groups by outcome before it lists items.',
   },
@@ -141,7 +155,7 @@ const PREREQUISITES = [
     icon: 'bi-shield-lock',
     items: [
       { text: 'A Fabric Administrator must grant the tenant settings above. The application itself does not need a person to hold the role at run time — but reading tenant settings, and the Grant SP Access action, do act on behalf of an administrator, so that action asks you to sign in as one.', required: true },
-      { text: 'Workspace access for the service principal. The tenant-wide scan sees every workspace through the admin APIs, but reading a lakehouse or warehouse SQL endpoint needs the principal to be a member of the workspace. Use Grant SP Access on the Run Analysis page to add it as Admin where it is missing.', required: true },
+      { text: 'Workspace access for the service principal. The tenant-wide scan sees every workspace through the admin APIs, but reading a lakehouse or warehouse SQL endpoint needs the principal to be a member of the workspace. Settings → Grant Access shows who can reach which workspace and adds the principal as Admin where it is missing.', required: true },
     ],
   },
   {

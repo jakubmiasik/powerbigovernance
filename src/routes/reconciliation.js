@@ -5,7 +5,8 @@ const repo = require('../services/reconciliationRepository');
 const { createPowerBIService } = require('../services/powerbiService');
 const {
   reconcile, OUTCOME_DEFS, STATUS_DEFS, STATUS_BY_KEY, RULE_STATUS,
-  isStatusTransitionAllowed, EXCEPTION_STATUS, OPERAND_KINDS,
+  isStatusTransitionAllowed, EXCEPTION_STATUS, OPERAND_KINDS, AGGREGATE_DEFS,
+  RULE_GROUP_DEFS, RULE_GROUP_BY_KEY, normalizeRuleGroup, ruleGroupLabel,
   planRule, validateCompareFields, normalizeCompareField,
 } = require('../services/reconciliationService');
 const sqlSource = require('../services/sqlSourceService');
@@ -116,9 +117,11 @@ async function loadSourceDatasets(source) {
 router.get('/', async (req, res) => {
   const runId = req.query.runId ? Number.parseInt(req.query.runId, 10) : null;
   const ruleStatus = STATUS_BY_KEY.has(req.query.ruleStatus) ? req.query.ruleStatus : null;
+  const ruleGroup = RULE_GROUP_BY_KEY.has(req.query.ruleGroup) ? req.query.ruleGroup : null;
   const base = {
-    title: 'Reconciliation', user: req.user, selectedRunId: runId, ruleStatus,
+    title: 'Reconciliation', user: req.user, selectedRunId: runId, ruleStatus, ruleGroup,
     outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, helpTopic: RECONCILIATION_HELP,
+    ruleGroupDefs: RULE_GROUP_DEFS, ruleGroupLabel,
   };
   try {
     const [data, runs] = await Promise.all([
@@ -131,7 +134,7 @@ router.get('/', async (req, res) => {
     let rulesOverview = [];
     let orphanedExceptions = 0;
     if (!runId) {
-      rulesOverview = await repo.getRulesOverview({ status: ruleStatus }).catch(err => {
+      rulesOverview = await repo.getRulesOverview({ status: ruleStatus, ruleGroup }).catch(err => {
         console.warn('[Reconciliation] Could not build the rules overview:', err.message);
         return [];
       });
@@ -170,9 +173,15 @@ router.get('/sources/:id/datasets', (req, res) => res.redirect(307, '/quality/so
 router.get('/rules', async (req, res) => {
   try {
     const [rules, owners] = await Promise.all([repo.listRules(), repo.listOwners()]);
-    view(res, 'reconciliation/rules', { title: 'Reconciliation Rules', user: req.user, rules, owners, error: null });
+    view(res, 'reconciliation/rules', {
+      title: 'Reconciliation Rules', user: req.user, rules, owners,
+      ruleGroupDefs: RULE_GROUP_DEFS, ruleGroupLabel, error: null,
+    });
   } catch (err) {
-    view(res, 'reconciliation/rules', { title: 'Reconciliation Rules', user: req.user, rules: [], owners: [], error: err.message });
+    view(res, 'reconciliation/rules', {
+      title: 'Reconciliation Rules', user: req.user, rules: [], owners: [],
+      ruleGroupDefs: RULE_GROUP_DEFS, ruleGroupLabel, error: err.message,
+    });
   }
 });
 
@@ -181,7 +190,7 @@ router.get('/rules/new', async (req, res) => {
     const sources = await repo.listSources();
     view(res, 'reconciliation/rule-form', {
       title: 'New Reconciliation Rule', user: req.user, rule: null, sources, versions: [], error: null,
-      operandKinds: OPERAND_KINDS,
+      operandKinds: OPERAND_KINDS, aggregateDefs: AGGREGATE_DEFS, ruleGroupDefs: RULE_GROUP_DEFS,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -197,7 +206,7 @@ router.get('/rules/:id', async (req, res) => {
     if (!rule) return res.render('error', { title: 'Error', user: req.user, message: 'Rule not found.' });
     view(res, 'reconciliation/rule-form', {
       title: 'Rule: ' + rule.name, user: req.user, rule, sources, versions, error: null,
-      operandKinds: OPERAND_KINDS,
+      operandKinds: OPERAND_KINDS, aggregateDefs: AGGREGATE_DEFS, ruleGroupDefs: RULE_GROUP_DEFS,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -216,6 +225,7 @@ function readRuleBody(body) {
     businessArea: body.businessArea || null,
     owner: body.owner || null,
     priority: body.priority || 'medium',
+    ruleGroup: normalizeRuleGroup(body.ruleGroup),
     sourceAId: body.sourceAId, sourceBId: body.sourceBId,
     datasetA: body.datasetA, datasetB: body.datasetB,
     keyFieldA: body.keyFieldA, keyFieldB: body.keyFieldB,
@@ -430,7 +440,8 @@ router.post('/run', async (req, res) => {
       // The run row is created before execution so an interrupted run is still
       // visible in the history rather than disappearing.
       const runId = await repo.createRun({
-        ruleId, ruleVersion: rule.version, ruleName: rule.name, runBy: actorOf(req),
+        ruleId, ruleVersion: rule.version, ruleName: rule.name, ruleGroup: rule.rule_group,
+        runBy: actorOf(req),
       });
       try {
         const outcome = await executeRule(rule);
@@ -454,9 +465,13 @@ router.post('/run', async (req, res) => {
 router.get('/runs', async (req, res) => {
   try {
     const [runs, rules] = await Promise.all([repo.listRuns({}), repo.listRules()]);
-    view(res, 'reconciliation/runs', { title: 'Reconciliation Runs', user: req.user, runs, rules, error: null });
+    view(res, 'reconciliation/runs', {
+      title: 'Reconciliation Runs', user: req.user, runs, rules, ruleGroupLabel, error: null,
+    });
   } catch (err) {
-    view(res, 'reconciliation/runs', { title: 'Reconciliation Runs', user: req.user, runs: [], rules: [], error: err.message });
+    view(res, 'reconciliation/runs', {
+      title: 'Reconciliation Runs', user: req.user, runs: [], rules: [], ruleGroupLabel, error: err.message,
+    });
   }
 });
 
@@ -471,7 +486,9 @@ router.get('/compare', async (req, res) => {
   const fromId = req.query.from ? Number.parseInt(req.query.from, 10) : null;
   const toId = req.query.to ? Number.parseInt(req.query.to, 10) : null;
 
-  const base = { title: 'Compare Reconciliation Runs', user: req.user, verdictDefs: VERDICT_DEFS };
+  const base = {
+    title: 'Compare Reconciliation Runs', user: req.user, verdictDefs: VERDICT_DEFS, ruleGroupLabel,
+  };
   try {
     const runs = (await repo.listRuns({ limit: 300 })).filter(run => run.status === 'completed');
 
@@ -549,6 +566,7 @@ router.get('/runs/:id', async (req, res) => {
     ]);
     view(res, 'reconciliation/run-detail', {
       title: 'Run #' + id, user: req.user, run, outcomeCounts, exceptionTotal, outcomeDefs: OUTCOME_DEFS,
+      ruleGroupLabel,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -692,6 +710,7 @@ function readExceptionFilters(query) {
     severity: query.severity || null,
     outcome: query.outcome || null,
     ruleId: query.ruleId ? Number.parseInt(query.ruleId, 10) : null,
+    ruleGroup: RULE_GROUP_BY_KEY.has(query.ruleGroup) ? query.ruleGroup : null,
     runId: query.runId ? Number.parseInt(query.runId, 10) : null,
     openOnly: query.status ? false : !all,
   };
@@ -706,12 +725,14 @@ router.get('/exceptions', async (req, res) => {
     view(res, 'reconciliation/exceptions', {
       title: 'Reconciliation Exceptions', user: req.user, exceptions, rules, owners,
       filters: { ...filters, all: req.query.all === '1' },
-      outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, severityLevels: SEVERITY_LEVELS, error: null,
+      outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, severityLevels: SEVERITY_LEVELS,
+      ruleGroupDefs: RULE_GROUP_DEFS, ruleGroupLabel, error: null,
     });
   } catch (err) {
     view(res, 'reconciliation/exceptions', {
       title: 'Reconciliation Exceptions', user: req.user, exceptions: [], rules: [], owners: [],
-      filters: {}, outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, severityLevels: SEVERITY_LEVELS, error: err.message,
+      filters: {}, outcomeDefs: OUTCOME_DEFS, statusDefs: STATUS_DEFS, severityLevels: SEVERITY_LEVELS,
+      ruleGroupDefs: RULE_GROUP_DEFS, ruleGroupLabel, error: err.message,
     });
   }
 });
@@ -898,7 +919,7 @@ router.get('/exceptions/:id', async (req, res) => {
     const current = STATUS_BY_KEY.get(exception.status);
     view(res, 'reconciliation/exception-detail', {
       title: 'Exception #' + id, user: req.user, exception, events,
-      statusDefs: STATUS_DEFS,
+      statusDefs: STATUS_DEFS, ruleGroupLabel,
       allowedNext: current ? current.next : [EXCEPTION_STATUS.OPEN],
       outcomeDefs: OUTCOME_DEFS,
     });

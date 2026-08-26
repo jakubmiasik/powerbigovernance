@@ -21,13 +21,14 @@
   </div>
   <div class="table-responsive">
     <table class="table table-sm table-hover mb-0" id="recon-runs-table">
-      <thead><tr><th>Run</th><th>Rule</th><th>Version</th><th>Status</th><th>Source A</th><th>Source B</th><th>Compared</th><th>Matched</th><th>Exceptions</th><th>Started</th><th>By</th><th></th></tr></thead>
+      <thead><tr><th>Run</th><th>Rule</th><th>Group</th><th>Version</th><th>Status</th><th>Source A</th><th>Source B</th><th>Compared</th><th>Matched</th><th>Exceptions</th><th>Started</th><th>By</th><th></th></tr></thead>
       <tbody>
-        <% if (!runs.length) { %><tr data-filter="none"><td colspan="12" class="text-muted small py-3">No runs yet. Activate a rule and run it from the Rules page.</td></tr><% } %>
+        <% if (!runs.length) { %><tr data-filter="none"><td colspan="13" class="text-muted small py-3">No runs yet. Activate a rule and run it from the Rules page.</td></tr><% } %>
         <% runs.forEach(function(run) { %>
-          <tr data-filter="<%= [run.rule_name || '', run.status, run.run_by || ''].join(' ').toLowerCase() %>">
+          <tr data-filter="<%= [run.rule_name || '', ruleGroupLabel(run.rule_group), run.status, run.run_by || ''].join(' ').toLowerCase() %>">
             <td><a href="/reconciliation/runs/<%= run.id %>">#<%= run.id %></a></td>
             <td><%= run.rule_name || ('Rule #' + run.rule_id) %></td>
+            <td class="small"><span class="badge bg-light text-dark border"><%= ruleGroupLabel(run.rule_group) %></span></td>
             <td class="small">v<%= run.rule_version %></td>
             <td><span class="badge bg-<%= run.status === 'completed' ? 'success' : run.status === 'failed' ? 'danger' : 'secondary' %>"><%= run.status %></span></td>
             <td><%= run.records_a === null || run.records_a === undefined ? '-' : run.records_a %></td>

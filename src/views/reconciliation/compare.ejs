@@ -33,13 +33,13 @@
   <div class="table-responsive">
     <table class="table table-sm table-hover mb-0">
       <thead><tr>
-        <th>Rule</th><th>Latest run</th><th class="text-end">Exceptions</th><th class="text-end">Change</th>
+        <th>Rule</th><th>Group</th><th>Latest run</th><th class="text-end">Exceptions</th><th class="text-end">Change</th>
         <th class="text-end">New</th><th class="text-end">Fixed</th><th class="text-end">Still failing</th>
         <th>Severity now</th><th>Movement</th><th></th>
       </tr></thead>
       <tbody>
         <% if (!(overview || []).length) { %>
-          <tr><td colspan="10" class="text-muted small py-3">No completed runs yet. Run a rule from the <a href="/reconciliation/rules">Rules</a> page first.</td></tr>
+          <tr><td colspan="11" class="text-muted small py-3">No completed runs yet. Run a rule from the <a href="/reconciliation/rules">Rules</a> page first.</td></tr>
         <% } %>
         <% (overview || []).forEach(function(row) {
              var verdict = row.summary ? (verdictDefs[row.summary.verdict] || { label: row.summary.verdict, color: 'secondary' }) : null;
@@ -47,6 +47,7 @@
         %>
           <tr>
             <td class="small"><strong><%= row.ruleName %></strong></td>
+            <td class="small"><span class="badge bg-light text-dark border"><%= ruleGroupLabel(row.ruleGroup) %></span></td>
             <td class="small">
               <% if (row.later) { %>
                 <a href="/reconciliation/runs/<%= row.later.id %>">#<%= row.later.id %></a>

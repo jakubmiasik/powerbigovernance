@@ -12,6 +12,7 @@ A web application to investigate and govern Power BI workspaces, reports, datase
 - **Governance Dashboard** — Tenant-wide metrics: capacity distribution, workspace states, refresh failures
 - **Configurable Connection** — Set up service principal credentials via UI or environment variables
 - **Entra ID Authentication** — Protect the app with Microsoft Entra ID sign-in (optional)
+- **Workspace Access** — See who can reach which workspace across the tenant, spot workspaces nobody administers, and grant the service principal access where it is missing
 - **Data Reconciliation** — Define controls that verify records agree between two business systems, run them, and manage the resulting exceptions through a controlled lifecycle
 - **Master Data Management** — Match records that arrived from many systems, build one golden record per entity, and publish it to a chosen destination with full provenance
 
@@ -130,11 +131,44 @@ src/
 | `GET /capacities` | Available capacities |
 | `POST /admin/workspaces/getInfo` | Workspace scanner |
 
+## Workspace Access
+
+**Settings → Grant Access** (`/settings/access`) answers who can reach which workspace, and adds the service principal where it is missing. The two belong on one page: granting a principal access without seeing the access model is how a service account ends up Admin on every workspace in the tenant, and reviewing access without being able to act on it is a report nobody comes back to.
+
+The **Grant SP Access to Workspaces** button has moved here from the Run Analysis page, which had the action and none of the context.
+
+### Who has access to what
+
+Three views of the same grants, driven by one filter (text, role, principal type):
+
+- **Every grant** — the flat list: workspace, principal, email, type, role.
+- **By workspace** — each workspace expands to show who is in it, with the role mix summarised.
+- **By principal** — each principal expands to show every workspace they can reach, and the strongest role they hold anywhere.
+
+Above them, the facts a grant list cannot show you:
+
+| | |
+|---|---|
+| **No admin at all** | Nobody can administer the workspace, and nobody can grant anyone else access to it either — recoverable only by a tenant administrator |
+| **A single admin** | One departure from the case above |
+| **Access unreadable** | The scan could not read the workspace's access list. That is a gap in the evidence, not a workspace with nobody in it, and the two are counted separately everywhere |
+| **Principals** | How many distinct identities hold access, and how many of them are service principals |
+
+A principal is identified by email where one exists, then by object id, then by display name. Getting that order wrong would split one person across several rows on a case difference, or — worse — merge two service principals that share a display name.
+
+Access is what the selected scan observed, not live state. The page names the scan and its date, and offers the other completed scans, because a report you cannot date is one you have to distrust.
+
+### Granting
+
+The grant dialog now says which workspaces **already have** the principal and pre-selects only the ones that do not, so the safe action no longer means checking each workspace by hand first. It grants to the service principal selected on the page rather than to whichever was configured first — with more than one tenant registered, that silently granted access to the wrong application. Failures are named individually: "granted 38 of 50" without saying which twelve, or why, is not something anyone can act on.
+
+Granting uses the Power BI admin API on behalf of an administrator, so it asks you to sign in as one and returns you to this page afterwards.
+
 ## Data Reconciliation
 
 Verifies that records representing the same business event exist and agree across two systems — an invoice in an ERP and the same invoice in the reporting platform, for example.
 
-Reconciliation and master data sit together under **Quality** in the navigation, because they are two uses of the same registered systems. A system is registered once at `/quality/sources` and both read it; `/quality` is the landing page showing what is configured. Each discipline has a **How it works** button explaining the steps, what it produces, and a worked example.
+Reconciliation and master data sit together under **Quality** in the navigation, because they are two uses of the same registered systems. A system is registered once at `/quality/sources` and both read it; the section's own entry is **Quality Configuration** — `/quality`, the landing page showing what is configured. Each discipline has a **How it works** button explaining the steps, what it produces, and a worked example.
 
 | Page | Purpose |
 |---|---|
@@ -145,6 +179,8 @@ Reconciliation and master data sit together under **Quality** in the navigation,
 | `/reconciliation/runs` | Full run history: what was checked, when, under which rule version, and what it produced. Runs can be deleted individually, per rule, or entirely |
 | `/reconciliation/compare` | Every rule's latest run against its previous one, and any two runs of the same rule side by side |
 | `/reconciliation/exceptions` | Investigate, assign, comment and resolve discrepancies, one at a time or in bulk |
+
+The dataset dropdowns on the rule form and the master data model form carry a **text filter**: a warehouse with several hundred tables is a list nobody can scroll, and typing `sales` narrows it to `dbo.SalesOrder` and `Sales.Header` alike. A dataset already chosen stays selectable even when it falls outside the filter, so typing never silently changes which table a rule reads.
 
 Two kinds of source can be registered:
 
@@ -169,7 +205,32 @@ The comparison page opens on **every rule's latest completed run against the one
 
 Comparing two runs works from the findings each run recorded, not from its totals — twenty exceptions before and twenty after can mean nothing moved, or that twenty were fixed and twenty new ones appeared. Only runs of the same rule can be compared, because different rules check different records. Runs recorded before per-run findings were kept still compare on totals, and the page says so rather than reporting every item as fixed.
 
-Each side of a comparison can be a **field**, a **SQL expression** evaluated by that source (`TRIM(Customer)`, `CASE WHEN Status = 1 THEN 'Posted' ELSE 'Draft' END`), or a **fixed value** to check a column against. Expressions are validated when the rule is saved — statement separators, comments and anything that writes are refused — but they are author-written SQL running against the source, so rule authoring should be treated as a privileged capability.
+Each side of a comparison can be a **field**, a **SQL expression** evaluated by that source (`TRIM(Customer)`, `CASE WHEN Status = 1 THEN 'Posted' ELSE 'Draft' END`), a **fixed value** to check a column against, or an **aggregate**. Expressions are validated when the rule is saved — statement separators, comments and anything that writes are refused — but they are author-written SQL running against the source, so rule authoring should be treated as a privileged capability.
+
+### Comparing across different grains
+
+The two systems often hold the same fact at different grains: an analytical ledger with one row per posting, and a synthetic balance with one row per account. Row-by-row comparison is meaningless there. An **aggregate** operand states the control as it actually reads — `Sum of Amount` on the detailed side against the plain `Amount` field on the summarised side, with `Account` as the business key:
+
+```sql
+-- source A, the analytical ledger
+SELECT [Account] AS [recon_key], SUM([Amount]) AS [recon_c0a] FROM [dbo].[Postings] GROUP BY [Account]
+-- source B, the synthetic balance
+SELECT [Account] AS [recon_key], [Amount] AS [recon_c0b] FROM [dbo].[Balances]
+```
+
+The functions are `sum`, `count`, `count distinct`, `average`, `minimum` and `maximum`, and each wraps either a column or an expression (`SUM(CASE WHEN Reversed = 0 THEN Amount ELSE 0 END)`). The function comes from a fixed list rather than from the rule text, so choosing "sum" can never turn the projection into something else.
+
+The aggregation happens in the source database, not here: it groups far better than this process can, and reading a million postings across the wire to add them up in JavaScript is precisely the cost the grouping exists to avoid. The `GROUP BY` is derived from the projection — everything selected that is not itself an aggregate — so the two cannot drift apart.
+
+An aggregated side returns one row per business key by construction, so duplicates on that side cannot arise and the rule's duplicate handling has nothing to act on there. Every value read from that side must then aggregate as well: a plain column alongside an aggregate would silently join the `GROUP BY` and split one business key into several rows, raising duplicates that exist only because of how the rule was written. The rule form warns while it is being written, and the server refuses it on save, naming the values that need attention.
+
+### Groups of rules
+
+Every rule belongs to a group naming the *kind* of control it is, independent of which systems it happens to touch: **Start-to-Start**, **Start-to-End**, **End-to-End**, **Point-to-Point**, **Left-to-Right**, **Right-to-Left**, **Aggregate-to-Detail**, **Period-over-Period**, or **Ungrouped** for one nobody has classified yet.
+
+The group is denormalised onto runs and exceptions the same way the rule name is, because the exception list filters and groups by it on every page load. It appears on the rule list and form, the exception list and detail, the run list and detail, the comparison overview, and the Rules Overview hierarchy, and both the exception list and the Rules Overview can be filtered to one group. Re-classifying a rule carries through to the exceptions it already raised on the next run that sees them, rather than leaving the estate split between the old label and the new one.
+
+The dashboard gains a **Coverage by Group of Rules** panel showing, per group, how many rules exist, how many are active, and how many exceptions are open. That answers the question no individual rule can: an estate with forty Left-to-Right controls and no Right-to-Left one is checking that nothing was lost and not noticing what the target invented.
 
 Outcomes are match, missing from source A, missing from source B, value mismatch, duplicate record, and invalid or incomplete key. Numeric and date comparisons support tolerances so agreed-immaterial differences do not raise exceptions.
 
@@ -240,7 +301,7 @@ The reconciliation engine is fully normalised. What used to be four JSON columns
 
 | Was | Is | Why |
 |---|---|---|
-| `recon_rules.compare_fields` | `recon_rule_fields` | One row per compare field, with the operand kind and tolerance as columns. Changing one field no longer rewrites the whole definition, and "which rules compare this column" becomes answerable |
+| `recon_rules.compare_fields` | `recon_rule_fields` | One row per compare field, with the operand kind, aggregate function and tolerance as columns. Changing one field no longer rewrites the whole definition, and "which rules compare this column" becomes answerable |
 | `recon_exceptions.values_a` / `values_b` | `recon_exception_values` | One row per field per side. The list and every bulk action work without them, which is the point |
 | `recon_exceptions.differences` | `recon_exception_differences` | One row per disagreeing field, indexed by field — so "which field mismatches most often" is a query |
 | `recon_runs.counts_json` | `recon_run_outcome_counts` | One row per outcome, so trends across runs are a query rather than a parse of every run |
@@ -270,6 +331,10 @@ A golden record's provenance and a run's progress snapshot are each read as a wh
 - A run whose application instance stopped mid-scan is recognised rather than left at "running" forever: once its progress has not been written for `ANALYSIS_HEARTBEAT_STALE_SECONDS` (default 900) it is reported as **interrupted**, and startup marks such runs interrupted in the database.
 - Basic security headers, JSON/form body limits, and a lightweight `/api` rate limiter are enabled without adding runtime dependencies.
 - Bootstrap's contextual table row classes (`table-warning` and friends) paint a pale background and set black text. The app's dark theme colours table cells directly, which wins on the cells and puts light text back — pale on pale. Dark mode now gives those rows dark tints at a specificity that beats the generic cell rule, so a highlighted row stays both highlighted and readable.
+- `analysis_workspace_users` rows were written with nulls for every identity field. A scan compacts each user to `{name, email, role, type}` before storing the run, and the indexer read only the admin API's own names (`displayName`, `emailAddress`, `groupUserAccessRight`, `principalType`) — so the grant count was right and nobody in it could be named. Both shapes are now accepted. **Runs indexed before this need re-indexing** from the Run Analysis page to pick up the identities; the access page falls back to the stored document meanwhile.
+- An aggregate operand is stored as a function plus what the function is applied to (`a_fn`, `a_value_kind`), rather than as `"sum(Amount)"` encoded into the value text — text nothing could query, validate, or re-render back into a form.
+- A rule's group lives on the rule, and is denormalised onto `recon_runs` and `recon_exceptions`. The exception list filters and groups by it on every page load, and joining back to the rule for a label would cost that join on every row.
+- Every reconciliation view is rendered in the test suite with the shape its route supplies. These templates are only reachable through a live database, so a local a route stopped passing — or a column a view started reading — used to appear as a blank page in a browser and nowhere else.
 - Repository queries that share one connection run one after another. A `tedious` connection carries a single request at a time, so issuing several together leaves the first answered and the rest rejected — which is how the reconciliation dashboard came to render empty panels that looked like stale data. A panel that genuinely cannot be read is now named on the page and logged, rather than blanked silently.
 - Startup migrations run statement by statement, so one failing `ALTER` no longer skips the migrations behind it, and a database that is unreachable at startup no longer prevents the capacity scheduler from starting.
 - The capacity scheduler catches up on schedules that came due while the process was restarting or idle. The look-back window is `SCHEDULER_CATCHUP_MINUTES` (default 20, `0` disables it); already-completed runs are recognised from `capacity_schedule_history`, so a catch-up never repeats an action that already ran.

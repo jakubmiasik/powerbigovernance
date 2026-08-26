@@ -210,13 +210,20 @@ const { getDelegatedAuthUrl, acquireDelegatedToken } = require('../services/auth
 const axios = require('axios');
 
 // OAuth flow for granting SP access — reuses migration callback URI
+// Where the delegated sign-in should land. The flow is started from more than one
+// page now, and returning to the wrong one loses whatever the operator had set up
+// before they were sent to sign in.
+const GRANT_RETURN_STATES = { access: 'grant-sp-access', analysis: 'grant-sp' };
+
 router.get('/grant-auth', async (req, res) => {
+  const state = GRANT_RETURN_STATES[req.query.returnTo] || 'grant-sp';
+  const failureTarget = state === 'grant-sp-access' ? '/settings/access' : '/analysis';
   try {
     const redirectUri = `${req.protocol}://${req.get('host')}/migrate/auth/callback`;
-    const authUrl = await getDelegatedAuthUrl(redirectUri, 'grant-sp');
+    const authUrl = await getDelegatedAuthUrl(redirectUri, state);
     res.redirect(authUrl);
   } catch (err) {
-    res.redirect('/analysis?error=' + encodeURIComponent(err.message));
+    res.redirect(failureTarget + '?error=' + encodeURIComponent(err.message));
   }
 });
 
@@ -238,10 +245,18 @@ router.post('/grant-sp-access', async (req, res) => {
 
     const sps = await db.getServicePrincipals();
     if (!sps.length) return res.json({ success: false, message: 'No service principal configured.' });
-    const sp = sps[0];
+
+    // Which principal to add. This used to be whichever was configured first,
+    // regardless of what the page offered — with more than one tenant registered
+    // that silently granted access to the wrong application.
+    const wanted = Number.parseInt(req.body.spId, 10);
+    const sp = (Number.isFinite(wanted) && sps.find(candidate => Number(candidate.id) === wanted)) || sps[0];
 
     if (!sp.enterprise_app_object_id) {
-      return res.json({ success: false, message: 'Enterprise Application Object ID not configured. Go to Settings to add it.' });
+      return res.json({
+        success: false,
+        message: 'No Enterprise Application Object ID recorded for "' + sp.name + '". Add it in Settings before granting access.',
+      });
     }
 
     const results = [];
@@ -267,7 +282,7 @@ router.post('/grant-sp-access', async (req, res) => {
     const failCount = results.filter(r => !r.success).length;
     res.json({
       success: true,
-      message: `Granted access to ${successCount} workspace(s).${failCount > 0 ? ` ${failCount} failed.` : ''}`,
+      message: `Granted ${sp.name} access to ${successCount} workspace(s).${failCount > 0 ? ` ${failCount} failed.` : ''}`,
       results,
     });
   } catch (err) {

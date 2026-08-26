@@ -49,8 +49,14 @@
         </select>
       </div>
       <div class="col-md-4">
-        <label class="form-label small" for="sourceDataset">Raw table — all records, all sources</label>
+        <label class="form-label small" for="datasetFilter">Raw table — all records, all sources</label>
+        <div class="input-group input-group-sm mb-1">
+          <span class="input-group-text"><i class="bi bi-search"></i></span>
+          <input type="text" class="form-control" id="datasetFilter" placeholder="Filter by schema or table"
+                 oninput="renderDatasetOptions()" disabled>
+        </div>
         <select class="form-select form-select-sm" id="sourceDataset" onchange="onDatasetChange()"><option value="">Select a source first</option></select>
+        <div class="form-text" id="datasetCount"></div>
       </div>
       <div class="col-md-2">
         <label class="form-label small" for="rowLimit">Row limit</label>
@@ -366,14 +372,43 @@ async function loadDatasets(which) {
       select.innerHTML = '<option value="">' + (data.message || 'No tables found') + '</option>';
       return;
     }
-    select.innerHTML = '<option value="">Select...</option>' + datasets.map(function(ds) {
-      return '<option value="' + escapeAttr(ds.name) + '"' + (ds.name === savedSourceDataset ? ' selected' : '') + '>' +
-        escapeAttr(ds.name) + ' (' + ds.fields.length + ' field(s))</option>';
-    }).join('');
+    document.getElementById('datasetFilter').disabled = false;
+    renderDatasetOptions(savedSourceDataset);
     onDatasetChange();
   } catch (e) {
     select.innerHTML = '<option value="">' + e.message + '</option>';
   }
+}
+
+/**
+ * Draws the raw-table list, narrowed by whatever has been typed.
+ *
+ * A lakehouse holding every source system's records has far more tables than
+ * anyone can scroll past; the filter matches anywhere in "schema.table". A table
+ * already chosen stays in the list even when it falls outside the filter, so
+ * typing never silently changes which table the model reads.
+ */
+function renderDatasetOptions(preferred) {
+  var select = document.getElementById('sourceDataset');
+  var current = preferred !== undefined ? preferred : select.value;
+  var needle = (document.getElementById('datasetFilter').value || '').trim().toLowerCase();
+
+  var matches = needle
+    ? datasets.filter(function(ds) { return String(ds.name || '').toLowerCase().indexOf(needle) !== -1; })
+    : datasets;
+
+  if (current && !matches.some(function(ds) { return ds.name === current; })) {
+    matches = datasets.filter(function(ds) { return ds.name === current; }).concat(matches);
+  }
+
+  select.innerHTML = '<option value="">Select...</option>' + matches.map(function(ds) {
+    return '<option value="' + escapeAttr(ds.name) + '"' + (ds.name === current ? ' selected' : '') + '>' +
+      escapeAttr(ds.name) + ' (' + ds.fields.length + ' field(s))</option>';
+  }).join('');
+
+  document.getElementById('datasetCount').textContent = needle
+    ? matches.length + ' of ' + datasets.length + ' matching "' + needle + '"'
+    : datasets.length + ' table(s)';
 }
 
 function onDatasetChange() {

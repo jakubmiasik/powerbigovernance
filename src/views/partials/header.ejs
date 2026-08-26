@@ -62,8 +62,8 @@
       </a>
 
       <p class="nav-section-title">Quality</p>
-      <a href="/quality" class="sidebar-link <%= pagePath === '/quality' || pagePath.startsWith('/quality/') ? 'active' : '' %>" title="Data Quality">
-        <i class="bi bi-patch-check"></i> <span>Quality</span>
+      <a href="/quality" class="sidebar-link <%= pagePath === '/quality' || pagePath.startsWith('/quality/') ? 'active' : '' %>" title="Quality Configuration">
+        <i class="bi bi-patch-check"></i> <span>Quality Configuration</span>
       </a>
       <a href="/reconciliation" class="sidebar-link <%= pagePath.startsWith('/reconciliation') ? 'active' : '' %>" title="Data Reconciliation">
         <i class="bi bi-clipboard2-check"></i> <span>Reconciliation</span>
@@ -73,8 +73,11 @@
       </a>
 
       <p class="nav-section-title">Settings</p>
-      <a href="/settings" class="sidebar-link <%= pagePath.startsWith('/settings') ? 'active' : '' %>" title="Configuration">
+      <a href="/settings" class="sidebar-link <%= pagePath === '/settings' ? 'active' : '' %>" title="Configuration">
         <i class="bi bi-gear"></i> <span>Configuration</span>
+      </a>
+      <a href="/settings/access" class="sidebar-link <%= pagePath.startsWith('/settings/access') ? 'active' : '' %>" title="Grant Access">
+        <i class="bi bi-key"></i> <span>Grant Access</span>
       </a>
     </nav>
 

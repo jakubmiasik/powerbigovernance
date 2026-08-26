@@ -246,7 +246,14 @@ function latestPairsByRule(runs) {
     if (run.status !== 'completed') continue;
     const key = Number(run.rule_id);
     if (!byRule.has(key)) {
-      byRule.set(key, { ruleId: key, ruleName: run.rule_name || 'Rule #' + key, runs: [] });
+      byRule.set(key, {
+        ruleId: key,
+        ruleName: run.rule_name || 'Rule #' + key,
+        // The kind of control, carried on the run row so the overview can group by
+        // it without a second read of the rules table.
+        ruleGroup: run.rule_group || 'ungrouped',
+        runs: [],
+      });
     }
     byRule.get(key).runs.push(run);
   }
@@ -258,6 +265,7 @@ function latestPairsByRule(runs) {
     pairs.push({
       ruleId: entry.ruleId,
       ruleName: entry.ruleName,
+      ruleGroup: entry.ruleGroup,
       later: ordered[0] || null,
       earlier: ordered[1] || null,
       runCount: ordered.length,
@@ -298,6 +306,7 @@ function compareAcrossRules({ runs, findings, sampleLimit = 5 }) {
     const row = {
       ruleId: pair.ruleId,
       ruleName: pair.ruleName,
+      ruleGroup: pair.ruleGroup,
       later: pair.later,
       earlier: pair.earlier,
       runCount: pair.runCount,

@@ -12,6 +12,7 @@
     <h2><i class="bi bi-exclamation-triangle me-2"></i><%= exception.business_key %></h2>
     <p class="text-muted mb-0">
       <%= exception.rule_name || ('Rule #' + exception.rule_id) %>
+      · <span class="badge bg-light text-dark border"><%= ruleGroupLabel(exception.rule_group) %></span>
       <% if (exception.business_area) { %> · <%= exception.business_area %><% } %>
       · first seen <%= exception.first_seen_at ? new Date(exception.first_seen_at).toLocaleString() : '-' %>
       · seen <%= exception.occurrence_count %>×

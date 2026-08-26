@@ -131,6 +131,7 @@ app.get('/api/user', (req, res) => {
 // Routes
 const indexRoutes = require('./routes/index');
 const configRoutes = require('./routes/config');
+const accessRoutes = require('./routes/access');
 const workspaceRoutes = require('./routes/workspaces');
 const governanceRoutes = require('./routes/governance');
 const analysisRoutes = require('./routes/analysis');
@@ -143,6 +144,7 @@ const pipelineRoutes = require('./routes/pipelines');
 const tenantSettingsRoutes = require('./routes/tenantSettings');
 
 app.use('/', indexRoutes);
+app.use('/settings/access', accessRoutes);
 app.use('/settings', configRoutes);
 app.use('/workspaces', workspaceRoutes);
 app.use('/governance', governanceRoutes);
