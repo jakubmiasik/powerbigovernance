@@ -12,6 +12,7 @@ A web application to investigate and govern Power BI workspaces, reports, datase
 - **Governance Dashboard** — Tenant-wide metrics: capacity distribution, workspace states, refresh failures
 - **Configurable Connection** — Set up service principal credentials via UI or environment variables
 - **Entra ID Authentication** — Protect the app with Microsoft Entra ID sign-in (optional)
+- **Scoped and Scheduled Scans** — Scan the whole tenant or just the workspaces you care about, on demand or on a schedule
 - **Workspace Access** — See who can reach which workspace across the tenant, spot workspaces nobody administers, and grant the service principal access where it is missing
 - **Data Reconciliation** — Define controls that verify records agree between two business systems, run them, and manage the resulting exceptions through a controlled lifecycle
 - **Master Data Management** — Match records that arrived from many systems, build one golden record per entity, and publish it to a chosen destination with full provenance
@@ -84,6 +85,8 @@ npm run dev
 | `POWERBI_CLIENT_SECRET` | Service principal client secret |
 | `POWERBI_TENANT_ID` | Tenant ID for Power BI API |
 | `SESSION_SECRET` | Express session secret |
+| `SCHEDULER_CATCHUP_MINUTES` | How far back a tick looks for a schedule that came due (default 240) — applies to capacity actions and analysis scans alike |
+| `SCHEDULER_TICK_MS` | Scheduler tick interval (default 60000) |
 | `REQUIRE_AUTH` | Force (`true`) or disable (`false`) the in-app sign-in requirement. Defaults to enabled whenever the app runs on Azure App Service. |
 | `PORT` | Server port (default: 3000) |
 
@@ -130,6 +133,37 @@ src/
 | `GET /dashboards/{id}/tiles` | Dashboard tiles |
 | `GET /capacities` | Available capacities |
 | `POST /admin/workspaces/getInfo` | Workspace scanner |
+
+## Running an Analysis
+
+A scan reads the tenant through the admin APIs and stores what it found. Two things about *when* and *how much*:
+
+### Scoping a scan
+
+A scan used to mean the whole tenant, always. On a large tenant that is hours of API calls to answer a question about three workspaces, which is why scanning was something people did rarely rather than something they scheduled.
+
+**What to scan** on `/analysis` offers the whole tenant or a chosen set of workspaces. The picker reads its list from the last completed tenant-wide scan, which costs nothing; *Refresh from tenant* reads it live, which is one API call and the only way to see a workspace created since — or to choose one at all before the first scan has ever run.
+
+A scoped run narrows both the workspaces and the items, so every total it reports describes what was actually scanned rather than the tenant it sits in. It records the workspaces it was asked for **by name as well as id**, because a workspace deleted between runs still has to be nameable in the run history, and by then there is nothing left to look it up in. If a selected workspace is no longer visible to the service principal, the run says so in its progress log instead of quietly covering less — otherwise a nightly scoped scan shrinks week by week and nothing announces it.
+
+Choosing "selected workspaces" and selecting none is refused rather than run tenant-wide. It normalises to the whole tenant internally (a scan of nothing is never what anyone meant), so the request is validated against what was *asked for*, not against the normalised result.
+
+**Everything reading the tenant as a whole prefers the last tenant-wide run.** The Grant Access page, and the workspace list behind the grant dialog, would not be *wrong* about a scoped run's three workspaces — they would be wrong about every other workspace in the tenant, and silently. Pick any run from the dropdown to see it, and the page states the coverage when the run you are looking at is scoped. Runs recorded before scopes existed have no scope column and are treated as tenant-wide, which is what they were.
+
+### Scheduled scans
+
+A governance picture is only worth trusting if it refreshes without somebody remembering to press a button, and a scoped scan is short enough to run nightly. Schedules live on `/analysis`: a name, a service principal, a scope, a frequency (hourly, daily, weekdays, weekly), a time and a timezone.
+
+They share the existing scheduler's tick rather than running their own — a second interval would mean a second self-healing path, a second catch-up window and two things to explain when nothing ran. The timing logic (including the daylight-saving-correct catch-up walk) moved into `scheduleDueService` so a capacity action and a scan cannot disagree about what "daily at 07:00 Europe/Warsaw" means. Saving a schedule echoes back the UTC minute it will actually fire at, because "07:00 Europe/Warsaw" and "which minute will this land on tonight" are different questions.
+
+| | |
+|---|---|
+| **Catch-up** | A schedule due while the worker was recycled or idled out is still run, up to `SCHEDULER_CATCHUP_MINUTES` (default 240) late, and the log says how late |
+| **No stacking** | A schedule never starts a scan on top of one of its own that is still running. It records the skip and names the run in the way. Two *different* schedules may run at once — scoped schedules per business area are meant to |
+| **No double-start** | Dedupe is against the database, not memory, so a restart or a second worker mid-window cannot replay a scan |
+| **Run now** | Goes through the same executor the scheduler uses, so testing a schedule cannot behave differently from the schedule itself — including refusing to stack |
+
+The scheduler cannot import the analysis route (that would be a cycle, and would make it untestable without an Express app), and the runner has to stay with the route because it owns the in-memory progress map. So the route registers its runner with `analysisLauncher` at load and the scheduler asks that.
 
 ## Workspace Access
 
@@ -335,6 +369,7 @@ A golden record's provenance and a run's progress snapshot are each read as a wh
 - An aggregate operand is stored as a function plus what the function is applied to (`a_fn`, `a_value_kind`), rather than as `"sum(Amount)"` encoded into the value text — text nothing could query, validate, or re-render back into a form.
 - A rule's group lives on the rule, and is denormalised onto `recon_runs` and `recon_exceptions`. The exception list filters and groups by it on every page load, and joining back to the rule for a label would cost that join on every row.
 - Every reconciliation view is rendered in the test suite with the shape its route supplies. These templates are only reachable through a live database, so a local a route stopped passing — or a column a view started reading — used to appear as a blank page in a browser and nowhere else.
+- Analysis runs carry their scope (`scope_kind`, `scope_workspaces`) and, when a schedule started them, `schedule_id`. Storing the chosen workspaces as a document is deliberate: it is read as a whole, by one owner, and never filtered on — the same reasoning as the other things left as JSON below.
 - Repository queries that share one connection run one after another. A `tedious` connection carries a single request at a time, so issuing several together leaves the first answered and the rest rejected — which is how the reconciliation dashboard came to render empty panels that looked like stale data. A panel that genuinely cannot be read is now named on the page and logged, rather than blanked silently.
 - Startup migrations run statement by statement, so one failing `ALTER` no longer skips the migrations behind it, and a database that is unreachable at startup no longer prevents the capacity scheduler from starting.
 - The capacity scheduler catches up on schedules that came due while the process was restarting or idle. The look-back window is `SCHEDULER_CATCHUP_MINUTES` (default 20, `0` disables it); already-completed runs are recognised from `capacity_schedule_history`, so a catch-up never repeats an action that already ran.

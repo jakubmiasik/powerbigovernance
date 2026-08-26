@@ -9,6 +9,14 @@ const { buildItemDetails } = require('../services/itemDetailsService');
 const { buildWorkspaceAssignments, lookupAssignment } = require('../services/deploymentPipelineService');
 const runProgress = require('../services/runProgressService');
 const analysisModel = require('../services/analysisModelRepository');
+const launcher = require('../services/analysisLauncher');
+const analysisSchedules = require('../services/analysisScheduleService');
+const {
+  normalizeScope, scopeFromRow, scopeToRow, applyScope, filterItemsToScope,
+  describeScope, requestedWorkspaceScope, SCOPE_KIND,
+} = require('../services/analysisScopeService');
+const { SCHEDULE_TYPES } = require('../services/scheduleDueService');
+const { convertScheduleToUtc } = require('../services/scheduleTimeService');
 
 const activeAnalyses = new Map();
 
@@ -156,17 +164,59 @@ router.get('/', async (req, res) => {
       liveProgress[runId] = runProgress.summarize(progress, { stallSeconds: STALL_SECONDS });
     }
 
+    const schedules = (await db.getAnalysisSchedules().catch(err => {
+      console.warn('[Analysis] Could not read analysis schedules:', err.message);
+      return [];
+    })).map(analysisSchedules.describeStoredSchedule);
+
     res.render('analysis/index', {
       title: 'Run Analysis',
       user: req.user,
-      runs,
+      runs: runs.map(run => ({ ...run, scope: scopeFromRow(run), scopeLabel: describeScope(scopeFromRow(run)) })),
       servicePrincipals,
       liveProgress,
+      schedules,
+      scheduleTypes: SCHEDULE_TYPES,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
   }
 });
+
+/**
+ * Creates the run record and starts the scan in the background.
+ *
+ * One path for the button, the scheduler and anything later. Resolves as soon as
+ * the run exists rather than when the scan finishes — a tenant scan takes minutes
+ * to hours, and a caller that waited for one would be holding a request open or,
+ * worse, a scheduler tick.
+ */
+async function startRun({ sp, scope, runBy, scheduleId = null, authOptions = {} }) {
+  const normalized = normalizeScope(scope);
+  const stored = scopeToRow(normalized);
+
+  const runId = await db.createAnalysisRun({
+    spId: sp.id,
+    spName: sp.name,
+    tenantId: sp.tenant_id,
+    runBy: runBy || 'anonymous',
+    scopeKind: stored.scopeKind,
+    scopeWorkspaces: stored.scopeWorkspaces,
+    scheduleId,
+  });
+  if (!runId) throw new Error('Could not create the analysis run record in the database.');
+
+  // Deliberately not awaited: the scan runs on after this returns, and its progress
+  // is followed through the progress endpoints.
+  runAnalysis(runId, sp, authOptions, normalized);
+  return { runId, scope: normalized };
+}
+
+// The scheduler cannot import this module — that would be a cycle, and would make
+// it untestable without an Express app. The runner lives here because it owns the
+// in-memory progress map, so it registers itself instead.
+launcher.register(({ sp, scope, runBy, scheduleId }) =>
+  startRun({ sp, scope, runBy, scheduleId }));
 
 router.post('/run', async (req, res) => {
   try {
@@ -175,21 +225,87 @@ router.post('/run', async (req, res) => {
     const requestedSpId = Number.parseInt(req.body ? req.body.spId : null, 10);
     const sp = (Number.isFinite(requestedSpId) && sps.find(s => parseInt(s.id, 10) === requestedSpId)) || sps[0];
 
-    const runId = await db.createAnalysisRun({
-      spId: sp.id,
-      spName: sp.name,
-      tenantId: sp.tenant_id,
-      runBy: req.user ? req.user.name : 'anonymous',
-    });
-    if (!runId) {
-      return res.json({ success: false, message: 'Could not create the analysis run record in the database.' });
+    const requested = { kind: req.body ? req.body.scope : null, workspaceIds: req.body ? req.body.workspaces : [] };
+    const scope = normalizeScope(requested);
+    // Asking for selected workspaces and selecting none must not quietly become a
+    // scan of the whole tenant — on a large tenant that is hours nobody asked for.
+    if (requestedWorkspaceScope(requested) && !scope.workspaces.length) {
+      return res.json({ success: false, message: 'Select at least one workspace, or choose the whole tenant.' });
     }
 
-    runAnalysis(runId, sp, {
-      keyVaultDelegatedToken: req.session?.keyVaultDelegatedToken?.token || null,
-      keyVaultAuthUrl: `/settings/kv/auth?spId=${encodeURIComponent(String(sp.id))}&returnTo=${encodeURIComponent('/analysis')}`,
+    const { runId } = await startRun({
+      sp,
+      scope,
+      runBy: req.user ? req.user.name : 'anonymous',
+      authOptions: {
+        keyVaultDelegatedToken: req.session?.keyVaultDelegatedToken?.token || null,
+        keyVaultAuthUrl: `/settings/kv/auth?spId=${encodeURIComponent(String(sp.id))}&returnTo=${encodeURIComponent('/analysis')}`,
+      },
     });
-    res.json({ success: true, runId });
+    res.json({ success: true, runId, scope: describeScope(scope) });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * The workspaces to choose from when scoping a scan.
+ *
+ * Read from the last completed run by default, which costs nothing — the same
+ * trick the grant dialog uses. `refresh=1` asks the tenant, which is the only way
+ * to see a workspace created since the last scan, and the only way to choose one
+ * at all before the first scan has ever run.
+ */
+router.get('/workspaces', async (req, res) => {
+  try {
+    const wantsLive = req.query.refresh === '1' || req.query.refresh === 'true';
+    const sps = await db.getServicePrincipals();
+    const requestedSpId = Number.parseInt(req.query.spId, 10);
+    const sp = (Number.isFinite(requestedSpId) && sps.find(s => parseInt(s.id, 10) === requestedSpId)) || sps[0];
+
+    if (wantsLive) {
+      if (!sp) return res.json({ success: false, message: 'No service principal configured.' });
+      const pbi = createPowerBIService(sp);
+      const live = await pbi.getWorkspaces();
+      return res.json({
+        success: true,
+        source: 'live',
+        workspaces: live
+          .map(ws => ({ id: ws.id, name: ws.displayName || ws.name || 'Unnamed', state: ws.state || 'Active' }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+      });
+    }
+
+    // Only a tenant-wide run can offer the full list to choose from; a scoped one
+    // would quietly hide every workspace it did not itself cover.
+    const runs = await db.getAnalysisRuns();
+    const run = require('../services/analysisScopeService').pickTenantWideRun(runs);
+    if (!run) {
+      return res.json({
+        success: true, source: 'none', workspaces: [],
+        message: 'No completed tenant-wide scan yet, so there is no stored workspace list. Refresh to read them from the tenant.',
+      });
+    }
+
+    let workspaces = (await analysisModel.listRunWorkspaces(run.id).catch(() => []))
+      .map(row => ({ id: row.workspace_id, name: row.name || 'Unnamed', state: row.state || 'Active' }));
+
+    if (!workspaces.length) {
+      // A run from before indexing existed still has its document.
+      const full = await db.getAnalysisRunById(run.id);
+      let results = null;
+      try { results = full && full.results_json ? JSON.parse(full.results_json) : null; } catch { results = null; }
+      workspaces = ((results && results.workspaces) || [])
+        .map(ws => ({ id: ws.id, name: ws.name || 'Unnamed', state: ws.state || 'Active' }));
+    }
+
+    res.json({
+      success: true,
+      source: 'scan',
+      runId: run.id,
+      scannedAt: run.started_at,
+      workspaces: workspaces.sort((a, b) => a.name.localeCompare(b.name)),
+    });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
@@ -476,10 +592,12 @@ router.post('/delete/:runId', async (req, res) => {
   }
 });
 
-async function runAnalysis(runId, sp, authOptions = {}) {
+async function runAnalysis(runId, sp, authOptions = {}, scopeInput = null) {
+  const scope = normalizeScope(scopeInput);
   const progress = runProgress.createProgress({ runId, spName: sp.name || null });
   activeAnalyses.set(runId, progress);
-  addProgressEvent(progress, 'info', 'Analysis started for ' + (sp.name || 'service principal'));
+  addProgressEvent(progress, 'info', 'Analysis started for ' + (sp.name || 'service principal')
+    + ' — ' + describeScope(scope));
   await persistProgress(progress, { force: true });
 
   // Everything below runs inside the reporter, so retries and throttling anywhere in
@@ -489,18 +607,53 @@ async function runAnalysis(runId, sp, authOptions = {}) {
     const pbi = createPowerBIService(sp, authOptions);
 
     beginPhase(progress, 'workspaces', { message: 'Fetching workspaces...' });
-    const workspaces = await pbi.getWorkspaces();
+    const tenantWorkspaces = await pbi.getWorkspaces();
     ensureNotCancelled(progress);
+
+    // The workspace list is always read in full — it is one call, and a scoped run
+    // still has to know whether what it was asked for is still there.
+    const scoped = applyScope(tenantWorkspaces, scope);
+    const workspaces = scoped.selected;
+    if (scope.kind === SCOPE_KIND.WORKSPACES) {
+      addProgressEvent(progress, 'info',
+        'Scoped to ' + workspaces.length + ' of ' + tenantWorkspaces.length + ' workspace(s)');
+      // A scheduled scoped run whose workspace was deleted, renamed away or moved
+      // out of the principal's reach would otherwise keep succeeding while quietly
+      // covering less every week.
+      if (scoped.missing.length) {
+        addProgressEvent(progress, 'warning', scoped.missing.length + ' selected workspace(s) no longer visible to this service principal: '
+          + scoped.missing.map(entry => entry.name || entry.id).slice(0, 5).join(', '));
+      }
+      if (!workspaces.length) {
+        throw new Error('None of the selected workspaces are visible to this service principal, so there is nothing to scan.');
+      }
+    }
+
     setProgress(progress, { total: workspaces.length });
-    completePhase(progress, 'workspaces', { note: workspaces.length + ' found' });
-    addProgressEvent(progress, 'info', 'Found ' + workspaces.length + ' workspaces');
+    completePhase(progress, 'workspaces', {
+      note: scope.kind === SCOPE_KIND.WORKSPACES
+        ? workspaces.length + ' of ' + tenantWorkspaces.length + ' selected'
+        : workspaces.length + ' found',
+    });
+    addProgressEvent(progress, 'info', 'Scanning ' + workspaces.length + ' workspace(s)');
 
     beginPhase(progress, 'items', { message: 'Fetching all items via Fabric Admin API...' });
-    const allItems = await pbi.getAllItems();
+    const tenantItems = await pbi.getAllItems();
     ensureNotCancelled(progress);
-    completePhase(progress, 'items', { note: allItems.length + ' found' });
+
+    // Narrowed here rather than filtered downstream, so every total below counts
+    // what was actually scanned. A scoped run reporting the tenant's item count
+    // would be worse than not scoping at all.
+    const allItems = scope.kind === SCOPE_KIND.WORKSPACES
+      ? filterItemsToScope(tenantItems, workspaces)
+      : tenantItems;
+    completePhase(progress, 'items', {
+      note: scope.kind === SCOPE_KIND.WORKSPACES
+        ? allItems.length + ' in scope of ' + tenantItems.length
+        : allItems.length + ' found',
+    });
     setProgress(progress, { message: 'Found ' + allItems.length + ' items. Processing...' });
-    addProgressEvent(progress, 'info', 'Found ' + allItems.length + ' items');
+    addProgressEvent(progress, 'info', 'Found ' + allItems.length + ' items in scope');
 
     beginPhase(progress, 'capacities', { message: 'Fetching capacities...' });
     const capacities = await pbi.getCapacities().catch(() => []);
@@ -768,6 +921,16 @@ async function runAnalysis(runId, sp, authOptions = {}) {
     }
 
     const summary = {
+      // What this run covered, alongside the document it produced. A reader that
+      // only has results_json must still be able to tell three workspaces from a
+      // tenant.
+      scope: {
+        kind: scope.kind,
+        workspaces: scope.workspaces,
+        label: describeScope(scope),
+        tenantWorkspaceCount: tenantWorkspaces.length,
+        missingWorkspaces: scoped.missing,
+      },
       totalWorkspaces: workspaces.length,
       totalItems: allItems.length,
       totalReports,
@@ -1015,11 +1178,15 @@ async function runAnalysis(runId, sp, authOptions = {}) {
   if (typeof evict.unref === 'function') evict.unref();
 }
 
-// Get workspace list for grant-access modal (from latest completed run)
+// Get workspace list for grant-access modal (from the latest completed run)
 router.get('/workspaces-for-grant', async (req, res) => {
   try {
     const runs = await db.getAnalysisRuns();
-    const lastCompleted = runs.find(r => r.status === 'completed');
+    // A scoped scan would offer only the workspaces it covered, which is the wrong
+    // list to grant access from — the ones missing the principal are exactly the
+    // ones a scan might not have reached.
+    const lastCompleted = require('../services/analysisScopeService').pickTenantWideRun(runs)
+      || runs.find(r => r.status === 'completed');
     if (!lastCompleted) return res.json({ success: false, message: 'No completed analysis run found. Run an analysis first.' });
 
     const run = await db.getAnalysisRunById(lastCompleted.id);
@@ -1035,6 +1202,123 @@ router.get('/workspaces-for-grant', async (req, res) => {
     }));
 
     res.json({ success: true, workspaces, spObjectId: eaoid });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ── Scheduled scans ──
+
+function readScheduleBody(body, req) {
+  return {
+    name: (body.name || '').trim(),
+    spId: body.spId,
+    scope: { kind: body.scope, workspaceIds: body.workspaces || [] },
+    scheduleType: body.scheduleType,
+    hour: body.hour,
+    minute: body.minute,
+    day: body.day,
+    timezone: body.timezone,
+    enabled: body.enabled !== false && body.enabled !== 'false',
+    createdBy: req.user ? (req.user.name || req.user.email) : null,
+  };
+}
+
+/**
+ * The UTC time a schedule will actually fire at, echoed back on save.
+ *
+ * The scheduler works in the schedule's own timezone, but "07:00 Europe/Warsaw"
+ * and "which minute will this land on tonight" are different questions, and an
+ * operator setting up an overnight scan deserves the second one answered.
+ */
+function utcEchoFor(schedule) {
+  try {
+    const converted = convertScheduleToUtc({
+      scheduleType: schedule.scheduleType,
+      hour: schedule.hour,
+      minute: schedule.minute,
+      day: schedule.day,
+      timezone: schedule.timezone,
+    });
+    if (schedule.scheduleType === 'hourly') return 'every hour at :' + String(converted.scheduleMinuteUtc).padStart(2, '0') + ' UTC';
+    const at = String(converted.scheduleHourUtc).padStart(2, '0') + ':' + String(converted.scheduleMinuteUtc).padStart(2, '0') + ' UTC';
+    if (schedule.scheduleType === 'weekly') return converted.scheduleDayUtc + ' ' + at;
+    return at;
+  } catch {
+    return null;
+  }
+}
+
+router.post('/schedules', async (req, res) => {
+  try {
+    const schedule = readScheduleBody(req.body || {}, req);
+    const problem = analysisSchedules.validateSchedule(schedule);
+    if (problem) return res.json({ success: false, message: problem });
+
+    const id = await db.saveAnalysisSchedule(analysisSchedules.toStoredSchedule(schedule));
+    res.json({ success: true, id, utc: utcEchoFor(schedule) });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+router.put('/schedules/:id', async (req, res) => {
+  try {
+    const schedule = readScheduleBody(req.body || {}, req);
+    const problem = analysisSchedules.validateSchedule(schedule);
+    if (problem) return res.json({ success: false, message: problem });
+
+    const stored = analysisSchedules.toStoredSchedule(schedule);
+    await db.updateAnalysisSchedule(Number.parseInt(req.params.id, 10), stored);
+    res.json({ success: true, utc: utcEchoFor(schedule) });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+router.post('/schedules/:id/toggle', async (req, res) => {
+  try {
+    const enabled = req.body.enabled === true || req.body.enabled === 'true';
+    await db.updateAnalysisSchedule(Number.parseInt(req.params.id, 10), { enabled });
+    res.json({ success: true, enabled });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+router.delete('/schedules/:id', async (req, res) => {
+  try {
+    await db.deleteAnalysisSchedule(Number.parseInt(req.params.id, 10));
+    res.json({ success: true });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * Runs a schedule now, outside its timing.
+ *
+ * Goes through the same executor the scheduler uses rather than starting a scan
+ * directly, so "run it now" cannot behave differently from the schedule it is
+ * testing — including refusing to stack on a scan that is still going.
+ */
+router.post('/schedules/:id/run', async (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    const schedule = (await db.getAnalysisSchedules()).find(candidate => Number(candidate.id) === id);
+    if (!schedule) return res.json({ success: false, message: 'Schedule not found.' });
+
+    const result = await analysisSchedules.executeSchedule(schedule, { source: 'manual' });
+    res.json({ success: result.status !== 'error', ...result });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+router.get('/schedules/:id/history', async (req, res) => {
+  try {
+    const history = await db.getAnalysisScheduleHistory(Number.parseInt(req.params.id, 10), req.query.limit);
+    res.json({ success: true, history });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }

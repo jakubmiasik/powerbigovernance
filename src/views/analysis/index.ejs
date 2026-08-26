@@ -16,15 +16,37 @@
           <div class="row align-items-end g-3">
             <div class="col-md-5">
               <label for="spSelect" class="form-label">Select Tenant / Service Principal</label>
-              <select class="form-select" id="spSelect">
+              <select class="form-select" id="spSelect" onchange="onScanSpChanged()">
                 <% servicePrincipals.forEach(function(sp) { %>
                   <option value="<%= sp.id %>" data-eaoid="<%= sp.enterprise_app_object_id || '' %>"><%= sp.name %> (<%= sp.tenant_id %>)</option>
                 <% }) %>
               </select>
             </div>
             <div class="col-md-4">
+              <label class="form-label" for="scanScope">What to scan</label>
+              <select class="form-select" id="scanScope" onchange="onScanScopeChanged()">
+                <option value="tenant">The whole tenant</option>
+                <option value="workspaces">Selected workspaces only</option>
+              </select>
+            </div>
+            <div class="col-md-3">
               <button class="btn btn-primary w-100" onclick="startAnalysis()"><i class="bi bi-play-fill me-1"></i>Run Analysis</button>
             </div>
+          </div>
+
+          <div class="mt-3 d-none" id="scanScopePicker">
+            <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
+              <input type="text" class="form-control form-control-sm" style="max-width:240px;"
+                     id="scanWorkspaceFilter" placeholder="Filter workspaces..." oninput="renderScanWorkspaces()">
+              <button class="btn btn-sm btn-outline-secondary" onclick="toggleAllScanWorkspaces(true)">Select all shown</button>
+              <button class="btn btn-sm btn-outline-secondary" onclick="toggleAllScanWorkspaces(false)">Clear</button>
+              <button class="btn btn-sm btn-outline-secondary" onclick="loadScanWorkspaces(true)" title="Read the workspace list from the tenant instead of the last scan">
+                <i class="bi bi-arrow-clockwise me-1"></i>Refresh from tenant
+              </button>
+              <span class="small text-muted ms-auto" id="scanScopeCount">0 selected</span>
+            </div>
+            <div class="border rounded p-2" style="max-height:240px; overflow-y:auto;" id="scanWorkspaceList"></div>
+            <div class="form-text" id="scanScopeSource"></div>
           </div>
           <div class="small text-muted mt-2">
             <i class="bi bi-info-circle me-1"></i>The scan sees every workspace through the admin APIs, but reading a
@@ -41,6 +63,74 @@
               onclick="document.getElementById('backgroundNote').classList.add('d-none')"></button>
     </div>
 
+    <!-- ── Scheduled scans ── -->
+    <div class="card mb-4">
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span><i class="bi bi-calendar-check me-2"></i>Scheduled Scans (<%= (schedules || []).length %>)</span>
+        <button class="btn btn-sm btn-outline-primary" onclick="openScheduleForm()"
+                <%= servicePrincipals.length ? '' : 'disabled' %>>
+          <i class="bi bi-plus me-1"></i>New schedule
+        </button>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm mb-0" id="analysis-schedules-table">
+          <thead><tr>
+            <th>Name</th><th>Scope</th><th>When</th><th>Tenant</th><th>Status</th><th>Last run</th><th></th>
+          </tr></thead>
+          <tbody>
+            <% if (!(schedules || []).length) { %>
+              <tr><td colspan="7" class="text-muted small py-3">
+                No scheduled scans. A governance picture is only worth trusting if it refreshes without
+                somebody remembering to press a button — and a scan scoped to the workspaces that matter is
+                short enough to run nightly.
+              </td></tr>
+            <% } %>
+            <% (schedules || []).forEach(function(sched) {
+                 var spName = (servicePrincipals.find(function(sp) { return String(sp.id) === String(sched.sp_id); }) || {}).name;
+            %>
+              <tr class="<%= sched.enabled ? '' : 'text-muted' %>">
+                <td class="small"><strong><%= sched.name %></strong></td>
+                <td class="small">
+                  <% if (sched.scope.kind === 'workspaces') { %>
+                    <span class="badge bg-info text-dark" title="<%= sched.scopeLabel %>">
+                      <i class="bi bi-funnel me-1"></i><%= sched.scope.workspaces.length %> workspace<%= sched.scope.workspaces.length === 1 ? '' : 's' %>
+                    </span>
+                  <% } else { %>
+                    <span class="badge bg-light text-dark border">Whole tenant</span>
+                  <% } %>
+                </td>
+                <td class="small"><%= sched.timingLabel %></td>
+                <td class="small"><%= spName || (sched.sp_id ? 'SP #' + sched.sp_id : 'first configured') %></td>
+                <td>
+                  <span class="badge bg-<%= sched.enabled ? 'success' : 'secondary' %>">
+                    <%= sched.enabled ? 'enabled' : 'paused' %>
+                  </span>
+                </td>
+                <td class="small text-muted" data-schedule-last="<%= sched.id %>">—</td>
+                <td class="text-nowrap">
+                  <button class="btn btn-sm btn-outline-primary p-0 px-1" title="Run now"
+                          onclick="runScheduleNow(<%= sched.id %>)"><i class="bi bi-play-fill"></i></button>
+                  <button class="btn btn-sm btn-outline-secondary p-0 px-1" title="<%= sched.enabled ? 'Pause' : 'Enable' %>"
+                          onclick="toggleSchedule(<%= sched.id %>, <%= sched.enabled ? 'false' : 'true' %>)">
+                    <i class="bi bi-<%= sched.enabled ? 'pause' : 'play' %>"></i>
+                  </button>
+                  <button class="btn btn-sm btn-outline-secondary p-0 px-1" title="History"
+                          onclick="showScheduleHistory(<%= sched.id %>, '<%= sched.name.replace(/'/g, "\\'") %>')"><i class="bi bi-clock-history"></i></button>
+                  <button class="btn btn-sm btn-outline-danger p-0 px-1" title="Delete"
+                          onclick="deleteSchedule(<%= sched.id %>, '<%= sched.name.replace(/'/g, "\\'") %>')"><i class="bi bi-trash"></i></button>
+                </td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+      <div class="card-footer small text-muted">
+        Schedules fire in their own timezone and are caught up for up to
+        <code>SCHEDULER_CATCHUP_MINUTES</code> if the worker was asleep at the minute they were due. A schedule
+        never stacks a scan on one of its own that is still running — it records the skip instead.
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <span><i class="bi bi-clock-history me-2"></i>Previous Runs (<%= runs.length %>)</span>
@@ -52,6 +142,7 @@
             <tr>
               <th>ID</th>
               <th>Tenant</th>
+              <th>Scope</th>
               <th>Status</th>
               <th>Workspaces</th>
               <th>Reports</th>
@@ -65,7 +156,7 @@
           </thead>
           <tbody>
             <% if (!runs.length) { %>
-              <tr data-filter="no runs"><td colspan="11" class="text-center text-muted py-3">No analysis runs yet</td></tr>
+              <tr data-filter="no runs"><td colspan="12" class="text-center text-muted py-3">No analysis runs yet</td></tr>
             <% } %>
             <% runs.forEach(function(runItem) {
                  var live = (typeof liveProgress !== 'undefined' && liveProgress) ? liveProgress[runItem.id] : null;
@@ -79,9 +170,21 @@
                    : effectiveStatus === 'interrupted' ? 'warning' : 'danger';
                  var isLive = effectiveStatus === 'running' || effectiveStatus === 'cancelling';
             %>
-              <tr data-filter="<%= [runItem.id, runItem.sp_name || '', runItem.status || '', runItem.run_by || '', runItem.tenant_id || ''].join(' ').toLowerCase() %>" data-run-id="<%= runItem.id %>">
+              <tr data-filter="<%= [runItem.id, runItem.sp_name || '', runItem.status || '', runItem.run_by || '', runItem.tenant_id || '', runItem.scopeLabel || ''].join(' ').toLowerCase() %>" data-run-id="<%= runItem.id %>">
                 <td><%= runItem.id %></td>
                 <td><strong><%= runItem.sp_name || '-' %></strong></td>
+                <td class="small">
+                  <% if (runItem.scope && runItem.scope.kind === 'workspaces') { %>
+                    <span class="badge bg-info text-dark" title="<%= runItem.scopeLabel %>">
+                      <i class="bi bi-funnel me-1"></i><%= runItem.scope.workspaces.length %> workspace<%= runItem.scope.workspaces.length === 1 ? '' : 's' %>
+                    </span>
+                  <% } else { %>
+                    <span class="badge bg-light text-dark border">Whole tenant</span>
+                  <% } %>
+                  <% if (runItem.schedule_id) { %>
+                    <span class="badge bg-secondary" title="Started by a schedule"><i class="bi bi-clock"></i></span>
+                  <% } %>
+                </td>
                 <td style="min-width: 190px;">
                   <button class="badge bg-<%= statusColor %> border-0 run-status-badge"
                           data-run-status-for="<%= runItem.id %>"
@@ -200,6 +303,109 @@
 <script>
 function escapeHtml(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 
+// ── Choosing what to scan ──
+// The workspace list comes from the last tenant-wide scan by default, which costs
+// nothing. Reading it live is one API call and is the only way to see a workspace
+// created since — or to choose one at all before the first scan has ever run.
+var scanWorkspaces = [];
+var scanSelected = new Set();
+var scanSource = null;
+
+function onScanScopeChanged() {
+  var scoped = document.getElementById('scanScope').value === 'workspaces';
+  document.getElementById('scanScopePicker').classList.toggle('d-none', !scoped);
+  if (scoped && !scanWorkspaces.length) loadScanWorkspaces(false);
+}
+
+function onScanSpChanged() {
+  // A different tenant has different workspaces; keeping the old selection would
+  // send ids that mean nothing to the principal now chosen.
+  scanWorkspaces = [];
+  scanSelected.clear();
+  if (document.getElementById('scanScope').value === 'workspaces') loadScanWorkspaces(false);
+}
+
+async function loadScanWorkspaces(live) {
+  var list = document.getElementById('scanWorkspaceList');
+  list.innerHTML = '<div class="text-center py-3 small text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Loading workspaces...</div>';
+  try {
+    var params = new URLSearchParams({ spId: document.getElementById('spSelect').value });
+    if (live) params.set('refresh', '1');
+    var resp = await fetch('/analysis/workspaces?' + params.toString());
+    var data = await resp.json();
+    if (!data.success) {
+      list.innerHTML = '<div class="alert alert-warning py-2 small mb-0">' + escapeHtml(data.message) + '</div>';
+      return;
+    }
+    scanWorkspaces = data.workspaces || [];
+    scanSource = data;
+    renderScanWorkspaces();
+  } catch (e) {
+    list.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderScanWorkspaces() {
+  var list = document.getElementById('scanWorkspaceList');
+  var needle = (document.getElementById('scanWorkspaceFilter').value || '').trim().toLowerCase();
+  var shown = scanWorkspaces.filter(function(ws) {
+    return !needle || (ws.name || '').toLowerCase().indexOf(needle) !== -1;
+  });
+
+  if (!scanWorkspaces.length) {
+    list.innerHTML = '<div class="small text-muted py-2">' +
+      escapeHtml((scanSource && scanSource.message) || 'No workspaces to choose from yet.') + '</div>';
+  } else {
+    list.innerHTML = shown.map(function(ws) {
+      return '<div class="form-check">' +
+        '<input class="form-check-input scan-ws" type="checkbox" value="' + escapeHtml(ws.id) + '" id="scanws-' + escapeHtml(ws.id) + '"' +
+        (scanSelected.has(ws.id) ? ' checked' : '') + ' onchange="onScanWorkspaceToggled(this)">' +
+        '<label class="form-check-label small" for="scanws-' + escapeHtml(ws.id) + '">' + escapeHtml(ws.name) +
+        (ws.state && ws.state !== 'Active' ? ' <span class="text-muted">(' + escapeHtml(ws.state) + ')</span>' : '') +
+        '</label></div>';
+    }).join('') || '<div class="small text-muted py-2">Nothing matches that filter.</div>';
+  }
+
+  var source = document.getElementById('scanScopeSource');
+  if (scanSource && scanSource.source === 'scan') {
+    source.textContent = 'From scan #' + scanSource.runId +
+      (scanSource.scannedAt ? ' on ' + new Date(scanSource.scannedAt).toLocaleDateString() : '') +
+      ' — refresh to include workspaces created since.';
+  } else if (scanSource && scanSource.source === 'live') {
+    source.textContent = 'Read from the tenant just now.';
+  } else {
+    source.textContent = '';
+  }
+  updateScanScopeCount();
+}
+
+function onScanWorkspaceToggled(input) {
+  // Held in a Set rather than read off the DOM, so a selection survives filtering
+  // the list — ticking three, searching, and ticking a fourth must keep all four.
+  if (input.checked) scanSelected.add(input.value);
+  else scanSelected.delete(input.value);
+  updateScanScopeCount();
+}
+
+function toggleAllScanWorkspaces(checked) {
+  document.querySelectorAll('.scan-ws').forEach(function(box) {
+    box.checked = checked;
+    if (checked) scanSelected.add(box.value);
+    else scanSelected.delete(box.value);
+  });
+  updateScanScopeCount();
+}
+
+function updateScanScopeCount() {
+  document.getElementById('scanScopeCount').textContent = scanSelected.size + ' selected';
+}
+
+function selectedScanWorkspaces() {
+  var byId = {};
+  scanWorkspaces.forEach(function(ws) { byId[ws.id] = ws.name; });
+  return Array.from(scanSelected).map(function(id) { return { id: id, name: byId[id] || null }; });
+}
+
 var progressInterval = null;
 var activeRunId = null;
 var progressModal = null;
@@ -288,6 +494,13 @@ function showRunProgress(runId) {
 
 async function startAnalysis() {
   var spId = document.getElementById('spSelect').value;
+  var scope = document.getElementById('scanScope').value;
+  var workspaces = scope === 'workspaces' ? selectedScanWorkspaces() : [];
+  if (scope === 'workspaces' && !workspaces.length) {
+    showToast('Select at least one workspace, or scan the whole tenant.', 'error');
+    return;
+  }
+
   getProgressModal().show();
 
   activeRunId = null;
@@ -297,7 +510,7 @@ async function startAnalysis() {
     var response = await fetch('/analysis/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ spId: spId })
+      body: JSON.stringify({ spId: spId, scope: scope, workspaces: workspaces })
     });
     var data = await response.json();
 
@@ -597,6 +810,313 @@ async function deleteRun(runId) {
   });
 }
 
+
+// ── Scheduled scans ──
+// A local read-only modal: the shared footer has a toast and a confirm, but no
+// "here is a table, look at it" dialog.
+function showInfoModal(title, html) {
+  document.getElementById('infoModalTitle').innerHTML = title;
+  document.getElementById('infoModalBody').innerHTML = html;
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('infoModal')).show();
+}
+
+var scheduleWorkspaces = [];
+var scheduleSelected = new Set();
+
+function openScheduleForm() {
+  document.getElementById('schedName').value = '';
+  document.getElementById('schedScope').value = 'tenant';
+  document.getElementById('schedType').value = 'daily';
+  document.getElementById('schedHour').value = 2;
+  document.getElementById('schedMinute').value = 0;
+  document.getElementById('schedDay').value = 'Monday';
+  document.getElementById('schedResult').innerHTML = '';
+  scheduleSelected.clear();
+  scheduleWorkspaces = [];
+  onScheduleTypeChanged();
+  onScheduleScopeChanged();
+  new bootstrap.Modal(document.getElementById('scheduleModal')).show();
+}
+
+function onScheduleTypeChanged() {
+  var type = document.getElementById('schedType').value;
+  // Hourly has no hour to set, and only a weekly schedule needs a day.
+  document.getElementById('schedHourWrap').classList.toggle('d-none', type === 'hourly');
+  document.getElementById('schedDayWrap').classList.toggle('d-none', type !== 'weekly');
+}
+
+function onScheduleScopeChanged() {
+  var scoped = document.getElementById('schedScope').value === 'workspaces';
+  document.getElementById('schedScopePicker').classList.toggle('d-none', !scoped);
+  if (scoped && !scheduleWorkspaces.length) loadScheduleWorkspaces();
+}
+
+async function loadScheduleWorkspaces() {
+  var list = document.getElementById('schedWorkspaceList');
+  list.innerHTML = '<div class="text-center py-3 small text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Loading...</div>';
+  try {
+    var resp = await fetch('/analysis/workspaces?spId=' + encodeURIComponent(document.getElementById('schedSp').value));
+    var data = await resp.json();
+    if (!data.success) { list.innerHTML = '<div class="alert alert-warning py-2 small mb-0">' + escapeHtml(data.message) + '</div>'; return; }
+    scheduleWorkspaces = data.workspaces || [];
+    if (!scheduleWorkspaces.length) {
+      list.innerHTML = '<div class="small text-muted py-2">' + escapeHtml(data.message || 'No workspaces recorded yet. Run a tenant-wide scan first.') + '</div>';
+      return;
+    }
+    renderScheduleWorkspaces();
+  } catch (e) {
+    list.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderScheduleWorkspaces() {
+  var needle = (document.getElementById('schedWorkspaceFilter').value || '').trim().toLowerCase();
+  var shown = scheduleWorkspaces.filter(function(ws) {
+    return !needle || (ws.name || '').toLowerCase().indexOf(needle) !== -1;
+  });
+  document.getElementById('schedWorkspaceList').innerHTML = shown.map(function(ws) {
+    return '<div class="form-check">' +
+      '<input class="form-check-input sched-ws" type="checkbox" value="' + escapeHtml(ws.id) + '" id="schedws-' + escapeHtml(ws.id) + '"' +
+      (scheduleSelected.has(ws.id) ? ' checked' : '') + ' onchange="onScheduleWorkspaceToggled(this)">' +
+      '<label class="form-check-label small" for="schedws-' + escapeHtml(ws.id) + '">' + escapeHtml(ws.name) + '</label></div>';
+  }).join('') || '<div class="small text-muted py-2">Nothing matches that filter.</div>';
+  document.getElementById('schedScopeCount').textContent = scheduleSelected.size + ' selected';
+}
+
+function onScheduleWorkspaceToggled(input) {
+  if (input.checked) scheduleSelected.add(input.value);
+  else scheduleSelected.delete(input.value);
+  document.getElementById('schedScopeCount').textContent = scheduleSelected.size + ' selected';
+}
+
+async function saveSchedule() {
+  var scope = document.getElementById('schedScope').value;
+  var byId = {};
+  scheduleWorkspaces.forEach(function(ws) { byId[ws.id] = ws.name; });
+
+  var body = {
+    name: document.getElementById('schedName').value.trim(),
+    spId: document.getElementById('schedSp').value,
+    scope: scope,
+    workspaces: scope === 'workspaces'
+      ? Array.from(scheduleSelected).map(function(id) { return { id: id, name: byId[id] || null }; })
+      : [],
+    scheduleType: document.getElementById('schedType').value,
+    hour: parseInt(document.getElementById('schedHour').value, 10) || 0,
+    minute: parseInt(document.getElementById('schedMinute').value, 10) || 0,
+    day: document.getElementById('schedDay').value,
+    timezone: document.getElementById('schedTimezone').value
+  };
+
+  var result = document.getElementById('schedResult');
+  result.innerHTML = '<div class="small text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Saving...</div>';
+  try {
+    var resp = await fetch('/analysis/schedules', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    var data = await resp.json();
+    if (!data.success) {
+      result.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeHtml(data.message) + '</div>';
+      return;
+    }
+    // The scheduler works in the schedule's own timezone, but "which minute will
+    // this land on" is a different question and worth answering here.
+    result.innerHTML = '<div class="alert alert-success py-2 small mb-0">Saved.' +
+      (data.utc ? ' Fires at <strong>' + escapeHtml(data.utc) + '</strong>.' : '') + ' Reloading...</div>';
+    setTimeout(function() { window.location.reload(); }, 900);
+  } catch (e) {
+    result.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+async function toggleSchedule(id, enabled) {
+  try {
+    var resp = await fetch('/analysis/schedules/' + id + '/toggle', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled })
+    });
+    var data = await resp.json();
+    if (!data.success) { showToast(data.message, 'error'); return; }
+    window.location.reload();
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+function deleteSchedule(id, name) {
+  showConfirmAction({
+    title: 'Delete this schedule?',
+    message: '"' + name + '" will stop running. Scans it has already produced are kept.',
+    confirmText: 'Delete',
+    onConfirm: async function() {
+      try {
+        var resp = await fetch('/analysis/schedules/' + id, { method: 'DELETE' });
+        var data = await resp.json();
+        if (!data.success) { showToast(data.message, 'error'); return; }
+        window.location.reload();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+  });
+}
+
+async function runScheduleNow(id) {
+  showToast('Starting the scan this schedule would run...', 'info');
+  try {
+    var resp = await fetch('/analysis/schedules/' + id + '/run', { method: 'POST' });
+    var data = await resp.json();
+    if (!data.success) { showToast(data.message, 'error'); return; }
+    // A skip is a real, correct outcome here — one of its own scans is still going.
+    showToast(data.message, data.status === 'skipped' ? 'info' : 'success');
+    if (data.runId) setTimeout(function() { window.location.reload(); }, 1200);
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function showScheduleHistory(id, name) {
+  showInfoModal('Schedule History', '<div class="spinner-border text-primary"></div><p class="mt-2 text-muted">Loading...</p>');
+  try {
+    var resp = await fetch('/analysis/schedules/' + id + '/history');
+    var data = await resp.json();
+    if (!data.success) { showInfoModal('Schedule History', '<div class="alert alert-danger mb-0">' + escapeHtml(data.message) + '</div>'); return; }
+    if (!data.history.length) {
+      showInfoModal('Schedule History', '<p class="text-muted mb-0">' + escapeHtml(name) + ' has not run yet.</p>');
+      return;
+    }
+    var rows = data.history.map(function(entry) {
+      var color = entry.status === 'started' ? 'success' : entry.status === 'skipped' ? 'secondary' : 'danger';
+      return '<tr><td class="small">' + new Date(entry.executed_at).toLocaleString() + '</td>' +
+        '<td><span class="badge bg-' + color + '">' + escapeHtml(entry.status) + '</span></td>' +
+        '<td class="small">' + (entry.run_id ? '<a href="/analysis/results/' + entry.run_id + '">#' + entry.run_id + '</a>' : '-') + '</td>' +
+        '<td class="small">' + escapeHtml(entry.message || '') + '</td></tr>';
+    }).join('');
+    showInfoModal('History — ' + escapeHtml(name),
+      '<div class="table-responsive"><table class="table table-sm mb-0"><thead><tr><th>When</th><th>Outcome</th><th>Run</th><th>Detail</th></tr></thead><tbody>' +
+      rows + '</tbody></table></div>');
+  } catch (e) {
+    showInfoModal('Schedule History', '<div class="alert alert-danger mb-0">' + escapeHtml(e.message) + '</div>');
+  }
+}
+
+// Each schedule's most recent outcome, filled in after the page renders so the
+// list itself stays one query.
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('[data-schedule-last]').forEach(async function(cell) {
+    try {
+      var resp = await fetch('/analysis/schedules/' + cell.getAttribute('data-schedule-last') + '/history?limit=1');
+      var data = await resp.json();
+      if (!data.success || !data.history.length) { cell.textContent = 'never run'; return; }
+      var last = data.history[0];
+      cell.textContent = new Date(last.executed_at).toLocaleString() + ' — ' + last.status;
+    } catch (e) { cell.textContent = '—'; }
+  });
+});
 </script>
+
+<!-- Schedule editor -->
+<div class="modal fade" id="scheduleModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-calendar-plus me-2"></i>New Scheduled Scan</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-2">
+          <div class="col-md-7">
+            <label class="form-label small" for="schedName">Name</label>
+            <input type="text" class="form-control form-control-sm" id="schedName" placeholder="Nightly finance workspaces">
+          </div>
+          <div class="col-md-5">
+            <label class="form-label small" for="schedSp">Tenant / service principal</label>
+            <select class="form-select form-select-sm" id="schedSp" onchange="loadScheduleWorkspaces()">
+              <% servicePrincipals.forEach(function(sp) { %>
+                <option value="<%= sp.id %>"><%= sp.name %></option>
+              <% }) %>
+            </select>
+          </div>
+
+          <div class="col-md-4">
+            <label class="form-label small" for="schedScope">What to scan</label>
+            <select class="form-select form-select-sm" id="schedScope" onchange="onScheduleScopeChanged()">
+              <option value="tenant">The whole tenant</option>
+              <option value="workspaces">Selected workspaces only</option>
+            </select>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small" for="schedType">How often</label>
+            <select class="form-select form-select-sm" id="schedType" onchange="onScheduleTypeChanged()">
+              <% (scheduleTypes || []).forEach(function(type) { %>
+                <option value="<%= type.key %>"><%= type.label %></option>
+              <% }) %>
+            </select>
+          </div>
+          <div class="col-md-2 d-none" id="schedHourWrap">
+            <label class="form-label small" for="schedHour">Hour</label>
+            <input type="number" min="0" max="23" class="form-control form-control-sm" id="schedHour" value="2">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small" for="schedMinute">Minute</label>
+            <input type="number" min="0" max="59" class="form-control form-control-sm" id="schedMinute" value="0">
+          </div>
+          <div class="col-md-3 d-none" id="schedDayWrap">
+            <label class="form-label small" for="schedDay">Day</label>
+            <select class="form-select form-select-sm" id="schedDay">
+              <% ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'].forEach(function(day) { %>
+                <option value="<%= day %>"><%= day %></option>
+              <% }) %>
+            </select>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small" for="schedTimezone">Timezone</label>
+            <select class="form-select form-select-sm" id="schedTimezone">
+              <option value="UTC">UTC</option>
+              <option value="Europe/London">Europe/London</option>
+              <option value="Europe/Paris">Europe/Paris (CET)</option>
+              <option value="Europe/Berlin">Europe/Berlin (CET)</option>
+              <option value="Europe/Warsaw">Europe/Warsaw (CET)</option>
+              <option value="Europe/Amsterdam">Europe/Amsterdam (CET)</option>
+              <option value="Europe/Helsinki">Europe/Helsinki (EET)</option>
+              <option value="Asia/Dubai">Asia/Dubai (GST)</option>
+              <option value="Asia/Kolkata">Asia/Kolkata (IST)</option>
+              <option value="Asia/Singapore">Asia/Singapore (SGT)</option>
+              <option value="Asia/Tokyo">Asia/Tokyo (JST)</option>
+              <option value="Australia/Sydney">Australia/Sydney (AEST)</option>
+              <option value="America/New_York">America/New_York (ET)</option>
+              <option value="America/Chicago">America/Chicago (CT)</option>
+              <option value="America/Denver">America/Denver (MT)</option>
+              <option value="America/Los_Angeles">America/Los_Angeles (PT)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="mt-3 d-none" id="schedScopePicker">
+          <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
+            <input type="text" class="form-control form-control-sm" style="max-width:220px;"
+                   id="schedWorkspaceFilter" placeholder="Filter workspaces..." oninput="renderScheduleWorkspaces()">
+            <span class="small text-muted ms-auto" id="schedScopeCount">0 selected</span>
+          </div>
+          <div class="border rounded p-2" style="max-height:220px; overflow-y:auto;" id="schedWorkspaceList"></div>
+        </div>
+
+        <div class="form-text mt-2">
+          <i class="bi bi-info-circle me-1"></i>A scoped scan covers only the workspaces you choose, so it is much
+          faster — but anything reading the tenant as a whole (Governance, Grant Access) will keep using the most
+          recent whole-tenant scan rather than this one.
+        </div>
+        <div class="mt-2" id="schedResult"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="saveSchedule()"><i class="bi bi-save me-1"></i>Create schedule</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="infoModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title" id="infoModalTitle"></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body" id="infoModalBody"></div>
+    </div>
+  </div>
+</div>
 
 <%- include('../partials/footer') %>

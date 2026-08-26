@@ -11,6 +11,7 @@
       Who can reach which workspace, and adding the service principal where it is missing.
       <% if (run) { %>
         · From scan #<%= run.id %>, <%= run.started_at ? new Date(run.started_at).toLocaleString() : 'date unknown' %>
+        · <%= describeScope(scopeFromRow(run)) %>
       <% } %>
     </p>
   </div>
@@ -21,6 +22,7 @@
         <% runs.forEach(function(r) { %>
           <option value="<%= r.id %>" <%= run && Number(run.id) === Number(r.id) ? 'selected' : '' %>>
             Scan #<%= r.id %> — <%= r.started_at ? new Date(r.started_at).toLocaleDateString() : 'unknown' %>
+            (<%= describeScope(scopeFromRow(r), { limit: 1 }) %>)
           </option>
         <% }) %>
       </select>
@@ -44,6 +46,13 @@
   <div class="alert alert-info">
     <i class="bi bi-info-circle me-2"></i>No completed scan yet. Access is whatever the last scan observed, so
     <a href="/analysis">run an analysis</a> first.
+  </div>
+<% } else if (partialScope) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-funnel me-2"></i>This scan covered <strong><%= describeScope(scopeFromRow(run)) %></strong>, not the
+    whole tenant, so everything below describes only those workspaces. The counts that read as tenant-wide —
+    workspaces with no admin, how many principals hold access — are counts within that scope. Run a whole-tenant
+    scan, or pick one above, for the full picture.
   </div>
 <% } else if (!indexed) { %>
   <div class="alert alert-warning">
