@@ -4546,14 +4546,26 @@ test('the analysis page offers a scope picker and its schedules', async () => {
       schedule_type: 'daily', schedule_hour: 2, schedule_minute: 0, timezone: 'Europe/Warsaw',
     })],
   });
+  // The choice is made in a dialog now, not inline above the button — pressing Run
+  // Analysis without having read it is how a whole-tenant scan starts by accident.
+  assert.match(html, /id="scopeModal"/);
   assert.match(html, /Selected workspaces only/);
-  assert.match(html, /id="scanWorkspaceList"/);
+  assert.match(html, /id="scopeWorkspaceList"/);
+  assert.match(html, /onclick="startAnalysis\(\)"/);
+  // The schedule form opens the same dialog rather than carrying its own copy.
+  assert.match(html, /onclick="chooseScheduleScope\(\)"/);
+  assert.match(html, /id="schedScopeSummary"/);
+  assert.doesNotMatch(html, /id="schedWorkspaceList"/, 'the schedule form must not keep a second picker');
+
   assert.match(html, /Scheduled Scans \(1\)/);
   assert.match(html, /Nightly finance/);
   assert.match(html, /Every day at 02:00 Europe\/Warsaw/);
-  // A run's coverage has to be visible in the history, or a scoped run reads as a
-  // tenant scan that mysteriously found two workspaces.
-  assert.match(html, /1 workspace: Finance/);
+  // A run's coverage reads under the tenant name, where the row already says who
+  // ran it — a column of its own was a column of mostly "Whole tenant".
+  assert.match(html, /Scoped · 1 workspace/);
+  // The runs table no longer carries a Scope column of its own. (The schedules
+  // table still does — there the scope is the point of the row.)
+  assert.match(html, /<th>ID<\/th>\s*<th>Tenant<\/th>\s*<th>Status<\/th>/);
 });
 
 test('the Grant Access page says so when the scan behind it was scoped', async () => {
@@ -4573,4 +4585,45 @@ test('the Grant Access page says so when the scan behind it was scoped', async (
   // about the workspaces it covered — it is wrong about everything else.
   assert.match(html, /not the\s+whole tenant/);
   assert.match(html, /1 workspace: Finance/);
+});
+
+test('the scan scope dialog is one dialog, opened from both places', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/analysis/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis',
+    breadcrumb: [], availableRuns: [], globalRun: null, title: 'Run Analysis',
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'e' }],
+    liveProgress: {}, error: null, runs: [], schedules: [], scheduleTypes: scheduleDue.SCHEDULE_TYPES,
+  });
+
+  // One picker, one list, one filter. Two copies meant two places for the
+  // behaviour to drift and two places to fix a bug in.
+  assert.equal((html.match(/id="scopeWorkspaceList"/g) || []).length, 1);
+  assert.equal((html.match(/id="scopeFilter"/g) || []).length, 1);
+
+  // The dialog says what each choice costs, because the difference between them
+  // on a large tenant is hours.
+  assert.match(html, /hours of API calls/);
+  assert.match(html, /whole-tenant scan rather than this one/);
+
+  // Reading the list live is offered but is not the default — the stored list is
+  // free and the live one is an API call.
+  assert.match(html, /Refresh from tenant/);
+  assert.match(html, /onclick="loadScopeWorkspaces\(true\)"/);
+  assert.match(html, /loadScopeWorkspaces\(false\)/);
+});
+
+test('the run history shows a run without a scope as whole-tenant', async () => {
+  const ejs = require('ejs');
+  const scopeless = { id: 2, sp_name: 'SP', status: 'completed', started_at: '2026-07-01T00:00:00Z', total_workspaces: 40 };
+  const html = await ejs.renderFile('src/views/analysis/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis',
+    breadcrumb: [], availableRuns: [], globalRun: null, title: 'Run Analysis',
+    servicePrincipals: [], liveProgress: {}, error: null, schedules: [],
+    scheduleTypes: scheduleDue.SCHEDULE_TYPES,
+    // Exactly what the route hands over for a run recorded before scopes existed.
+    runs: [{ ...scopeless, scope: analysisScope.scopeFromRow(scopeless), scopeLabel: analysisScope.describeScope(analysisScope.scopeFromRow(scopeless)) }],
+  });
+  assert.match(html, /Whole tenant/);
+  assert.doesNotMatch(html, /Scoped ·/);
 });
