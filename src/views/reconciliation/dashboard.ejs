@@ -194,19 +194,75 @@
   </div>
 </div>
 
+<%
+  // Coverage by the kind of control. A group with rules but no exceptions is worth
+  // seeing — it is a control that is clean — and so is a group with rules that have
+  // never run, so the two reads are merged rather than showing only what failed.
+  var groupExceptions = {};
+  (d.byGroup || []).forEach(function(row) { groupExceptions[row.rule_group] = row; });
+  var groupRules = {};
+  ((d.rulesByGroup || [])).forEach(function(row) { groupRules[row.rule_group] = row; });
+  var groupKeys = (ruleGroupDefs || []).map(function(g) { return g.key; }).filter(function(key) {
+    return groupExceptions[key] || groupRules[key];
+  });
+%>
+<div class="card mb-4">
+  <div class="card-header">
+    <i class="bi bi-diagram-3 me-2"></i><%= scoped ? "This Run's Findings by Group of Rules" : 'Coverage by Group of Rules' %>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0">
+      <thead><tr>
+        <th>Group</th><th>What it checks</th>
+        <th class="text-end">Rules</th><th class="text-end">Active</th>
+        <th class="text-end"><%= scoped ? 'Found' : 'Open' %></th><th class="text-end">High</th><th></th>
+      </tr></thead>
+      <tbody>
+        <% if (!groupKeys.length) { %>
+          <tr><td colspan="7" class="text-muted small py-3">No rules defined yet, so there is nothing to group.</td></tr>
+        <% } %>
+        <% (ruleGroupDefs || []).forEach(function(g) { %>
+          <% if (!groupExceptions[g.key] && !groupRules[g.key]) return; %>
+          <% var ex = groupExceptions[g.key] || { total: 0, high: 0 }; var ru = groupRules[g.key] || { total: 0, active: 0 }; %>
+          <tr>
+            <td><strong><%= g.label %></strong></td>
+            <td class="small text-muted"><%= g.description %></td>
+            <td class="text-end small"><%= ru.total %></td>
+            <td class="text-end small"><%= ru.active %></td>
+            <td class="text-end">
+              <% if (Number(ex.total)) { %><span class="badge bg-danger"><%= ex.total %></span>
+              <% } else { %><span class="badge bg-success">0</span><% } %>
+            </td>
+            <td class="text-end small"><%= Number(ex.high) || 0 %></td>
+            <td class="text-end">
+              <% if (Number(ex.total)) { %>
+                <a class="btn btn-sm btn-outline-secondary p-0 px-1"
+                   href="/reconciliation/exceptions?ruleGroup=<%= g.key %>" title="Show these exceptions">
+                  <i class="bi bi-list-ul"></i>
+                </a>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
 <% if (scoped) { %>
   <div class="card mb-4">
     <div class="card-header"><i class="bi bi-graph-up-arrow me-2"></i>Rules in This Run</div>
     <div class="table-responsive">
       <table class="table table-sm table-hover mb-0">
-        <thead><tr><th>Rule</th><th>Business area</th><th class="text-end">Found</th><th>Included new items</th><th>Last seen</th></tr></thead>
+        <thead><tr><th>Rule</th><th>Group</th><th>Business area</th><th class="text-end">Found</th><th>Included new items</th><th>Last seen</th></tr></thead>
         <tbody>
           <% if (!(d.byRule || []).length) { %>
-            <tr><td colspan="5" class="text-muted small py-3">This run found no exceptions.</td></tr>
+            <tr><td colspan="6" class="text-muted small py-3">This run found no exceptions.</td></tr>
           <% } %>
           <% (d.byRule || []).forEach(function(row) { %>
             <tr>
               <td><a href="/reconciliation/exceptions?ruleId=<%= row.rule_id %>"><%= row.rule_name || ('Rule #' + row.rule_id) %></a></td>
+              <td class="small"><span class="badge bg-light text-dark border"><%= ruleGroupLabel(row.rule_group) %></span></td>
               <td><%= row.business_area || '-' %></td>
               <td class="text-end"><span class="badge bg-danger"><%= row.open_count %></span></td>
               <td><%= Number(row.worst_recurrence) ? 'yes' : 'no' %></td>
@@ -230,10 +286,18 @@
         <i class="bi bi-graph-up-arrow me-2"></i>Rules Overview
         <span class="text-muted">(<%= overview.length %> rule(s), <%= overviewTotal %> exception(s))</span>
       </span>
-      <div class="d-flex align-items-center gap-2">
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <label class="form-label small mb-0 text-nowrap" for="ruleGroupFilter">Group</label>
+        <select class="form-select form-select-sm" id="ruleGroupFilter" style="max-width: 220px;"
+                onchange="applyOverviewFilters()">
+          <option value="">Any group</option>
+          <% (ruleGroupDefs || []).forEach(function(g) { %>
+            <option value="<%= g.key %>" <%= ruleGroup === g.key ? 'selected' : '' %>><%= g.label %></option>
+          <% }) %>
+        </select>
         <label class="form-label small mb-0 text-nowrap" for="ruleStatusFilter">Status</label>
         <select class="form-select form-select-sm" id="ruleStatusFilter" style="max-width: 220px;"
-                onchange="window.location = this.value ? '/reconciliation?ruleStatus=' + this.value : '/reconciliation'">
+                onchange="applyOverviewFilters()">
           <option value="">Open (all unresolved)</option>
           <% (statusDefs || []).forEach(function(sd) { %>
             <option value="<%= sd.key %>" <%= ruleStatus === sd.key ? 'selected' : '' %>><%= sd.label %></option>
@@ -246,13 +310,13 @@
       <table class="table table-sm mb-0">
         <thead><tr>
           <th style="width:32px;"></th>
-          <th>Rule</th><th>Business area</th>
+          <th>Rule</th><th>Group</th><th>Business area</th>
           <th class="text-end"><%= statusLabel || 'Open' %></th>
           <th>Severity</th><th class="text-end">Runs</th><th>Worst recurrence</th><th>Last seen</th>
         </tr></thead>
         <tbody>
           <% if (!overview.length) { %>
-            <tr><td colspan="8" class="text-muted small py-3">
+            <tr><td colspan="9" class="text-muted small py-3">
               <%= ruleStatus ? 'No exceptions in that status.' : 'No open exceptions. Every control that has run is clean.' %>
             </td></tr>
           <% } %>
@@ -267,7 +331,8 @@
                   </button>
                 <% } %>
               </td>
-              <td><a href="/reconciliation/exceptions?ruleId=<%= rule.ruleId %><%= ruleStatus ? '&status=' + ruleStatus : '' %>"><strong><%= rule.ruleName || ('Rule #' + rule.ruleId) %></strong></a></td>
+              <td><a href="/reconciliation/exceptions?ruleId=<%= rule.ruleId %><%= ruleStatus ? '&status=' + ruleStatus : '' %><%= ruleGroup ? '&ruleGroup=' + ruleGroup : '' %>"><strong><%= rule.ruleName || ('Rule #' + rule.ruleId) %></strong></a></td>
+              <td class="small"><span class="badge bg-light text-dark border"><%= ruleGroupLabel(rule.ruleGroup) %></span></td>
               <td class="small"><%= rule.businessArea || '-' %></td>
               <td class="text-end"><span class="badge bg-danger"><%= rule.total %></span></td>
               <td class="small">
@@ -288,7 +353,7 @@
             <% if (rule.runs.length) { %>
               <tr class="collapse" id="ruleRuns-<%= index %>">
                 <td></td>
-                <td colspan="7" class="p-0">
+                <td colspan="8" class="p-0">
                   <table class="table table-sm mb-0" style="background: var(--color-surface-2);">
                     <thead><tr>
                       <th class="small">Run</th><th class="small">When</th>
@@ -397,6 +462,23 @@ document.querySelectorAll('[data-bs-toggle="collapse"]').forEach(function(button
     button.querySelector('i').className = 'bi bi-chevron-right';
   });
 });
+
+/**
+ * Reloads the overview under both of its filters at once.
+ *
+ * Each select used to navigate on its own, which meant picking a group threw away
+ * the status already chosen — the page kept answering a narrower question than the
+ * one on screen.
+ */
+function applyOverviewFilters() {
+  var params = new URLSearchParams();
+  var status = document.getElementById('ruleStatusFilter');
+  var group = document.getElementById('ruleGroupFilter');
+  if (status && status.value) params.set('ruleStatus', status.value);
+  if (group && group.value) params.set('ruleGroup', group.value);
+  var query = params.toString();
+  window.location = query ? '/reconciliation?' + query : '/reconciliation';
+}
 
 async function purgeOrphans() {
   var result = document.getElementById('purgeResult');

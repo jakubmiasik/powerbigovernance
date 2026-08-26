@@ -331,6 +331,60 @@ const RECONCILIATION_MIGRATIONS = [
         ALTER TABLE recon_rules ADD fields_normalized BIT NOT NULL DEFAULT 0;
     `,
   },
+  // The kind of control a rule is — Start-to-Start, Left-to-Right and so on.
+  // Existing rules land in 'ungrouped', which is a real answer rather than a null:
+  // "nobody has said what this control is" is worth seeing on the page.
+  {
+    label: 'add recon_rules.rule_group',
+    sql: `
+      IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_rules') AND type = 'U')
+         AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_rules') AND name = N'rule_group')
+        ALTER TABLE recon_rules ADD rule_group NVARCHAR(50) NOT NULL DEFAULT 'ungrouped';
+    `,
+  },
+  // Denormalised onto the exception the same way rule_name and business_area are:
+  // the exception list filters and groups by it on every page load, and joining
+  // back to the rule for a label would cost that join on every row.
+  {
+    label: 'add recon_exceptions.rule_group',
+    sql: `
+      IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_exceptions') AND type = 'U')
+         AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_exceptions') AND name = N'rule_group')
+        ALTER TABLE recon_exceptions ADD rule_group NVARCHAR(50) NOT NULL DEFAULT 'ungrouped';
+    `,
+  },
+  {
+    label: 'index recon_exceptions.rule_group',
+    sql: `
+      IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_exceptions') AND name = N'rule_group')
+         AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'recon_exceptions') AND name = N'IX_recon_exceptions_group')
+        CREATE INDEX IX_recon_exceptions_group ON recon_exceptions (rule_group, status);
+    `,
+  },
+  {
+    label: 'add recon_runs.rule_group',
+    sql: `
+      IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_runs') AND type = 'U')
+         AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_runs') AND name = N'rule_group')
+        ALTER TABLE recon_runs ADD rule_group NVARCHAR(50) NOT NULL DEFAULT 'ungrouped';
+    `,
+  },
+  // An aggregate operand is a function plus what it is applied to, and what it is
+  // applied to can itself be a column or an expression. Two more columns per side
+  // rather than encoding "sum(Amount)" into the value text, which nothing could
+  // then query, validate or re-render into a form.
+  {
+    label: 'add recon_rule_fields aggregate columns',
+    sql: `
+      IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'recon_rule_fields') AND type = 'U')
+         AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'recon_rule_fields') AND name = N'a_fn')
+        ALTER TABLE recon_rule_fields
+          ADD a_fn NVARCHAR(30) NULL,
+              a_value_kind NVARCHAR(20) NULL,
+              b_fn NVARCHAR(30) NULL,
+              b_value_kind NVARCHAR(20) NULL;
+    `,
+  },
 ];
 
 module.exports = { RECONCILIATION_MIGRATIONS };

@@ -66,16 +66,16 @@
       <thead>
         <tr>
           <th style="width:32px;"><input type="checkbox" class="form-check-input" title="Select all" onchange="toggleAllRules(this.checked)"></th>
-          <th>Rule</th><th>Business area</th><th>Owner</th><th>Priority</th>
+          <th>Rule</th><th>Group</th><th>Business area</th><th>Owner</th><th>Priority</th>
           <th>Status</th><th>Version</th><th>Actions</th>
         </tr>
       </thead>
       <tbody>
         <% if (!rules.length) { %>
-          <tr data-filter="none"><td colspan="8" class="text-muted small py-3">No rules yet. Create one to define your first control.</td></tr>
+          <tr data-filter="none"><td colspan="9" class="text-muted small py-3">No rules yet. Create one to define your first control.</td></tr>
         <% } %>
         <% rules.forEach(function(rule) { %>
-          <tr data-filter="<%= [rule.name, rule.business_area || '', rule.owner || '', rule.status].join(' ').toLowerCase() %>">
+          <tr data-filter="<%= [rule.name, ruleGroupLabel(rule.rule_group), rule.business_area || '', rule.owner || '', rule.status].join(' ').toLowerCase() %>">
             <td>
               <input type="checkbox" class="form-check-input rule-select" value="<%= rule.id %>"
                      data-status="<%= rule.status %>" onchange="updateBatchBar()">
@@ -84,6 +84,7 @@
               <a href="/reconciliation/rules/<%= rule.id %>"><strong><%= rule.name %></strong></a>
               <% if (rule.description) { %><div class="text-muted" style="font-size:0.7rem;"><%= rule.description %></div><% } %>
             </td>
+            <td class="small"><span class="badge bg-light text-dark border"><%= ruleGroupLabel(rule.rule_group) %></span></td>
             <td class="small"><%= rule.business_area || '-' %></td>
             <td class="small"><%= rule.owner || '-' %></td>
             <td><span class="badge bg-<%= priorityColor(rule.priority) %>"><%= rule.priority %></span></td>

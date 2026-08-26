@@ -5,7 +5,9 @@
 // refresh and schema-drift tolerance stay in one place.
 
 const { _sql } = require('./databaseService');
-const { exceptionFingerprint, CLOSED_STATUSES, EXCEPTION_STATUS } = require('./reconciliationService');
+const {
+  exceptionFingerprint, CLOSED_STATUSES, EXCEPTION_STATUS, normalizeRuleGroup,
+} = require('./reconciliationService');
 
 const { TYPES } = _sql;
 
@@ -179,7 +181,17 @@ async function deleteSource(id) {
 // whole definition, and keeps the shape the engine reads identical either way.
 
 const RULE_FIELD_COLUMNS = ['rule_id', 'ordinal', 'label', 'value_type', 'tolerance', 'tolerance_days',
-  'a_kind', 'a_value', 'b_kind', 'b_value'];
+  'a_kind', 'a_value', 'a_fn', 'a_value_kind', 'b_kind', 'b_value', 'b_fn', 'b_value_kind'];
+
+/** One side of a stored field row → the operand shape the engine and the form use. */
+function mapRuleFieldOperand(row, side) {
+  const operand = { kind: row[side + '_kind'] || 'field', value: row[side + '_value'] };
+  if (operand.kind === 'aggregate') {
+    operand.fn = row[side + '_fn'] || 'sum';
+    operand.valueKind = row[side + '_value_kind'] || 'field';
+  }
+  return operand;
+}
 
 /** A stored field row → the operand shape the engine and the form both use. */
 function mapRuleField(row) {
@@ -188,20 +200,26 @@ function mapRuleField(row) {
     type: row.value_type,
     tolerance: row.tolerance === null || row.tolerance === undefined ? undefined : Number(row.tolerance),
     toleranceDays: row.tolerance_days === null || row.tolerance_days === undefined ? undefined : Number(row.tolerance_days),
-    a: { kind: row.a_kind || 'field', value: row.a_value },
-    b: { kind: row.b_kind || 'field', value: row.b_value },
+    a: mapRuleFieldOperand(row, 'a'),
+    b: mapRuleFieldOperand(row, 'b'),
   };
 }
 
 function ruleFieldParams(ruleId, field, index) {
   const a = field.a || { kind: 'field', value: field.fieldA };
   const b = field.b || { kind: 'field', value: field.fieldB };
+  // The function and its inner kind are only meaningful for an aggregate; stored
+  // as NULL otherwise, so a field row never carries a stale "sum" from an edit.
+  const fn = operand => (operand.kind === 'aggregate' ? (operand.fn || 'sum') : null);
+  const valueKind = operand => (operand.kind === 'aggregate' ? (operand.valueKind || 'field') : null);
   return [
     int('r' + index, ruleId), int('o' + index, index), str('l' + index, field.label || null),
     str('t' + index, field.type || 'string'),
     dec('tol' + index, field.tolerance), int('td' + index, field.toleranceDays),
     str('ak' + index, a.kind || 'field'), str('av' + index, a.value === undefined ? null : String(a.value)),
+    str('af' + index, fn(a)), str('avk' + index, valueKind(a)),
     str('bk' + index, b.kind || 'field'), str('bv' + index, b.value === undefined ? null : String(b.value)),
+    str('bf' + index, fn(b)), str('bvk' + index, valueKind(b)),
   ];
 }
 
@@ -263,6 +281,7 @@ function ruleParams(rule) {
   return [
     str('name', rule.name), str('description', rule.description), str('area', rule.businessArea),
     str('owner', rule.owner), str('priority', rule.priority || 'medium'),
+    str('group', normalizeRuleGroup(rule.ruleGroup)),
     int('sourceA', rule.sourceAId), int('sourceB', rule.sourceBId),
     str('datasetA', rule.datasetA), str('datasetB', rule.datasetB),
     str('keyA', rule.keyFieldA), str('keyB', rule.keyFieldB),
@@ -291,11 +310,11 @@ async function recordRuleVersion(conn, ruleId, version, actor, note) {
 async function createRule(rule, actor) {
   return withConnection(async conn => {
     const rows = await execSql(conn, `INSERT INTO recon_rules
-      (name, description, business_area, owner, priority, status, version,
+      (name, description, business_area, owner, priority, rule_group, status, version,
        source_a_id, source_b_id, dataset_a, dataset_b, key_field_a, key_field_b,
        duplicate_handling, incomplete_key_handling, row_limit, created_by, updated_by)
       OUTPUT INSERTED.id
-      VALUES (@name, @description, @area, @owner, @priority, 'draft', 1,
+      VALUES (@name, @description, @area, @owner, @priority, @group, 'draft', 1,
        @sourceA, @sourceB, @datasetA, @datasetB, @keyA, @keyB,
        @dupes, @keys, @rowLimit, @by, @by)`,
     [...ruleParams(rule), str('by', actor)]);
@@ -313,7 +332,7 @@ async function updateRule(id, rule, actor, note) {
     const current = await execSql(conn, 'SELECT version FROM recon_rules WHERE id=@id', [int('id', id)]);
     const nextVersion = (current[0] ? Number(current[0].version) : 0) + 1;
     await execSql(conn, `UPDATE recon_rules SET name=@name, description=@description, business_area=@area,
-      owner=@owner, priority=@priority, source_a_id=@sourceA, source_b_id=@sourceB,
+      owner=@owner, priority=@priority, rule_group=@group, source_a_id=@sourceA, source_b_id=@sourceB,
       dataset_a=@datasetA, dataset_b=@datasetB, key_field_a=@keyA, key_field_b=@keyB,
       duplicate_handling=@dupes, incomplete_key_handling=@keys,
       row_limit=@rowLimit, version=@version, updated_at=SYSUTCDATETIME(), updated_by=@by WHERE id=@id`,
@@ -409,11 +428,12 @@ async function getRuleVersions(ruleId) {
 }
 
 // ── Runs ──
-async function createRun({ ruleId, ruleVersion, ruleName, runBy }) {
+async function createRun({ ruleId, ruleVersion, ruleName, ruleGroup, runBy }) {
   return withConnection(async conn => {
-    const rows = await execSql(conn, `INSERT INTO recon_runs (rule_id, rule_version, rule_name, status, run_by)
-      OUTPUT INSERTED.id VALUES (@rule, @version, @name, 'running', @by)`, [
-      int('rule', ruleId), int('version', ruleVersion), str('name', ruleName), str('by', runBy),
+    const rows = await execSql(conn, `INSERT INTO recon_runs (rule_id, rule_version, rule_name, rule_group, status, run_by)
+      OUTPUT INSERTED.id VALUES (@rule, @version, @name, @group, 'running', @by)`, [
+      int('rule', ruleId), int('version', ruleVersion), str('name', ruleName),
+      str('group', normalizeRuleGroup(ruleGroup)), str('by', runBy),
     ]);
     return rows[0] ? rows[0].id : null;
   });
@@ -599,11 +619,12 @@ async function recordExceptions(runId, rule, exceptions) {
 
       if (!existing.length) {
         const rows = await execSql(conn, `INSERT INTO recon_exceptions
-          (fingerprint, rule_id, rule_name, business_area, first_run_id, last_run_id, business_key,
+          (fingerprint, rule_id, rule_name, business_area, rule_group, first_run_id, last_run_id, business_key,
            outcome, severity, status, values_normalized)
           OUTPUT INSERTED.id
-          VALUES (@fp, @rule, @ruleName, @area, @run, @run, @key, @outcome, @severity, 'open', 1)`, [
+          VALUES (@fp, @rule, @ruleName, @area, @group, @run, @run, @key, @outcome, @severity, 'open', 1)`, [
           str('fp', fingerprint), int('rule', rule.id), str('ruleName', rule.name), str('area', rule.business_area),
+          str('group', normalizeRuleGroup(rule.rule_group)),
           int('run', runId), str('key', String(exception.businessKey)), str('outcome', exception.outcome),
           str('severity', exception.severity),
         ]);
@@ -622,10 +643,14 @@ async function recordExceptions(runId, rule, exceptions) {
 
       const row = existing[0];
       const wasClosed = CLOSED_STATUSES.has(String(row.status));
+      // The group is refreshed on every sighting, so re-classifying a rule carries
+      // through to the exceptions it already raised rather than leaving the estate
+      // split between the old label and the new one.
       await execSql(conn, `UPDATE recon_exceptions SET last_run_id=@run, last_seen_at=SYSUTCDATETIME(),
-        occurrence_count=occurrence_count+1, severity=@severity, values_normalized=1
+        occurrence_count=occurrence_count+1, severity=@severity, rule_group=@group, values_normalized=1
         ${wasClosed ? ", status='open', resolved_at=NULL" : ''} WHERE id=@id`, [
         int('id', row.id), int('run', runId), str('severity', exception.severity),
+        str('group', normalizeRuleGroup(rule.rule_group)),
       ]);
 
       if (wasClosed) {
@@ -774,6 +799,7 @@ function exceptionFilterClause(filters = {}) {
   if (filters.severity) { clauses.push('severity=@severity'); params.push(str('severity', filters.severity)); }
   if (filters.outcome) { clauses.push('outcome=@outcome'); params.push(str('outcome', filters.outcome)); }
   if (filters.ruleId) { clauses.push('rule_id=@rule'); params.push(int('rule', filters.ruleId)); }
+  if (filters.ruleGroup) { clauses.push('rule_group=@group'); params.push(str('group', filters.ruleGroup)); }
   if (filters.owner) { clauses.push('owner=@owner'); params.push(str('owner', filters.owner)); }
   if (filters.runId) {
     // What this run actually found, from the findings it recorded — not
@@ -795,7 +821,7 @@ function exceptionFilterClause(filters = {}) {
 // Only these columns are needed to list exceptions. The values and differences are
 // large JSON documents that the list never renders, and reading them for every row
 // was making the page pay for data it immediately discarded.
-const EXCEPTION_LIST_COLUMNS = `id, rule_id, rule_name, business_area, business_key, outcome,
+const EXCEPTION_LIST_COLUMNS = `id, rule_id, rule_name, business_area, rule_group, business_key, outcome,
   severity, status, owner, occurrence_count, first_seen_at, last_seen_at, resolved_at, last_run_id`;
 
 async function listExceptions(filters = {}) {
@@ -1308,13 +1334,25 @@ async function listFindingsForRuns(runIds) {
  *
  * `status` narrows both to one exception status; without it, everything still open.
  */
-async function getRulesOverview({ status = null } = {}) {
+async function getRulesOverview({ status = null, ruleGroup = null } = {}) {
+  // Both queries have to read the same population, so the filter and its parameters
+  // are built once and bound twice rather than restated.
+  const conditions = [status ? 'e.status=@status' : "e.status NOT IN ('resolved','accepted')"];
+  if (ruleGroup) conditions.push('e.rule_group=@group');
+  const filter = conditions.join(' AND ');
+  const bind = () => {
+    const params = [];
+    if (status) params.push(str('status', status));
+    if (ruleGroup) params.push(str('group', ruleGroup));
+    return params;
+  };
+
   return withConnection(async conn => {
-    const params = status ? [str('status', status)] : [];
-    const filter = status ? 'e.status=@status' : "e.status NOT IN ('resolved','accepted')";
+    const params = bind();
 
     const rules = await execSql(conn, `
       SELECT e.rule_id, MAX(e.rule_name) AS rule_name, MAX(e.business_area) AS business_area,
+             MAX(e.rule_group) AS rule_group,
              COUNT(*) AS total,
              SUM(CASE WHEN e.severity='high' THEN 1 ELSE 0 END) AS high,
              SUM(CASE WHEN e.severity='medium' THEN 1 ELSE 0 END) AS medium,
@@ -1337,7 +1375,7 @@ async function getRulesOverview({ status = null } = {}) {
       LEFT JOIN recon_runs r ON r.id = f.run_id
       WHERE ${filter}
       GROUP BY f.rule_id, f.run_id
-      ORDER BY f.rule_id, MAX(r.started_at) DESC`, status ? [str('status', status)] : []);
+      ORDER BY f.rule_id, MAX(r.started_at) DESC`, bind());
 
     const runsByRule = new Map();
     for (const row of byRun) {
@@ -1360,6 +1398,7 @@ async function getRulesOverview({ status = null } = {}) {
         ruleId: rule.rule_id,
         ruleName: rule.rule_name,
         businessArea: rule.business_area,
+        ruleGroup: normalizeRuleGroup(rule.rule_group),
         total: Number(rule.total),
         high: Number(rule.high), medium: Number(rule.medium), low: Number(rule.low),
         worstRecurrence: Number(rule.worst_recurrence),
@@ -1427,13 +1466,14 @@ async function getDashboardData({ runId = null } = {}) {
 
     const byRule = scoped
       ? await safe('run findings by rule', `SELECT TOP 20 f.rule_id, MAX(r.rule_name) AS rule_name, NULL AS business_area,
+            MAX(r.rule_group) AS rule_group,
             COUNT(*) AS open_count, MAX(CAST(f.is_new AS INT)) AS worst_recurrence, MAX(f.recorded_at) AS last_seen
           FROM recon_run_findings f LEFT JOIN recon_runs r ON r.id = f.run_id
           WHERE f.run_id=@run GROUP BY f.rule_id ORDER BY COUNT(*) DESC`, runParam())
-      : await safe('rules with open exceptions', `SELECT TOP 20 rule_id, rule_name, business_area,
+      : await safe('rules with open exceptions', `SELECT TOP 20 rule_id, rule_name, business_area, rule_group,
             COUNT(*) AS open_count, MAX(occurrence_count) AS worst_recurrence, MAX(last_seen_at) AS last_seen
           FROM recon_exceptions WHERE status NOT IN ('resolved','accepted')
-          GROUP BY rule_id, rule_name, business_area ORDER BY COUNT(*) DESC`);
+          GROUP BY rule_id, rule_name, business_area, rule_group ORDER BY COUNT(*) DESC`);
 
     const byOwner = scoped
       ? await safe('run findings by owner', `SELECT ISNULL(e.owner, '(unassigned)') AS owner, COUNT(*) AS total
@@ -1441,6 +1481,28 @@ async function getDashboardData({ runId = null } = {}) {
           WHERE f.run_id=@run GROUP BY e.owner ORDER BY COUNT(*) DESC`, runParam())
       : await safe('open exceptions by owner', `SELECT ISNULL(owner, '(unassigned)') AS owner, COUNT(*) AS total
           FROM recon_exceptions WHERE status NOT IN ('resolved','accepted') GROUP BY owner ORDER BY COUNT(*) DESC`);
+
+    // Coverage by the kind of control, not by the systems it touches. An estate
+    // with forty Left-to-Right rules and no Right-to-Left one is only checking half
+    // the question, and that is invisible in every other panel on this page.
+    const byGroup = scoped
+      ? await safe('run findings by rule group', `SELECT ISNULL(e.rule_group, 'ungrouped') AS rule_group,
+            COUNT(*) AS total,
+            SUM(CASE WHEN e.severity='high' THEN 1 ELSE 0 END) AS high
+          FROM recon_run_findings f JOIN recon_exceptions e ON e.id = f.exception_id
+          WHERE f.run_id=@run GROUP BY e.rule_group ORDER BY COUNT(*) DESC`, runParam())
+      : await safe('open exceptions by rule group', `SELECT ISNULL(rule_group, 'ungrouped') AS rule_group,
+            COUNT(*) AS total,
+            SUM(CASE WHEN severity='high' THEN 1 ELSE 0 END) AS high
+          FROM recon_exceptions WHERE status NOT IN ('resolved','accepted')
+          GROUP BY rule_group ORDER BY COUNT(*) DESC`);
+
+    // How many rules exist in each group, so a group with no exceptions is still
+    // visible as coverage rather than absent from the page.
+    const rulesByGroup = await safe('rules by group', `SELECT ISNULL(rule_group, 'ungrouped') AS rule_group,
+        COUNT(*) AS total,
+        SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active
+      FROM recon_rules GROUP BY rule_group`);
 
     const recentRuns = await safe('recent runs', 'SELECT TOP 15 * FROM recon_runs ORDER BY started_at DESC');
 
@@ -1459,7 +1521,8 @@ async function getDashboardData({ runId = null } = {}) {
 
     return {
       rules, exceptionsByStatus, exceptionsByOutcome, exceptionsBySeverity,
-      byRule, recentRuns, byOwner, ageing: ageing[0] || { week1: 0, month1: 0, older: 0 },
+      byRule, byGroup, rulesByGroup,
+      recentRuns, byOwner, ageing: ageing[0] || { week1: 0, month1: 0, older: 0 },
       scopedRun: run,
       scoped,
       problems,
@@ -1482,5 +1545,8 @@ module.exports = {
   updateExceptionStatus, assignException, commentOnException,
   getDashboardData, getRulesOverview,
   EXCEPTION_STATUS,
-  _private: { planExceptionChange, exceptionUpdateFor, chunkByParams },
+  _private: {
+    planExceptionChange, exceptionUpdateFor, chunkByParams,
+    ruleFieldParams, mapRuleField, writeRuleFields, RULE_FIELD_COLUMNS,
+  },
 };

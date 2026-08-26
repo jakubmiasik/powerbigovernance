@@ -49,6 +49,64 @@ const CLOSED_STATUSES = new Set([EXCEPTION_STATUS.RESOLVED, EXCEPTION_STATUS.ACC
 
 const RULE_STATUS = { DRAFT: 'draft', ACTIVE: 'active', RETIRED: 'retired' };
 
+// ── Rule groups ──
+//
+// The shape of a control, independent of which systems it happens to touch.
+// Reconciliation practice names a small number of recurring patterns, and naming
+// the pattern is what lets someone read a wall of rules and see coverage: an
+// estate with forty Left-to-Right controls and no Right-to-Left one is checking
+// that nothing was lost and not noticing what was invented.
+const RULE_GROUP_DEFS = [
+  {
+    key: 'start_to_start', label: 'Start-to-Start',
+    description: 'Two systems compared at the same point at the start of a process — both should have received the same feed.',
+  },
+  {
+    key: 'start_to_end', label: 'Start-to-End',
+    description: 'What entered the process against what came out of it, across every step in between.',
+  },
+  {
+    key: 'end_to_end', label: 'End-to-End',
+    description: 'The final state of two systems that must agree once all processing has settled.',
+  },
+  {
+    key: 'point_to_point', label: 'Point-to-Point',
+    description: 'Two adjacent hand-off points inside a longer chain, to locate where a break happened.',
+  },
+  {
+    key: 'left_to_right', label: 'Left-to-Right',
+    description: 'Completeness: everything present in the source has arrived in the target.',
+  },
+  {
+    key: 'right_to_left', label: 'Right-to-Left',
+    description: 'Existence: nothing sits in the target that did not come from the source.',
+  },
+  {
+    key: 'aggregate_to_detail', label: 'Aggregate-to-Detail',
+    description: 'A summarised or synthetic balance against the detailed records that make it up.',
+  },
+  {
+    key: 'period_over_period', label: 'Period-over-Period',
+    description: 'The same population in two periods, to show movement rather than a fixed expectation.',
+  },
+  {
+    key: 'ungrouped', label: 'Ungrouped',
+    description: 'No pattern chosen yet. Rules stay usable, but they do not roll up with anything.',
+  },
+];
+
+const DEFAULT_RULE_GROUP = 'ungrouped';
+const RULE_GROUP_BY_KEY = new Map(RULE_GROUP_DEFS.map(def => [def.key, def]));
+
+function normalizeRuleGroup(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return RULE_GROUP_BY_KEY.has(key) ? key : DEFAULT_RULE_GROUP;
+}
+
+function ruleGroupLabel(value) {
+  return (RULE_GROUP_BY_KEY.get(normalizeRuleGroup(value)) || {}).label || 'Ungrouped';
+}
+
 function isStatusTransitionAllowed(from, to) {
   if (from === to) return false;
   const def = STATUS_BY_KEY.get(from);
@@ -61,7 +119,31 @@ function isStatusTransitionAllowed(from, to) {
 //   field       a column in that source
 //   expression  raw SQL evaluated by the source, e.g. TRIM(Customer) or CASE WHEN…
 //   constant    a fixed value, for checking a column against an expected value
-const OPERAND_KINDS = ['field', 'expression', 'constant'];
+//   aggregate   a function over the rows sharing a business key, e.g. SUM(Amount)
+const OPERAND_KINDS = ['field', 'expression', 'constant', 'aggregate'];
+
+// ── Aggregates ──
+//
+// The two systems often hold the same fact at different grains: an analytical
+// ledger with one row per posting, and a synthetic balance with one row per
+// account. Comparing them row by row is meaningless — the control is
+// SUM(amount) per account on the left against amount on the right.
+//
+// The aggregation is pushed down to the source rather than done here: the
+// database groups far better than this process can, and reading a million
+// postings to add them up in JavaScript is exactly the cost the grouping exists
+// to avoid. A side that aggregates is grouped by everything it selects that
+// does not — which always includes the business key.
+const AGGREGATE_DEFS = [
+  { key: 'sum', label: 'Sum', sql: 'SUM', needsValue: true },
+  { key: 'count', label: 'Count', sql: 'COUNT', needsValue: false },
+  { key: 'count_distinct', label: 'Count distinct', sql: 'COUNT', distinct: true, needsValue: true },
+  { key: 'avg', label: 'Average', sql: 'AVG', needsValue: true },
+  { key: 'min', label: 'Minimum', sql: 'MIN', needsValue: true },
+  { key: 'max', label: 'Maximum', sql: 'MAX', needsValue: true },
+];
+
+const AGGREGATE_BY_KEY = new Map(AGGREGATE_DEFS.map(def => [def.key, def]));
 
 // Statement terminators, comment markers and anything that writes. A rule author
 // is trusted to write SQL, but a single expression should not be able to become
@@ -94,10 +176,45 @@ function validateSqlExpression(expression) {
 
 function normalizeOperand(operand, legacyField) {
   if (operand && OPERAND_KINDS.includes(operand.kind)) {
-    return { kind: operand.kind, value: operand.value === undefined ? '' : operand.value };
+    const normalized = { kind: operand.kind, value: operand.value === undefined ? '' : operand.value };
+    if (operand.kind === 'aggregate') {
+      normalized.fn = String(operand.fn || 'sum').trim().toLowerCase();
+      // What is inside the function can itself be a column or an expression —
+      // SUM(Amount) and SUM(CASE WHEN Reversed = 0 THEN Amount ELSE 0 END) are
+      // both things a control legitimately wants to say.
+      normalized.valueKind = operand.valueKind === 'expression' ? 'expression' : 'field';
+    }
+    return normalized;
   }
   // Rules written before expressions and constants existed stored a plain column.
   return { kind: 'field', value: legacyField || '' };
+}
+
+/**
+ * The SQL for one aggregate operand.
+ *
+ * The function itself comes from a fixed list rather than the rule text, so a
+ * rule author choosing "sum" can never turn the projection into something else.
+ */
+function aggregateSql(operand) {
+  const def = AGGREGATE_BY_KEY.get(operand.fn);
+  if (!def) throw new Error('Unsupported aggregate function in rule definition: "' + operand.fn + '"');
+
+  const inner = String(operand.value === undefined || operand.value === null ? '' : operand.value).trim();
+  if (!inner) {
+    // Counting nothing in particular means counting the rows in the group.
+    if (def.needsValue) throw new Error(def.label + ' needs a field or expression to aggregate.');
+    return 'COUNT(*)';
+  }
+  const target = operand.valueKind === 'expression' ? '(' + inner + ')' : quoteIdentifier(inner);
+  return def.sql + '(' + (def.distinct ? 'DISTINCT ' : '') + target + ')';
+}
+
+function describeAggregate(operand) {
+  const def = AGGREGATE_BY_KEY.get(operand.fn);
+  const name = def ? def.label.toLowerCase() : String(operand.fn || 'aggregate');
+  const inner = String(operand.value || '').trim();
+  return name + '(' + (inner || '*') + ') per business key';
 }
 
 function normalizeCompareField(field, index) {
@@ -117,6 +234,7 @@ function normalizeCompareField(field, index) {
 function describeOperand(operand) {
   if (operand.kind === 'constant') return 'constant "' + operand.value + '"';
   if (operand.kind === 'expression') return 'expression ' + operand.value;
+  if (operand.kind === 'aggregate') return describeAggregate(operand);
   return operand.value;
 }
 
@@ -146,19 +264,32 @@ function buildSelectSql({ dataset, selections, columns, rowLimit }) {
     : (columns || []).filter(Boolean).map(name => ({ alias: name, kind: 'field', value: name }));
   if (!list.length) throw new Error('No columns selected to read.');
 
+  // Everything selected that is not itself an aggregate has to be grouped by, or
+  // the database rejects the query. Collected here so the GROUP BY is derived from
+  // the projection rather than restated — the two cannot drift apart.
+  const grouped = [];
+  let aggregates = false;
+
   const projection = list.map(selection => {
     const alias = quoteIdentifier(selection.alias || selection.value);
-    if (selection.kind === 'expression') {
-      // Validated by validateSqlExpression when the rule was saved; wrapping keeps
-      // it a single value within the SELECT list.
-      return '(' + String(selection.value).trim() + ') AS ' + alias;
+    if (selection.kind === 'aggregate') {
+      aggregates = true;
+      return aggregateSql(selection) + ' AS ' + alias;
     }
-    return quoteIdentifier(selection.value) + ' AS ' + alias;
+    // Expressions are validated by validateSqlExpression when the rule is saved;
+    // wrapping keeps each one a single value within the SELECT list.
+    const term = selection.kind === 'expression'
+      ? '(' + String(selection.value).trim() + ')'
+      : quoteIdentifier(selection.value);
+    grouped.push(term);
+    return term + ' AS ' + alias;
   });
 
   const top = Number.parseInt(rowLimit, 10);
   const topClause = Number.isFinite(top) && top > 0 ? 'TOP (' + Math.min(top, 200000) + ') ' : '';
-  return 'SELECT ' + topClause + projection.join(', ') + ' FROM ' + quoteIdentifier(dataset);
+  let sql = 'SELECT ' + topClause + projection.join(', ') + ' FROM ' + quoteIdentifier(dataset);
+  if (aggregates && grouped.length) sql += ' GROUP BY ' + grouped.join(', ');
+  return sql;
 }
 
 /**
@@ -177,8 +308,8 @@ function planRule(rule) {
   const engineFields = fields.map((field, index) => {
     const aliasA = compareAlias(index, 'a');
     const aliasB = compareAlias(index, 'b');
-    if (field.a.kind !== 'constant') selectionsA.push({ alias: aliasA, kind: field.a.kind, value: field.a.value });
-    if (field.b.kind !== 'constant') selectionsB.push({ alias: aliasB, kind: field.b.kind, value: field.b.value });
+    if (field.a.kind !== 'constant') selectionsA.push({ alias: aliasA, ...field.a });
+    if (field.b.kind !== 'constant') selectionsB.push({ alias: aliasB, ...field.b });
 
     const planned = {
       label: field.label,
@@ -196,10 +327,25 @@ function planRule(rule) {
     return planned;
   });
 
+  // A side that aggregates returns one row per business key by construction, so
+  // duplicates on that side cannot occur — the rule's duplicate handling has
+  // nothing left to act on there, and the run should be able to say so.
+  const aggregatedA = selectionsA.some(selection => selection.kind === 'aggregate');
+  const aggregatedB = selectionsB.some(selection => selection.kind === 'aggregate');
+
   return {
     selectionsA,
     selectionsB,
-    engineRule: { ...rule, keyFieldA: KEY_ALIAS, keyFieldB: KEY_ALIAS, compareFields: engineFields },
+    aggregatedA,
+    aggregatedB,
+    engineRule: {
+      ...rule,
+      keyFieldA: KEY_ALIAS,
+      keyFieldB: KEY_ALIAS,
+      compareFields: engineFields,
+      aggregatedA,
+      aggregatedB,
+    },
   };
 }
 
@@ -207,12 +353,34 @@ function planRule(rule) {
 // at once rather than one per save.
 function validateCompareFields(compareFields) {
   const problems = [];
-  (compareFields || []).forEach((raw, index) => {
-    const field = normalizeCompareField(raw, index);
+  const fields = (compareFields || []).map(normalizeCompareField);
+
+  fields.forEach((field, index) => {
     const position = 'Value ' + (index + 1) + ' (' + field.label + ')';
     ['a', 'b'].forEach(side => {
       const operand = field[side];
       const label = position + ' — source ' + side.toUpperCase();
+
+      if (operand.kind === 'aggregate') {
+        const def = AGGREGATE_BY_KEY.get(operand.fn);
+        if (!def) {
+          problems.push(label + ': "' + operand.fn + '" is not an aggregate this engine can use.');
+          return;
+        }
+        const inner = String(operand.value || '').trim();
+        if (!inner) {
+          if (def.needsValue) problems.push(label + ': ' + def.label + ' needs a field or expression to aggregate.');
+          return; // COUNT(*) is complete on its own.
+        }
+        if (operand.valueKind === 'expression') {
+          const problem = validateSqlExpression(inner);
+          if (problem) problems.push(label + ': ' + problem);
+        } else {
+          try { quoteIdentifier(inner); } catch (err) { problems.push(label + ': ' + err.message); }
+        }
+        return;
+      }
+
       if (!String(operand.value || '').trim() && operand.kind !== 'constant') {
         problems.push(label + ': choose a field or write an expression.');
         return;
@@ -222,11 +390,31 @@ function validateCompareFields(compareFields) {
         if (problem) problems.push(label + ': ' + problem);
       }
     });
+
     // Comparing one fixed value with another proves nothing about the data.
     if (field.a.kind === 'constant' && field.b.kind === 'constant') {
       problems.push(position + ': both sides are constants, so nothing from either system is checked.');
     }
   });
+
+  // Aggregating anything on one side groups that whole side by the business key,
+  // so a plain column read alongside it would silently be added to the grouping —
+  // splitting one business key into several rows and raising duplicates that only
+  // exist because of how the rule was written. Refuse it and say why.
+  ['a', 'b'].forEach(side => {
+    const readsSource = fields.filter(field => field[side].kind !== 'constant');
+    const aggregated = readsSource.filter(field => field[side].kind === 'aggregate');
+    if (!aggregated.length || aggregated.length === readsSource.length) return;
+
+    const plain = readsSource
+      .filter(field => field[side].kind !== 'aggregate')
+      .map(field => field.label)
+      .join(', ');
+    problems.push('Source ' + side.toUpperCase() + ' is grouped by the business key because '
+      + aggregated.length + ' value(s) use an aggregate, so every other value read from it must aggregate too '
+      + '(or be a fixed value). Not aggregated: ' + plain + '.');
+  });
+
   return problems;
 }
 
@@ -509,6 +697,15 @@ function exceptionFingerprint(ruleId, exception) {
 
 module.exports = {
   OPERAND_KINDS,
+  AGGREGATE_DEFS,
+  AGGREGATE_BY_KEY,
+  aggregateSql,
+  describeOperand,
+  RULE_GROUP_DEFS,
+  RULE_GROUP_BY_KEY,
+  DEFAULT_RULE_GROUP,
+  normalizeRuleGroup,
+  ruleGroupLabel,
   KEY_ALIAS,
   quoteIdentifier,
   buildSelectSql,

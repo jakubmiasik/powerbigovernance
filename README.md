@@ -134,7 +134,7 @@ src/
 
 Verifies that records representing the same business event exist and agree across two systems — an invoice in an ERP and the same invoice in the reporting platform, for example.
 
-Reconciliation and master data sit together under **Quality** in the navigation, because they are two uses of the same registered systems. A system is registered once at `/quality/sources` and both read it; `/quality` is the landing page showing what is configured. Each discipline has a **How it works** button explaining the steps, what it produces, and a worked example.
+Reconciliation and master data sit together under **Quality** in the navigation, because they are two uses of the same registered systems. A system is registered once at `/quality/sources` and both read it; the section's own entry is **Quality Configuration** — `/quality`, the landing page showing what is configured. Each discipline has a **How it works** button explaining the steps, what it produces, and a worked example.
 
 | Page | Purpose |
 |---|---|
@@ -145,6 +145,8 @@ Reconciliation and master data sit together under **Quality** in the navigation,
 | `/reconciliation/runs` | Full run history: what was checked, when, under which rule version, and what it produced. Runs can be deleted individually, per rule, or entirely |
 | `/reconciliation/compare` | Every rule's latest run against its previous one, and any two runs of the same rule side by side |
 | `/reconciliation/exceptions` | Investigate, assign, comment and resolve discrepancies, one at a time or in bulk |
+
+The dataset dropdowns on the rule form and the master data model form carry a **text filter**: a warehouse with several hundred tables is a list nobody can scroll, and typing `sales` narrows it to `dbo.SalesOrder` and `Sales.Header` alike. A dataset already chosen stays selectable even when it falls outside the filter, so typing never silently changes which table a rule reads.
 
 Two kinds of source can be registered:
 
@@ -169,7 +171,32 @@ The comparison page opens on **every rule's latest completed run against the one
 
 Comparing two runs works from the findings each run recorded, not from its totals — twenty exceptions before and twenty after can mean nothing moved, or that twenty were fixed and twenty new ones appeared. Only runs of the same rule can be compared, because different rules check different records. Runs recorded before per-run findings were kept still compare on totals, and the page says so rather than reporting every item as fixed.
 
-Each side of a comparison can be a **field**, a **SQL expression** evaluated by that source (`TRIM(Customer)`, `CASE WHEN Status = 1 THEN 'Posted' ELSE 'Draft' END`), or a **fixed value** to check a column against. Expressions are validated when the rule is saved — statement separators, comments and anything that writes are refused — but they are author-written SQL running against the source, so rule authoring should be treated as a privileged capability.
+Each side of a comparison can be a **field**, a **SQL expression** evaluated by that source (`TRIM(Customer)`, `CASE WHEN Status = 1 THEN 'Posted' ELSE 'Draft' END`), a **fixed value** to check a column against, or an **aggregate**. Expressions are validated when the rule is saved — statement separators, comments and anything that writes are refused — but they are author-written SQL running against the source, so rule authoring should be treated as a privileged capability.
+
+### Comparing across different grains
+
+The two systems often hold the same fact at different grains: an analytical ledger with one row per posting, and a synthetic balance with one row per account. Row-by-row comparison is meaningless there. An **aggregate** operand states the control as it actually reads — `Sum of Amount` on the detailed side against the plain `Amount` field on the summarised side, with `Account` as the business key:
+
+```sql
+-- source A, the analytical ledger
+SELECT [Account] AS [recon_key], SUM([Amount]) AS [recon_c0a] FROM [dbo].[Postings] GROUP BY [Account]
+-- source B, the synthetic balance
+SELECT [Account] AS [recon_key], [Amount] AS [recon_c0b] FROM [dbo].[Balances]
+```
+
+The functions are `sum`, `count`, `count distinct`, `average`, `minimum` and `maximum`, and each wraps either a column or an expression (`SUM(CASE WHEN Reversed = 0 THEN Amount ELSE 0 END)`). The function comes from a fixed list rather than from the rule text, so choosing "sum" can never turn the projection into something else.
+
+The aggregation happens in the source database, not here: it groups far better than this process can, and reading a million postings across the wire to add them up in JavaScript is precisely the cost the grouping exists to avoid. The `GROUP BY` is derived from the projection — everything selected that is not itself an aggregate — so the two cannot drift apart.
+
+An aggregated side returns one row per business key by construction, so duplicates on that side cannot arise and the rule's duplicate handling has nothing to act on there. Every value read from that side must then aggregate as well: a plain column alongside an aggregate would silently join the `GROUP BY` and split one business key into several rows, raising duplicates that exist only because of how the rule was written. The rule form warns while it is being written, and the server refuses it on save, naming the values that need attention.
+
+### Groups of rules
+
+Every rule belongs to a group naming the *kind* of control it is, independent of which systems it happens to touch: **Start-to-Start**, **Start-to-End**, **End-to-End**, **Point-to-Point**, **Left-to-Right**, **Right-to-Left**, **Aggregate-to-Detail**, **Period-over-Period**, or **Ungrouped** for one nobody has classified yet.
+
+The group is denormalised onto runs and exceptions the same way the rule name is, because the exception list filters and groups by it on every page load. It appears on the rule list and form, the exception list and detail, the run list and detail, the comparison overview, and the Rules Overview hierarchy, and both the exception list and the Rules Overview can be filtered to one group. Re-classifying a rule carries through to the exceptions it already raised on the next run that sees them, rather than leaving the estate split between the old label and the new one.
+
+The dashboard gains a **Coverage by Group of Rules** panel showing, per group, how many rules exist, how many are active, and how many exceptions are open. That answers the question no individual rule can: an estate with forty Left-to-Right controls and no Right-to-Left one is checking that nothing was lost and not noticing what the target invented.
 
 Outcomes are match, missing from source A, missing from source B, value mismatch, duplicate record, and invalid or incomplete key. Numeric and date comparisons support tolerances so agreed-immaterial differences do not raise exceptions.
 
@@ -240,7 +267,7 @@ The reconciliation engine is fully normalised. What used to be four JSON columns
 
 | Was | Is | Why |
 |---|---|---|
-| `recon_rules.compare_fields` | `recon_rule_fields` | One row per compare field, with the operand kind and tolerance as columns. Changing one field no longer rewrites the whole definition, and "which rules compare this column" becomes answerable |
+| `recon_rules.compare_fields` | `recon_rule_fields` | One row per compare field, with the operand kind, aggregate function and tolerance as columns. Changing one field no longer rewrites the whole definition, and "which rules compare this column" becomes answerable |
 | `recon_exceptions.values_a` / `values_b` | `recon_exception_values` | One row per field per side. The list and every bulk action work without them, which is the point |
 | `recon_exceptions.differences` | `recon_exception_differences` | One row per disagreeing field, indexed by field — so "which field mismatches most often" is a query |
 | `recon_runs.counts_json` | `recon_run_outcome_counts` | One row per outcome, so trends across runs are a query rather than a parse of every run |
@@ -270,6 +297,9 @@ A golden record's provenance and a run's progress snapshot are each read as a wh
 - A run whose application instance stopped mid-scan is recognised rather than left at "running" forever: once its progress has not been written for `ANALYSIS_HEARTBEAT_STALE_SECONDS` (default 900) it is reported as **interrupted**, and startup marks such runs interrupted in the database.
 - Basic security headers, JSON/form body limits, and a lightweight `/api` rate limiter are enabled without adding runtime dependencies.
 - Bootstrap's contextual table row classes (`table-warning` and friends) paint a pale background and set black text. The app's dark theme colours table cells directly, which wins on the cells and puts light text back — pale on pale. Dark mode now gives those rows dark tints at a specificity that beats the generic cell rule, so a highlighted row stays both highlighted and readable.
+- An aggregate operand is stored as a function plus what the function is applied to (`a_fn`, `a_value_kind`), rather than as `"sum(Amount)"` encoded into the value text — text nothing could query, validate, or re-render back into a form.
+- A rule's group lives on the rule, and is denormalised onto `recon_runs` and `recon_exceptions`. The exception list filters and groups by it on every page load, and joining back to the rule for a label would cost that join on every row.
+- Every reconciliation view is rendered in the test suite with the shape its route supplies. These templates are only reachable through a live database, so a local a route stopped passing — or a column a view started reading — used to appear as a blank page in a browser and nowhere else.
 - Repository queries that share one connection run one after another. A `tedious` connection carries a single request at a time, so issuing several together leaves the first answered and the rest rejected — which is how the reconciliation dashboard came to render empty panels that looked like stale data. A panel that genuinely cannot be read is now named on the page and logged, rather than blanked silently.
 - Startup migrations run statement by statement, so one failing `ALTER` no longer skips the migrations behind it, and a database that is unreachable at startup no longer prevents the capacity scheduler from starting.
 - The capacity scheduler catches up on schedules that came due while the process was restarting or idle. The look-back window is `SCHEDULER_CATCHUP_MINUTES` (default 20, `0` disables it); already-completed runs are recognised from `capacity_schedule_history`, so a catch-up never repeats an action that already ran.
