@@ -16,6 +16,7 @@ const {
   buildAccessOverview, markServicePrincipalAccess,
   ACCESS_LEVELS, PRINCIPAL_TYPES, accessLevel, principalTypeLabel,
 } = require('../services/workspaceAccessService');
+const { pickTenantWideRun, isTenantWide, scopeFromRow, describeScope } = require('../services/analysisScopeService');
 
 /**
  * The run the access picture is read from.
@@ -29,8 +30,17 @@ async function resolveRun(requestedId) {
   if (!runs.length) return { runs: [], run: null };
 
   const wanted = Number.parseInt(requestedId, 10);
-  const run = (Number.isFinite(wanted) && runs.find(candidate => Number(candidate.id) === wanted)) || runs[0];
-  return { runs, run };
+  if (Number.isFinite(wanted)) {
+    const asked = runs.find(candidate => Number(candidate.id) === wanted);
+    if (asked) return { runs, run: asked };
+  }
+
+  // The default has to be a whole-tenant scan. Every figure on this page is about
+  // the tenant — how many workspaces nobody administers, who holds admin anywhere —
+  // and a scan of three workspaces would not be wrong about those three, it would
+  // be wrong about everything else and silently. A scoped run is only the default
+  // when there is no tenant-wide one to prefer, and the page says so.
+  return { runs, run: pickTenantWideRun(runs) || runs[0] };
 }
 
 /**
@@ -70,8 +80,9 @@ router.get('/', async (req, res) => {
   const base = {
     title: 'Grant Access', user: req.user, hideRunSelector: true,
     accessLevels: ACCESS_LEVELS, principalTypes: PRINCIPAL_TYPES,
-    accessLevel, principalTypeLabel,
+    accessLevel, principalTypeLabel, describeScope, scopeFromRow,
     grantAuth: req.query.grantAuth === 'success',
+    partialScope: false,
   };
   try {
     const { runs, run } = await resolveRun(req.query.accessRunId);
@@ -85,7 +96,13 @@ router.get('/', async (req, res) => {
     }
 
     const { overview, indexed } = await loadAccess(run.id);
-    res.render('access/index', { ...base, runs, run, servicePrincipals, overview, indexed, error: null });
+    res.render('access/index', {
+      ...base, runs, run, servicePrincipals, overview, indexed,
+      // A scoped scan covers what it covers. Saying so is the difference between a
+      // partial picture and a wrong one.
+      partialScope: !isTenantWide(run),
+      error: null,
+    });
   } catch (err) {
     res.render('access/index', {
       ...base, runs: [], run: null, servicePrincipals: [],

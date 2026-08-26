@@ -4016,6 +4016,8 @@ test('the master data form filters its raw-table list too', async () => {
 // workspace at a time.
 
 const workspaceAccess = require('../src/services/workspaceAccessService');
+const analysisScope = require('../src/services/analysisScopeService');
+const scheduleDue = require('../src/services/scheduleDueService');
 
 const ACCESS_FIXTURE = {
   workspaces: [
@@ -4175,6 +4177,8 @@ test('the Grant Access page renders with and without a scan behind it', async ()
     hideRunSelector: true, title: 'Grant Access',
     accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
     accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    partialScope: false,
   };
 
   const populated = await ejs.renderFile('src/views/access/index.ejs', {
@@ -4213,9 +4217,360 @@ test('the analysis page hands the grant flow over rather than keeping its own', 
     user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis',
     breadcrumb: [], availableRuns: [], globalRun: null, title: 'Run Analysis',
     servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'e' }],
-    runs: [], error: null,
+    runs: [], error: null, schedules: [], scheduleTypes: scheduleDue.SCHEDULE_TYPES,
   });
   assert.doesNotMatch(html, /Grant SP Access to Workspaces/);
   assert.doesNotMatch(html, /grantAccessModal/);
   assert.match(html, /\/settings\/access/, 'and points at where it went');
+});
+
+// ── Scoped analysis scans ──
+//
+// A scan used to mean the whole tenant, always. On a large tenant that is hours of
+// API calls to answer a question about three workspaces. A scoped scan is a
+// smaller, faster answer — as long as nothing downstream mistakes it for the full
+// picture, which is what most of these tests are about.
+
+const analysisLauncher = require('../src/services/analysisLauncher');
+const analysisScheduleService = require('../src/services/analysisScheduleService');
+
+test('a scope with no workspaces selected falls back to the whole tenant', () => {
+  // A scan of nothing is never what anyone meant, and would look identical to a
+  // scan that found an empty tenant.
+  assert.equal(analysisScope.normalizeScope({ kind: 'workspaces', workspaceIds: [] }).kind, 'tenant');
+  assert.equal(analysisScope.normalizeScope(null).kind, 'tenant');
+  assert.equal(analysisScope.normalizeScope({ kind: 'nonsense', workspaceIds: ['a'] }).kind, 'tenant');
+});
+
+test('but asking for workspace scope is remembered even when nothing was selected', () => {
+  // Otherwise "selected workspaces, none ticked" is accepted as a nightly scan of
+  // the entire tenant — the exact surprise scoping exists to avoid.
+  assert.equal(analysisScope.requestedWorkspaceScope({ kind: 'workspaces', workspaceIds: [] }), true);
+  assert.equal(analysisScope.requestedWorkspaceScope({ scope: 'tenant' }), false);
+});
+
+test('a scope de-duplicates workspaces and keeps the names given', () => {
+  const scope = analysisScope.normalizeScope({
+    kind: 'workspaces',
+    workspaceIds: [{ id: 'ws-1', name: 'Finance' }, { id: 'WS-1' }, { id: 'ws-2', name: 'Sales' }, { id: '' }],
+  });
+  assert.equal(scope.workspaces.length, 2);
+  assert.deepEqual(scope.workspaces.map(w => w.id), ['ws-1', 'ws-2']);
+  assert.equal(scope.workspaces[0].name, 'Finance');
+});
+
+test('a scope survives a round trip through the columns it is stored in', () => {
+  const scope = analysisScope.normalizeScope({ kind: 'workspaces', workspaceIds: [{ id: 'ws-1', name: 'Finance' }] });
+  const row = analysisScope.scopeToRow(scope);
+  assert.equal(row.scopeKind, 'workspaces');
+  assert.deepEqual(analysisScope.scopeFromRow({ scope_kind: row.scopeKind, scope_workspaces: row.scopeWorkspaces }), scope);
+
+  // A tenant scan stores no list at all rather than an empty one.
+  assert.equal(analysisScope.scopeToRow({ kind: 'tenant' }).scopeWorkspaces, null);
+  // Corrupt JSON must not throw on a page that only wants a label.
+  assert.equal(analysisScope.scopeFromRow({ scope_kind: 'workspaces', scope_workspaces: '{oops' }).kind, 'tenant');
+});
+
+test('applying a scope names the workspaces it could not find', () => {
+  // A scheduled scoped run whose workspace was deleted would otherwise keep
+  // succeeding while quietly covering less every week.
+  const result = analysisScope.applyScope(
+    [{ id: 'ws-1', displayName: 'Finance' }, { id: 'ws-3', displayName: 'Other' }],
+    { kind: 'workspaces', workspaceIds: [{ id: 'ws-1', name: 'Finance' }, { id: 'ws-2', name: 'Gone' }] }
+  );
+  assert.deepEqual(result.selected.map(w => w.id), ['ws-1']);
+  assert.deepEqual(result.missing.map(w => w.name), ['Gone']);
+});
+
+test('a tenant scope selects everything and misses nothing', () => {
+  const all = [{ id: 'a' }, { id: 'b' }];
+  const result = analysisScope.applyScope(all, { kind: 'tenant' });
+  assert.equal(result.selected.length, 2);
+  assert.equal(result.missing.length, 0);
+});
+
+test('items are narrowed to the scope, so the totals describe what was scanned', () => {
+  // A scoped run reporting the tenant's item count would be worse than not scoping.
+  const items = [{ workspaceId: 'ws-1' }, { workspaceId: 'WS-1' }, { workspaceId: 'ws-9' }];
+  assert.equal(analysisScope.filterItemsToScope(items, [{ id: 'ws-1' }]).length, 2);
+  assert.equal(analysisScope.filterItemsToScope(items, []).length, 0);
+});
+
+test('a scope describes itself without ever being ambiguous about coverage', () => {
+  assert.equal(analysisScope.describeScope({ kind: 'tenant' }), 'Whole tenant');
+  assert.equal(
+    analysisScope.describeScope({ kind: 'workspaces', workspaceIds: [{ id: '1', name: 'Finance' }] }),
+    '1 workspace: Finance');
+  assert.match(
+    analysisScope.describeScope({
+      kind: 'workspaces',
+      workspaceIds: [{ id: '1', name: 'A' }, { id: '2', name: 'B' }, { id: '3', name: 'C' }, { id: '4', name: 'D' }],
+    }),
+    /4 workspaces: A, B, C and 1 more/);
+});
+
+test('anything tenant-wide picks the last tenant-wide run, not just the last run', () => {
+  const runs = [
+    { id: 12, status: 'completed', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a"}]' },
+    { id: 11, status: 'running', scope_kind: 'tenant' },
+    { id: 10, status: 'completed', scope_kind: 'tenant' },
+  ];
+  assert.equal(analysisScope.pickTenantWideRun(runs).id, 10);
+  // Runs recorded before scopes existed have no column, and were tenant-wide.
+  assert.equal(analysisScope.pickTenantWideRun([{ id: 3, status: 'completed' }]).id, 3);
+  assert.equal(analysisScope.pickTenantWideRun([{ id: 1, status: 'completed', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a"}]' }]), null);
+});
+
+// ── When a schedule is due ──
+
+const DUE_DAILY = { schedule_type: 'daily', schedule_hour: 7, schedule_minute: 30, timezone: 'UTC' };
+
+test('a daily schedule is due only at its own minute', () => {
+  const at = (hour, minute) => scheduleDue.isDueNow(DUE_DAILY, { hour, minute, dayOfWeek: 3, year: 2026, month: 8, day: 26 });
+  assert.equal(at(7, 30), true);
+  assert.equal(at(7, 31), false);
+  assert.equal(at(8, 30), false);
+});
+
+test('hourly ignores the hour, weekdays exclude the weekend, weekly picks its day', () => {
+  const local = (dayOfWeek, hour, minute) => ({ dayOfWeek, hour, minute, year: 2026, month: 8, day: 26 });
+  assert.equal(scheduleDue.isDueNow({ schedule_type: 'hourly', schedule_minute: 15 }, local(3, 23, 15)), true);
+  assert.equal(scheduleDue.isDueNow({ schedule_type: 'weekdays', schedule_hour: 7, schedule_minute: 0 }, local(6, 7, 0)), false);
+  assert.equal(scheduleDue.isDueNow({ schedule_type: 'weekdays', schedule_hour: 7, schedule_minute: 0 }, local(5, 7, 0)), true);
+  assert.equal(scheduleDue.isDueNow({ schedule_type: 'weekly', schedule_day: 'Tuesday', schedule_hour: 7, schedule_minute: 0 }, local(2, 7, 0)), true);
+  assert.equal(scheduleDue.isDueNow({ schedule_type: 'weekly', schedule_day: 'Tuesday', schedule_hour: 7, schedule_minute: 0 }, local(3, 7, 0)), false);
+});
+
+test('the catch-up window finds a slot the worker slept through, and says how late', () => {
+  // App Service recycles workers, and a schedule that fires at exactly one minute
+  // would otherwise be lost for the whole day.
+  const now = new Date('2026-08-26T07:45:00Z');
+  const due = scheduleDue.findDueSlot(DUE_DAILY, 'UTC', now, 60);
+  assert.ok(due, 'a schedule due 15 minutes ago is still within a 60 minute window');
+  assert.equal(due.minutesLate, 15);
+  assert.equal(due.slotKey, '2026-08-26T07:30');
+
+  // Outside the window it is not due, rather than being replayed from yesterday.
+  assert.equal(scheduleDue.findDueSlot(DUE_DAILY, 'UTC', now, 5), null);
+});
+
+test('a schedule reads back the way it was set, in its own timezone', () => {
+  assert.equal(scheduleDue.describeSchedule({ schedule_type: 'daily', schedule_hour: 2, schedule_minute: 5, timezone: 'Europe/Warsaw' }),
+    'Every day at 02:05 Europe/Warsaw');
+  assert.equal(scheduleDue.describeSchedule({ schedule_type: 'hourly', schedule_minute: 0, timezone: 'UTC' }),
+    'Every hour at :00 (UTC)');
+  assert.equal(scheduleDue.describeSchedule({ schedule_type: 'weekly', schedule_day: 'Sunday', schedule_hour: 23, schedule_minute: 0, timezone: 'UTC' }),
+    'Every Sunday at 23:00 UTC');
+  assert.equal(scheduleDue.describeSchedule({ schedule_type: 'weekdays', schedule_hour: 6, schedule_minute: 0, timezone: 'UTC' }),
+    'Weekdays at 06:00 UTC');
+});
+
+// ── Analysis schedules ──
+
+test('a schedule is refused with the reason, one problem at a time', () => {
+  const base = { name: 'Nightly', scheduleType: 'daily', hour: 2, minute: 0, scope: { kind: 'tenant' } };
+  assert.equal(analysisScheduleService.validateSchedule({ ...base }), null);
+  assert.match(analysisScheduleService.validateSchedule({ ...base, name: '  ' }), /needs a name/);
+  assert.match(analysisScheduleService.validateSchedule({ ...base, scheduleType: 'yearly' }), /how often/);
+  assert.match(analysisScheduleService.validateSchedule({ ...base, minute: 77 }), /minute must be/);
+  assert.match(analysisScheduleService.validateSchedule({ ...base, hour: 25 }), /hour must be/);
+  assert.match(analysisScheduleService.validateSchedule({ ...base, scheduleType: 'weekly', day: null }), /day of the week/);
+  // Hourly has no hour to be wrong about.
+  assert.equal(analysisScheduleService.validateSchedule({ ...base, scheduleType: 'hourly', hour: null }), null);
+});
+
+test('choosing workspace scope and selecting none is refused, not run tenant-wide', () => {
+  const problem = analysisScheduleService.validateSchedule({
+    name: 'Nightly', scheduleType: 'daily', hour: 2, minute: 0,
+    scope: { kind: 'workspaces', workspaceIds: [] },
+  });
+  assert.match(problem, /at least one workspace/);
+});
+
+test('a stored schedule drops the fields its frequency does not use', () => {
+  const hourly = analysisScheduleService.toStoredSchedule({
+    name: ' Hourly ', scheduleType: 'hourly', hour: 9, minute: 15, day: 'Monday',
+    timezone: 'Europe/Warsaw', scope: { kind: 'tenant' },
+  });
+  assert.equal(hourly.name, 'Hourly');
+  assert.equal(hourly.hour, null, 'an hourly schedule has no hour to store');
+  assert.equal(hourly.day, null, 'only a weekly schedule has a day');
+  assert.equal(hourly.scopeKind, 'tenant');
+  assert.equal(hourly.scopeWorkspaces, null);
+
+  const weekly = analysisScheduleService.toStoredSchedule({
+    name: 'W', scheduleType: 'weekly', hour: 3, minute: 0, day: 'Friday', timezone: 'UTC',
+    scope: { kind: 'workspaces', workspaceIds: [{ id: 'ws-1', name: 'Finance' }] },
+  });
+  assert.equal(weekly.day, 'Friday');
+  assert.deepEqual(JSON.parse(weekly.scopeWorkspaces), [{ id: 'ws-1', name: 'Finance' }]);
+});
+
+test('a schedule will not stack a scan on one of its own that is still running', async () => {
+  // Two scans of the same scope at once is double the API load for an answer
+  // neither of them is.
+  const runs = [
+    { id: 5, status: 'running', schedule_id: 2 },
+    { id: 4, status: 'completed', schedule_id: 2 },
+  ];
+  assert.equal(analysisScheduleService.findRunningRun(runs, 2).id, 5);
+  // A different schedule's run is not in the way: scoped schedules are meant to
+  // be able to run alongside each other.
+  assert.equal(analysisScheduleService.findRunningRun(runs, 3), null);
+  assert.equal(analysisScheduleService.findRunningRun([{ id: 1, status: 'completed', schedule_id: 2 }], 2), null);
+});
+
+test('a due schedule starts a scan through the launcher and records what it did', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    getAnalysisRuns: dbService.getAnalysisRuns,
+    logAnalysisScheduleRun: dbService.logAnalysisScheduleRun,
+  };
+  const logged = [];
+  const started = [];
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }, { id: 2, name: 'Other', tenant_id: 'u' }];
+  dbService.getAnalysisRuns = async () => [];
+  dbService.logAnalysisScheduleRun = async (...args) => { logged.push(args); };
+  analysisLauncher.register(async options => { started.push(options); return { runId: 77 }; });
+
+  try {
+    const result = await analysisScheduleService.executeSchedule({
+      id: 2, name: 'Nightly finance', sp_id: 2,
+      scope_kind: 'workspaces', scope_workspaces: '[{"id":"ws-1","name":"Finance"}]',
+    });
+    assert.equal(result.status, 'started');
+    assert.equal(result.runId, 77);
+    assert.equal(started.length, 1);
+    assert.equal(started[0].sp.id, 2, 'the schedule names its own service principal');
+    assert.equal(started[0].scheduleId, 2, 'the run records which schedule started it');
+    assert.equal(started[0].scope.workspaces[0].id, 'ws-1');
+    assert.match(started[0].runBy, /Nightly finance/);
+    assert.equal(logged[0][2], 'started');
+  } finally {
+    Object.assign(dbService, original);
+    analysisLauncher._reset();
+  }
+});
+
+test('with a scan of its own still running, the schedule records a skip', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    getAnalysisRuns: dbService.getAnalysisRuns,
+    logAnalysisScheduleRun: dbService.logAnalysisScheduleRun,
+  };
+  const logged = [];
+  let launched = 0;
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP' }];
+  dbService.getAnalysisRuns = async () => [{ id: 9, status: 'running', schedule_id: 2 }];
+  dbService.logAnalysisScheduleRun = async (...args) => { logged.push(args); };
+  analysisLauncher.register(async () => { launched += 1; return { runId: 1 }; });
+
+  try {
+    const result = await analysisScheduleService.executeSchedule({ id: 2, name: 'Nightly', scope_kind: 'tenant' });
+    assert.equal(result.status, 'skipped');
+    assert.equal(launched, 0, 'a skip must not also start a scan');
+    assert.equal(logged[0][2], 'skipped');
+    assert.match(logged[0][3], /#9/, 'the skip names the run that is in the way');
+  } finally {
+    Object.assign(dbService, original);
+    analysisLauncher._reset();
+  }
+});
+
+test('with no runner registered the schedule fails loudly rather than silently', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    getAnalysisRuns: dbService.getAnalysisRuns,
+    logAnalysisScheduleRun: dbService.logAnalysisScheduleRun,
+  };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP' }];
+  dbService.getAnalysisRuns = async () => [];
+  dbService.logAnalysisScheduleRun = async () => {};
+  analysisLauncher._reset();
+
+  try {
+    const result = await analysisScheduleService.executeSchedule({ id: 2, name: 'N', scope_kind: 'tenant' });
+    assert.equal(result.status, 'error');
+    assert.match(result.message, /No analysis runner/);
+  } finally {
+    Object.assign(dbService, original);
+  }
+});
+
+test('a run without a service principal is an error, not a scan under the wrong one', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    logAnalysisScheduleRun: dbService.logAnalysisScheduleRun,
+  };
+  dbService.getServicePrincipals = async () => [];
+  dbService.logAnalysisScheduleRun = async () => {};
+  try {
+    const result = await analysisScheduleService.executeSchedule({ id: 1, name: 'N', scope_kind: 'tenant' });
+    assert.equal(result.status, 'error');
+    assert.match(result.message, /No service principal/);
+  } finally {
+    Object.assign(dbService, original);
+  }
+});
+
+test('the launcher refuses rather than pretending a scan started', async () => {
+  analysisLauncher._reset();
+  try {
+    assert.equal(analysisLauncher.isRegistered(), false);
+    await assert.rejects(() => analysisLauncher.start({}), /No analysis runner is registered/);
+  } finally {
+    // The analysis route registered the real runner when it loaded; leaving the
+    // module empty would break any later test that starts a scan.
+    delete require.cache[require.resolve('../src/routes/analysis')];
+    require('../src/routes/analysis');
+  }
+  assert.equal(analysisLauncher.isRegistered(), true);
+});
+
+test('the analysis page offers a scope picker and its schedules', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/analysis/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis',
+    breadcrumb: [], availableRuns: [], globalRun: null, title: 'Run Analysis',
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'e' }],
+    liveProgress: {}, error: null,
+    scheduleTypes: scheduleDue.SCHEDULE_TYPES,
+    runs: [{
+      id: 4, sp_name: 'SP', status: 'completed', started_at: '2026-08-01T00:00:00Z', schedule_id: 3,
+      total_workspaces: 2, scope: { kind: 'workspaces', workspaces: [{ id: 'a', name: 'Finance' }] },
+      scopeLabel: '1 workspace: Finance',
+    }],
+    schedules: [analysisScheduleService.describeStoredSchedule({
+      id: 3, name: 'Nightly finance', sp_id: 1, enabled: true,
+      scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]',
+      schedule_type: 'daily', schedule_hour: 2, schedule_minute: 0, timezone: 'Europe/Warsaw',
+    })],
+  });
+  assert.match(html, /Selected workspaces only/);
+  assert.match(html, /id="scanWorkspaceList"/);
+  assert.match(html, /Scheduled Scans \(1\)/);
+  assert.match(html, /Nightly finance/);
+  assert.match(html, /Every day at 02:00 Europe\/Warsaw/);
+  // A run's coverage has to be visible in the history, or a scoped run reads as a
+  // tenant scan that mysteriously found two workspaces.
+  assert.match(html, /1 workspace: Finance/);
+});
+
+test('the Grant Access page says so when the scan behind it was scoped', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/access/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings/access',
+    breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Grant Access',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    overview: workspaceAccess.buildAccessOverview(ACCESS_FIXTURE), indexed: true, error: null, grantAuth: false,
+    runs: [], servicePrincipals: [],
+    run: { id: 12, started_at: '2026-08-01T00:00:00Z', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]' },
+    partialScope: true,
+  });
+  // Every figure on that page is about the tenant. A scoped scan is not wrong
+  // about the workspaces it covered — it is wrong about everything else.
+  assert.match(html, /not the\s+whole tenant/);
+  assert.match(html, /1 workspace: Finance/);
 });
