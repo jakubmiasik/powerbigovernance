@@ -4007,3 +4007,215 @@ test('the master data form filters its raw-table list too', async () => {
   });
   assert.match(html, /id="datasetFilter"/);
 });
+
+// ── Workspace access ──
+//
+// A workspace detail page answers "who is in this workspace". The question
+// governance gets asked is the other way round — what can this person reach, and
+// which workspaces has nobody responsible for — and neither can be answered one
+// workspace at a time.
+
+const workspaceAccess = require('../src/services/workspaceAccessService');
+
+const ACCESS_FIXTURE = {
+  workspaces: [
+    { workspace_id: 'ws-1', name: 'Finance', state: 'Active', capacity_name: 'F64', item_count: 12, users_readable: 1 },
+    // Readable, and nobody can administer it.
+    { workspace_id: 'ws-2', name: 'Orphan', state: 'Active', item_count: 1, users_readable: 1 },
+    // The scan could not read this one's access list at all.
+    { workspace_id: 'ws-3', name: 'Marketing', state: 'Active', item_count: 3, users_readable: 0 },
+  ],
+  grants: [
+    { workspace_id: 'ws-1', principal_id: 'u1', principal_type: 'User', display_name: 'Ann', email: 'Ann@X.com', access_right: 'Admin' },
+    { workspace_id: 'ws-1', principal_id: 'sp1', principal_type: 'App', display_name: 'Scanner', email: null, access_right: 'Member' },
+    { workspace_id: 'ws-2', principal_id: 'u1', principal_type: 'User', display_name: 'Ann', email: 'ann@x.com', access_right: 'Viewer' },
+  ],
+};
+
+test('access grants roll up by workspace and by principal from one pass', () => {
+  const overview = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE);
+
+  assert.equal(overview.workspaces.length, 3);
+  assert.equal(overview.grants.length, 3);
+
+  const finance = overview.workspaces.find(w => w.workspaceId === 'ws-1');
+  assert.equal(finance.counts.admin, 1);
+  assert.equal(finance.counts.member, 1);
+
+  // Ann holds Admin on one workspace and Viewer on another: one principal, two grants.
+  const ann = overview.principals.find(p => p.email === 'Ann@X.com' || p.email === 'ann@x.com');
+  assert.equal(ann.workspaces.length, 2);
+  assert.equal(ann.counts.admin, 1);
+  assert.equal(ann.counts.viewer, 1);
+  assert.equal(ann.strongest, 'admin', 'the strongest access anywhere is what a review looks at first');
+});
+
+test('one principal is not split in two by the case of their email', () => {
+  const overview = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE);
+  assert.equal(overview.principals.length, 2, 'Ann@X.com and ann@x.com are the same person');
+});
+
+test('a principal with no email is identified by object id, not by display name', () => {
+  // Two service principals can share a display name; their object ids cannot.
+  const overview = workspaceAccess.buildAccessOverview({
+    workspaces: [{ workspace_id: 'w', name: 'W', users_readable: 1 }],
+    grants: [
+      { workspace_id: 'w', principal_id: 'sp-a', principal_type: 'App', display_name: 'Scanner', access_right: 'Admin' },
+      { workspace_id: 'w', principal_id: 'sp-b', principal_type: 'App', display_name: 'Scanner', access_right: 'Member' },
+    ],
+  });
+  assert.equal(overview.principals.length, 2);
+});
+
+test('an unreadable access list is not counted as a workspace nobody administers', () => {
+  const totals = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE).totals;
+  // Orphan has a viewer and no admin — a finding. Marketing was simply not read.
+  assert.equal(totals.withoutAdmin, 1);
+  assert.equal(totals.unreadable, 1);
+  assert.equal(totals.singleAdmin, 1);
+  assert.equal(totals.principals, 2);
+  assert.equal(totals.servicePrincipals, 1);
+  assert.equal(totals.adminPeople, 1);
+});
+
+test('a grant against a workspace the run did not record still counts', () => {
+  // Dropping it would understate what a principal can reach, which is the one
+  // direction this page must not be wrong in.
+  const overview = workspaceAccess.buildAccessOverview({
+    workspaces: [],
+    grants: [{ workspace_id: 'ghost', workspace_name: 'Ghost', principal_id: 'u1', email: 'a@b.c', access_right: 'Admin' }],
+  });
+  assert.equal(overview.grants.length, 1);
+  assert.equal(overview.principals[0].workspaces.length, 1);
+  assert.equal(overview.workspaces[0].name, 'Ghost');
+});
+
+test('an unrecognised role is shown as unknown rather than silently ranked', () => {
+  assert.equal(workspaceAccess.normalizeAccess('Admin'), 'admin');
+  assert.equal(workspaceAccess.normalizeAccess('  MEMBER '), 'member');
+  assert.equal(workspaceAccess.normalizeAccess('Wizard'), 'unknown');
+  assert.equal(workspaceAccess.accessLevel('Wizard').rank, 0);
+  assert.ok(workspaceAccess.accessLevel('admin').rank > workspaceAccess.accessLevel('viewer').rank);
+});
+
+test('the two names the APIs use for a service principal mean the same thing', () => {
+  assert.equal(workspaceAccess.normalizePrincipalType('App'), 'app');
+  assert.equal(workspaceAccess.normalizePrincipalType('ServicePrincipal'), 'app');
+  assert.equal(workspaceAccess.principalTypeLabel('Group'), 'Group');
+  assert.equal(workspaceAccess.principalTypeLabel(null), 'Unspecified');
+});
+
+test('the grant list says which workspaces already have the service principal', () => {
+  const overview = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE);
+  const marked = workspaceAccess.markServicePrincipalAccess(overview, 'SP1');
+
+  const finance = marked.find(w => w.workspaceId === 'ws-1');
+  assert.equal(finance.hasAccess, true, 'matching the object id must not be case-sensitive');
+  assert.equal(finance.accessRight, 'member');
+  assert.equal(marked.filter(w => !w.hasAccess).length, 2);
+});
+
+test('with no object id known, nothing is claimed to already have access', () => {
+  const overview = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE);
+  const marked = workspaceAccess.markServicePrincipalAccess(overview, '');
+  assert.ok(marked.every(w => w.hasAccess === false));
+});
+
+test('an empty or malformed run reshapes to nothing rather than throwing', () => {
+  for (const input of [undefined, {}, { workspaces: null, grants: null }, { grants: [{}] }]) {
+    const overview = workspaceAccess.buildAccessOverview(input);
+    assert.ok(Array.isArray(overview.workspaces));
+    assert.ok(Array.isArray(overview.principals));
+    assert.ok(Array.isArray(overview.grants));
+  }
+});
+
+test('a scan\'s compacted user shape is indexed with its identity, not as nulls', () => {
+  // The scan compacts each user to {name, email, role, type} before storing the
+  // run. Reading only the admin API's own names wrote every access row with nulls
+  // for the identity: the grant count was right and nobody in it could be named.
+  const shaped = analysisModel.shapeRun(4, {
+    workspaces: [{
+      id: 'ws-1', name: 'Finance', items: [],
+      users: [{ name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' }],
+    }],
+  });
+  assert.equal(shaped.users.length, 1);
+  assert.deepEqual(shaped.users[0], {
+    runId: 4, workspaceId: 'ws-1', principalId: null, principalType: 'User',
+    displayName: 'Ann', email: 'ann@x.com', accessRight: 'Admin',
+  });
+});
+
+test('the admin API\'s own user shape still indexes the same way', () => {
+  const shaped = analysisModel.shapeRun(4, {
+    workspaces: [{
+      id: 'ws-1', name: 'Finance', items: [],
+      users: [{ identifier: 'u1', displayName: 'Ann', emailAddress: 'ann@x.com', groupUserAccessRight: 'Admin', principalType: 'User' }],
+    }],
+  });
+  assert.equal(shaped.users[0].principalId, 'u1');
+  assert.equal(shaped.users[0].accessRight, 'Admin');
+});
+
+test('every access grant in a run is read in one query, not one per workspace', async () => {
+  const { executed } = await withFakeSql(() => [], () => analysisModel.listRunAccess(11));
+  assert.equal(executed.length, 1);
+  assert.match(executed[0].sql, /FROM analysis_workspace_users u/);
+  assert.match(executed[0].sql, /LEFT JOIN analysis_workspaces w/);
+  assert.equal(executed[0].params[0].value, 11);
+});
+
+test('the Grant Access page renders with and without a scan behind it', async () => {
+  const ejs = require('ejs');
+  const overview = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE);
+  const base = {
+    user: { name: 'T' }, currentUser: { name: 'T', email: 't@example.com' },
+    currentPath: '/settings/access', breadcrumb: [], availableRuns: [], globalRun: null,
+    hideRunSelector: true, title: 'Grant Access',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
+  };
+
+  const populated = await ejs.renderFile('src/views/access/index.ejs', {
+    ...base, overview, indexed: true, error: null, grantAuth: false,
+    runs: [{ id: 9, started_at: '2026-08-01T00:00:00Z' }, { id: 8, started_at: '2026-07-01T00:00:00Z' }],
+    run: { id: 9, started_at: '2026-08-01T00:00:00Z' },
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 'tid', enterprise_app_object_id: 'sp1' }],
+  });
+  assert.match(populated, /Who Has Access to What/);
+  assert.match(populated, /Grant Service Principal Access/);
+  assert.match(populated, /no admin/, 'a workspace nobody administers must be called out');
+  assert.match(populated, /not readable/, 'an unreadable access list must stay distinguishable');
+
+  // Nothing scanned yet: the page must explain that rather than showing an empty tenant.
+  const empty = await ejs.renderFile('src/views/access/index.ejs', {
+    ...base, overview: workspaceAccess.buildAccessOverview({}), indexed: false,
+    error: null, grantAuth: true, runs: [], run: null, servicePrincipals: [],
+  });
+  assert.match(empty, /No completed scan yet/);
+  assert.match(empty, /No service principal configured/);
+});
+
+test('the sidebar offers Grant Access under Settings', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/settings/access', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
+  });
+  assert.match(html, /href="\/settings\/access"[^>]*active/, 'the new page highlights itself');
+  assert.match(html, /<span>Grant Access<\/span>/);
+});
+
+test('the analysis page hands the grant flow over rather than keeping its own', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/analysis/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis',
+    breadcrumb: [], availableRuns: [], globalRun: null, title: 'Run Analysis',
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'e' }],
+    runs: [], error: null,
+  });
+  assert.doesNotMatch(html, /Grant SP Access to Workspaces/);
+  assert.doesNotMatch(html, /grantAccessModal/);
+  assert.match(html, /\/settings\/access/, 'and points at where it went');
+});

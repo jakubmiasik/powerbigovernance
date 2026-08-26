@@ -12,6 +12,7 @@ A web application to investigate and govern Power BI workspaces, reports, datase
 - **Governance Dashboard** — Tenant-wide metrics: capacity distribution, workspace states, refresh failures
 - **Configurable Connection** — Set up service principal credentials via UI or environment variables
 - **Entra ID Authentication** — Protect the app with Microsoft Entra ID sign-in (optional)
+- **Workspace Access** — See who can reach which workspace across the tenant, spot workspaces nobody administers, and grant the service principal access where it is missing
 - **Data Reconciliation** — Define controls that verify records agree between two business systems, run them, and manage the resulting exceptions through a controlled lifecycle
 - **Master Data Management** — Match records that arrived from many systems, build one golden record per entity, and publish it to a chosen destination with full provenance
 
@@ -129,6 +130,39 @@ src/
 | `GET /dashboards/{id}/tiles` | Dashboard tiles |
 | `GET /capacities` | Available capacities |
 | `POST /admin/workspaces/getInfo` | Workspace scanner |
+
+## Workspace Access
+
+**Settings → Grant Access** (`/settings/access`) answers who can reach which workspace, and adds the service principal where it is missing. The two belong on one page: granting a principal access without seeing the access model is how a service account ends up Admin on every workspace in the tenant, and reviewing access without being able to act on it is a report nobody comes back to.
+
+The **Grant SP Access to Workspaces** button has moved here from the Run Analysis page, which had the action and none of the context.
+
+### Who has access to what
+
+Three views of the same grants, driven by one filter (text, role, principal type):
+
+- **Every grant** — the flat list: workspace, principal, email, type, role.
+- **By workspace** — each workspace expands to show who is in it, with the role mix summarised.
+- **By principal** — each principal expands to show every workspace they can reach, and the strongest role they hold anywhere.
+
+Above them, the facts a grant list cannot show you:
+
+| | |
+|---|---|
+| **No admin at all** | Nobody can administer the workspace, and nobody can grant anyone else access to it either — recoverable only by a tenant administrator |
+| **A single admin** | One departure from the case above |
+| **Access unreadable** | The scan could not read the workspace's access list. That is a gap in the evidence, not a workspace with nobody in it, and the two are counted separately everywhere |
+| **Principals** | How many distinct identities hold access, and how many of them are service principals |
+
+A principal is identified by email where one exists, then by object id, then by display name. Getting that order wrong would split one person across several rows on a case difference, or — worse — merge two service principals that share a display name.
+
+Access is what the selected scan observed, not live state. The page names the scan and its date, and offers the other completed scans, because a report you cannot date is one you have to distrust.
+
+### Granting
+
+The grant dialog now says which workspaces **already have** the principal and pre-selects only the ones that do not, so the safe action no longer means checking each workspace by hand first. It grants to the service principal selected on the page rather than to whichever was configured first — with more than one tenant registered, that silently granted access to the wrong application. Failures are named individually: "granted 38 of 50" without saying which twelve, or why, is not something anyone can act on.
+
+Granting uses the Power BI admin API on behalf of an administrator, so it asks you to sign in as one and returns you to this page afterwards.
 
 ## Data Reconciliation
 
@@ -297,6 +331,7 @@ A golden record's provenance and a run's progress snapshot are each read as a wh
 - A run whose application instance stopped mid-scan is recognised rather than left at "running" forever: once its progress has not been written for `ANALYSIS_HEARTBEAT_STALE_SECONDS` (default 900) it is reported as **interrupted**, and startup marks such runs interrupted in the database.
 - Basic security headers, JSON/form body limits, and a lightweight `/api` rate limiter are enabled without adding runtime dependencies.
 - Bootstrap's contextual table row classes (`table-warning` and friends) paint a pale background and set black text. The app's dark theme colours table cells directly, which wins on the cells and puts light text back — pale on pale. Dark mode now gives those rows dark tints at a specificity that beats the generic cell rule, so a highlighted row stays both highlighted and readable.
+- `analysis_workspace_users` rows were written with nulls for every identity field. A scan compacts each user to `{name, email, role, type}` before storing the run, and the indexer read only the admin API's own names (`displayName`, `emailAddress`, `groupUserAccessRight`, `principalType`) — so the grant count was right and nobody in it could be named. Both shapes are now accepted. **Runs indexed before this need re-indexing** from the Run Analysis page to pick up the identities; the access page falls back to the stored document meanwhile.
 - An aggregate operand is stored as a function plus what the function is applied to (`a_fn`, `a_value_kind`), rather than as `"sum(Amount)"` encoded into the value text — text nothing could query, validate, or re-render back into a form.
 - A rule's group lives on the rule, and is denormalised onto `recon_runs` and `recon_exceptions`. The exception list filters and groups by it on every page load, and joining back to the rule for a label would cost that join on every row.
 - Every reconciliation view is rendered in the test suite with the shape its route supplies. These templates are only reachable through a live database, so a local a route stopped passing — or a column a view started reading — used to appear as a blank page in a browser and nowhere else.

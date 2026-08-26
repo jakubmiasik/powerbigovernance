@@ -98,14 +98,19 @@ function shapeRun(runId, results) {
     }
 
     for (const user of workspaceUsers) {
+      // Two shapes reach here. A scan compacts each user to {name, email, role,
+      // type} before storing the run, while a result read straight from the admin
+      // API keeps the API's own names. Reading only the API's names meant every
+      // indexed access row was written with nulls for the identity — the grant
+      // count was right and nobody in it could be named.
       users.push({
         runId,
         workspaceId: workspace.id,
-        principalId: user.identifier || user.graphId || null,
-        principalType: user.principalType || null,
-        displayName: user.displayName || null,
-        email: user.emailAddress || user.userPrincipalName || null,
-        accessRight: user.groupUserAccessRight || user.accessRight || null,
+        principalId: user.identifier || user.graphId || user.id || null,
+        principalType: user.principalType || user.type || null,
+        displayName: user.displayName || user.name || null,
+        email: user.emailAddress || user.userPrincipalName || user.email || null,
+        accessRight: user.groupUserAccessRight || user.accessRight || user.role || null,
       });
     }
   }
@@ -227,6 +232,24 @@ async function listWorkspaceUsers(runId, workspaceId) {
 }
 
 /**
+ * Every access grant in a run, with the workspace it is against.
+ *
+ * The tenant-wide access question — what can this person reach, which workspaces
+ * has nobody responsible for — cannot be asked one workspace at a time. Walking
+ * `listWorkspaceUsers` per workspace would be one round trip per workspace; this
+ * is one.
+ */
+async function listRunAccess(runId) {
+  return withConnection(conn => execSql(conn, `
+    SELECT u.workspace_id, u.principal_id, u.principal_type, u.display_name, u.email, u.access_right,
+           w.name AS workspace_name, w.state AS workspace_state
+    FROM analysis_workspace_users u
+    LEFT JOIN analysis_workspaces w ON w.run_id = u.run_id AND w.workspace_id = u.workspace_id
+    WHERE u.run_id=@run
+    ORDER BY w.name, u.access_right, u.display_name`, [int('run', runId)]));
+}
+
+/**
  * Every item of the given types in a run, with its workspace name.
  *
  * This is the query the JSON path could not do at all: finding the lakehouses and
@@ -267,6 +290,7 @@ module.exports = {
   getRunWorkspace,
   listWorkspaceItems,
   listWorkspaceUsers,
+  listRunAccess,
   listRunItemsByType,
   deleteRunModel,
 };

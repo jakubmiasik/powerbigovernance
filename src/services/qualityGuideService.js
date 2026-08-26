@@ -155,7 +155,7 @@ const PREREQUISITES = [
     icon: 'bi-shield-lock',
     items: [
       { text: 'A Fabric Administrator must grant the tenant settings above. The application itself does not need a person to hold the role at run time — but reading tenant settings, and the Grant SP Access action, do act on behalf of an administrator, so that action asks you to sign in as one.', required: true },
-      { text: 'Workspace access for the service principal. The tenant-wide scan sees every workspace through the admin APIs, but reading a lakehouse or warehouse SQL endpoint needs the principal to be a member of the workspace. Use Grant SP Access on the Run Analysis page to add it as Admin where it is missing.', required: true },
+      { text: 'Workspace access for the service principal. The tenant-wide scan sees every workspace through the admin APIs, but reading a lakehouse or warehouse SQL endpoint needs the principal to be a member of the workspace. Settings → Grant Access shows who can reach which workspace and adds the principal as Admin where it is missing.', required: true },
     ],
   },
   {
