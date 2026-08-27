@@ -287,17 +287,47 @@ async function updateAnalysisRun(id, data) {
   }
 }
 
+// Every column a caller needs from a run *except* results_json, which is the scan
+// document and potentially megabytes.
+//
+// The scope columns belong here and were missed when scoping was added: this query
+// names its columns, so a run's scope simply never arrived. Every reader then saw
+// `undefined` and fell back to "whole tenant" — which is not a display bug alone,
+// because `pickTenantWideRun` and the schedule overlap check read the same rows.
+const RUN_META_COLUMNS = `id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports,
+  total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by,
+  scope_kind, scope_workspaces, schedule_id`;
+
+// The same list without the columns a pre-scoping deployment has not migrated yet.
+// Naming columns means a missing one fails the whole read rather than arriving as
+// null, so an instance that has not run the migration falls back to this.
+const RUN_META_COLUMNS_LEGACY = `id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports,
+  total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by`;
+
+/**
+ * Reads runs, tolerating a database that predates the scope columns.
+ *
+ * `execWithColumnFallback` covers writes; a SELECT needs the same tolerance, and
+ * the alternative — `SELECT *` — would drag results_json into every run list.
+ */
+async function selectRuns(conn, clause, params = []) {
+  try {
+    return await execSql(conn, 'SELECT ' + RUN_META_COLUMNS + ' FROM analysis_runs ' + clause, params);
+  } catch (err) {
+    if (!/invalid column name/i.test(err.message || '')) throw err;
+    console.warn('[DB] Reading runs without the scope columns; run migrations to record scan coverage.');
+    return execSql(conn, 'SELECT ' + RUN_META_COLUMNS_LEGACY + ' FROM analysis_runs ' + clause, params);
+  }
+}
+
 async function getAnalysisRuns() {
   const conn = await getConnection();
   try {
-    return await execSql(conn, 'SELECT id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports, total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by FROM analysis_runs ORDER BY started_at DESC');
+    return await selectRuns(conn, 'ORDER BY started_at DESC');
   } finally {
     conn.close();
   }
 }
-
-const RUN_META_COLUMNS = `id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports,
-  total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by`;
 
 /**
  * A run without its result document.
@@ -309,9 +339,7 @@ const RUN_META_COLUMNS = `id, sp_id, sp_name, tenant_id, status, total_workspace
 async function getAnalysisRunMeta(id) {
   const conn = await getConnection();
   try {
-    const rows = await execSql(conn, 'SELECT ' + RUN_META_COLUMNS + ' FROM analysis_runs WHERE id=@id', [
-      { name: 'id', type: TYPES.Int, value: id },
-    ]);
+    const rows = await selectRuns(conn, 'WHERE id=@id', [{ name: 'id', type: TYPES.Int, value: id }]);
     return rows[0] || null;
   } finally {
     conn.close();
@@ -650,6 +678,48 @@ async function markWorkspaceDeletedInRuns(workspaceId) {
       updated += 1;
     }
     return updated;
+  } finally {
+    conn.close();
+  }
+}
+
+// ── Application settings ──
+// Values are JSON documents. A caller that stored something unparseable gets the
+// fallback rather than an exception: a broken setting must not take a page down.
+async function getAppSetting(key, fallback = null) {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(conn, 'SELECT setting_value FROM app_settings WHERE setting_key=@key', [
+      { name: 'key', type: TYPES.NVarChar, value: key },
+    ]);
+    if (!rows.length || rows[0].setting_value == null) return fallback;
+    try {
+      return JSON.parse(rows[0].setting_value);
+    } catch {
+      console.warn('[DB] Setting "' + key + '" is not valid JSON; using the default.');
+      return fallback;
+    }
+  } catch (err) {
+    if (err.message && err.message.includes('Invalid object name')) return fallback;
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+async function saveAppSetting(key, value, actor) {
+  const conn = await getConnection();
+  try {
+    // MERGE rather than delete-then-insert: a reader between the two would see the
+    // setting absent and fall back to the default.
+    await execSql(conn, `MERGE app_settings AS target
+      USING (SELECT @key AS setting_key) AS source ON target.setting_key = source.setting_key
+      WHEN MATCHED THEN UPDATE SET setting_value=@value, updated_at=SYSUTCDATETIME(), updated_by=@by
+      WHEN NOT MATCHED THEN INSERT (setting_key, setting_value, updated_by) VALUES (@key, @value, @by);`, [
+      { name: 'key', type: TYPES.NVarChar, value: key },
+      { name: 'value', type: TYPES.NVarChar, value: JSON.stringify(value) },
+      { name: 'by', type: TYPES.NVarChar, value: actor || null },
+    ]);
   } finally {
     conn.close();
   }
@@ -1131,6 +1201,21 @@ async function runMigrations() {
       END
     `);
 
+    // A small key/value store for settings that are documents rather than tables —
+    // read as a whole, by one owner, never filtered on. A file would not do: App
+    // Service can run several instances, and each would have its own copy.
+    await runStatement(conn, 'create app_settings', `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'app_settings') AND type = 'U')
+      BEGIN
+        CREATE TABLE app_settings (
+          setting_key NVARCHAR(100) NOT NULL PRIMARY KEY,
+          setting_value NVARCHAR(MAX) NULL,
+          updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+          updated_by NVARCHAR(255) NULL
+        )
+      END
+    `);
+
     // ── Scheduled analysis scans ──
     // A scan used to be something people did by hand, because it always meant the
     // whole tenant and took hours. A scoped scan is short enough to schedule, so
@@ -1347,6 +1432,8 @@ module.exports = {
   getComparableRuns,
   getItemDetailsCache,
   saveItemDetailsCache,
+  getAppSetting,
+  saveAppSetting,
   getAnalysisSchedules,
   saveAnalysisSchedule,
   updateAnalysisSchedule,
@@ -1362,7 +1449,7 @@ module.exports = {
   logScheduleExecution,
   getScheduleHistory,
   getLastScheduleExecutions,
-  _private: { buildInsert, buildUpdate, extractProblemColumns },
+  _private: { buildInsert, buildUpdate, extractProblemColumns, RUN_META_COLUMNS, RUN_META_COLUMNS_LEGACY },
   // SQL primitives shared with feature-specific repositories.
   _sql: { getConnection, execSql, TYPES, execWithColumnFallback, buildInsert, buildUpdate },
 };

@@ -13,7 +13,7 @@ const launcher = require('../services/analysisLauncher');
 const analysisSchedules = require('../services/analysisScheduleService');
 const {
   normalizeScope, scopeFromRow, scopeToRow, applyScope, filterItemsToScope,
-  describeScope, requestedWorkspaceScope, SCOPE_KIND,
+  describeScope, requestedWorkspaceScope, scopeTag, scopeTagTitle, SCOPE_KIND,
 } = require('../services/analysisScopeService');
 const { SCHEDULE_TYPES } = require('../services/scheduleDueService');
 const { convertScheduleToUtc } = require('../services/scheduleTimeService');
@@ -469,6 +469,7 @@ router.get('/compare', async (req, res) => {
       title: 'Compare Runs',
       user: req.user,
       runs: completed,
+      scopeTag, scopeTagTitle, describeScope, scopeFromRow,
       fromRun: null,
       toRun: null,
       metrics: [],

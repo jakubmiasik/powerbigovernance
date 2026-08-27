@@ -3,6 +3,8 @@ const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
 const { computeWorkspaceInsights, FINDING_DEFS } = require('../services/workspaceInsightsService');
+const { loadNamingConvention } = require('../services/namingConventionStore');
+const { checkWorkspace, describeConvention } = require('../services/namingConventionService');
 const { buildItemDetails } = require('../services/itemDetailsService');
 const { deleteWorkspaces } = require('../services/workspaceDeletionService');
 const { getDelegatedAuthUrl } = require('../services/authService');
@@ -124,10 +126,13 @@ router.get('/', async (req, res) => {
         title: 'Workspaces', user: req.user, fromSavedData: false, run: null,
         insights: computeWorkspaceInsights(null, {}),
         findingDefs: FINDING_DEFS,
+        namingPattern: null,
       });
     }
 
+    const namingConvention = await loadNamingConvention();
     const insights = computeWorkspaceInsights({ workspaces: savedWorkspaces }, {
+      namingConvention,
       staleDays: Number.isFinite(staleDays) ? staleDays : Number.parseInt(process.env.WORKSPACE_STALE_DAYS, 10),
       overSharedUsers: Number.isFinite(overSharedUsers) ? overSharedUsers : Number.parseInt(process.env.WORKSPACE_OVERSHARED_USERS, 10),
       // Staleness is measured against when the scan ran, not today, so an old run
@@ -155,6 +160,7 @@ router.get('/', async (req, res) => {
       title: 'Workspaces', user: req.user, fromSavedData: true, run,
       insights,
       findingDefs: FINDING_DEFS,
+      namingPattern: describeConvention(namingConvention),
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -281,6 +287,11 @@ router.get('/:id', async (req, res) => {
       const savedWs = savedWorkspaces.find(w => w.id === workspaceId);
       if (savedWs) {
         const categorized = categorizeItems(savedWs.items || []);
+        const convention = await loadNamingConvention();
+        // Only computed for a saved run: the live fallback below has the item list
+        // but not the run's context, and a half-checked workspace is worse than an
+        // unchecked one.
+        const naming = convention.enabled ? checkWorkspace(savedWs, convention) : null;
         return res.render('workspaces/detail', {
           title: savedWs.name || 'Workspace', user: req.user,
           workspace: savedWs, items: savedWs.items || [], ...categorized,
@@ -288,6 +299,8 @@ router.get('/:id', async (req, res) => {
           sourceRun,
           lockRunSelector: explicit,
           lockedRun: explicit ? sourceRun : null,
+          naming,
+          namingPattern: naming ? describeConvention(convention) : null,
         });
       }
     }
@@ -313,6 +326,7 @@ router.get('/:id', async (req, res) => {
     res.render('workspaces/detail', {
       title: wsName, user: req.user,
       workspace: { ...workspace, name: wsName, deploymentPipeline }, items, ...categorized, users,
+      naming: null, namingPattern: null,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });

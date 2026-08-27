@@ -13,6 +13,7 @@ A web application to investigate and govern Power BI workspaces, reports, datase
 - **Configurable Connection** — Set up service principal credentials via UI or environment variables
 - **Entra ID Authentication** — Protect the app with Microsoft Entra ID sign-in (optional)
 - **Scoped and Scheduled Scans** — Scan the whole tenant or just the workspaces you care about, on demand or on a schedule
+- **Naming Conventions** — Define how Fabric artifacts should be named, then see which ones do not follow it and what they should be called
 - **Workspace Access** — See who can reach which workspace across the tenant, spot workspaces nobody administers, and grant the service principal access where it is missing
 - **Data Reconciliation** — Define controls that verify records agree between two business systems, run them, and manage the resulting exceptions through a controlled lifecycle
 - **Master Data Management** — Match records that arrived from many systems, build one golden record per entity, and publish it to a chosen destination with full provenance
@@ -148,6 +149,10 @@ The picker reads its workspace list from the last completed tenant-wide scan, wh
 
 **The schedule form opens the same dialog.** It was two copies of the same list, filter and selection handling — two places for the behaviour to drift and two places to fix a bug in. Bootstrap does not support overlapping modals, so the schedule form is hidden while the picker is up and brought back when it closes, confirmed or not.
 
+The **Service Principal / Scan** selector in the top bar leads each run with its coverage — `[WT]` for a whole-tenant scan, `[SC]` for a scoped one — with the full scope on hover, and the selected run carries the same tag as a badge. Two letters because the selector already holds a service principal name, a run number and a timestamp; which of two scans covered everything is exactly what someone picking between them needs to know, and there is no version of "3 workspaces: Finance, Sales and 1 more" that fits.
+
+The **Compare Runs** picker leads with the same tag, and comparing two scans of different coverage now says so above the numbers. A one-workspace scan against a whole-tenant one produces "-47 workspaces", which reads as the estate having shrunk rather than as two scans that measured different things.
+
 Each run's coverage reads under the tenant name in the run history — `Whole tenant`, or `Scoped · 2 workspaces`, with `· scheduled` when a schedule started it. It had a column of its own, which was a column of mostly "Whole tenant".
 
 A scoped run narrows both the workspaces and the items, so every total it reports describes what was actually scanned rather than the tenant it sits in. It records the workspaces it was asked for **by name as well as id**, because a workspace deleted between runs still has to be nameable in the run history, and by then there is nothing left to look it up in. If a selected workspace is no longer visible to the service principal, the run says so in its progress log instead of quietly covering less — otherwise a nightly scoped scan shrinks week by week and nothing announces it.
@@ -170,6 +175,47 @@ They share the existing scheduler's tick rather than running their own — a sec
 | **Run now** | Goes through the same executor the scheduler uses, so testing a schedule cannot behave differently from the schedule itself — including refusing to stack |
 
 The scheduler cannot import the analysis route (that would be a cycle, and would make it untestable without an Express app), and the runner has to stay with the route because it owns the in-memory progress map. So the route registers its runner with `analysisLauncher` at load and the scheduler asks that.
+
+## Naming Conventions
+
+Fabric imposes no naming rules of its own, and everything lands in the same workspace — so without a convention a tenant becomes a list of names only their authors can interpret. The cost is not aesthetic: nobody can tell which lakehouse holds bronze data, or which pipeline feeds which layer, without opening each one.
+
+**Settings → Fabric Artifact Naming Convention** defines one. The default is the convention from the supplied document:
+
+```
+EXPERIENCE _ ARTIFACT _ [INDEX] _ [STAGE] _ DESCRIPTION
+DE_LH_100_BRONZE_SALES      a lakehouse holding bronze data for Sales
+DW_WH_300_GOLD_SALES        the gold-layer warehouse for Sales
+DF_PL_100_BRONZE_SOURCE_TO_BRONZE   the pipeline that ingests raw data
+```
+
+Every part is configurable, because a convention nobody chose is one nobody follows: the separator, the letter case, which parts a name has and which are required, the experience and artifact codes, the stages, the index pattern, and which item types to skip entirely.
+
+- **Optional parts may be absent in any combination.** Not every artifact belongs to a medallion layer and not everything needs ordering, so `DE_LH_SALES`, `DE_LH_100_SALES` and `DE_LH_100_BRONZE_SALES` are all correct.
+- **The description is everything left over.** Business text legitimately contains the separator — `SOURCE_TO_BRONZE` is one description, not three parts.
+- **The artifact code must agree with what the item is.** A lakehouse named `DE_PL_100_SALES` passes a shape check that means nothing, so the item's actual type is checked against the code.
+- **A convention that could never be satisfied is refused** rather than stored — no required part, an artifact naming an experience that does not exist, one item type claimed by two codes, a broken index pattern. The alternative is a tenant-wide finding nobody can clear.
+- **Checking is off until you turn it on.** An unconfigured convention would flag an entire tenant on its first scan, which is noise rather than a finding.
+
+Artifact codes carry the Fabric item types they cover, and that is what makes a suggestion possible: the scan knows an item is a Lakehouse, so the convention can say the name should start `DE_LH`. **A type listed nowhere is not checked at all**, so bringing something into scope means adding its type to a code.
+
+### Where it shows up
+
+**Workspace Triage** gains an *Off-convention names* finding, listing how many of a workspace's checked artifacts break the convention and naming the first few. The card is hidden entirely when nothing is enforced — a permanent zero reads as "clean" rather than "not looked at".
+
+**A workspace's page** gains a **Naming** tab: every off-convention artifact, why, and the name it should have.
+
+| Current name | Type | Suggested name | Why |
+|---|---|---|---|
+| Sales Report | Report | `PBI_RPT_SALES` | Should be upper case; not in the form … |
+| finance dw | Warehouse | `DW_WH_FINANCE` | Should be upper case; not in the form … |
+| Ingest Silver Pipeline | DataPipeline | `DF_PL_SILVER_INGEST` | Should be upper case; not in the form … |
+
+The suggestion **keeps the business meaning already in the name** rather than replacing it with a placeholder: anything that looks like a stage or an index is reused, the artifact and experience codes come from what the item actually is, and codes or type names already present are dropped so `Sales Lakehouse` does not become `DE_LH_SALES_LAKEHOUSE`. A name with nothing left to describe suggests `RENAME_ME`, which is honest about needing a human.
+
+A name in no recognisable shape gets **one** problem rather than five restatements of it — walking the segments against an unsegmented name derives "Experience should be one of…", "Artifact is missing", "Description is missing", which is a wall of text saying one thing. The suggested name is what the reader needs next.
+
+**Nothing is renamed by this application.** Fabric renames are done in the portal, so the useful thing this page can do is hand over the exact string, which the copy button does.
 
 ## Workspace Access
 
@@ -356,7 +402,7 @@ Rows written before this schema keep working: readers fall back to the stored JS
 
 ### What was left as JSON, deliberately
 
-A golden record's provenance and a run's progress snapshot are each read as a whole, by one owner, and never filtered on. Splitting them would add joins and buy nothing — 3NF is worth it where you query the parts.
+The naming convention lives in `app_settings` as a document, and a golden record's provenance and a run's progress snapshot are each read as a whole, by one owner, and never filtered on. Splitting them would add joins and buy nothing — 3NF is worth it where you query the parts.
 
 ## Operational Notes
 
@@ -375,6 +421,7 @@ A golden record's provenance and a run's progress snapshot are each read as a wh
 - An aggregate operand is stored as a function plus what the function is applied to (`a_fn`, `a_value_kind`), rather than as `"sum(Amount)"` encoded into the value text — text nothing could query, validate, or re-render back into a form.
 - A rule's group lives on the rule, and is denormalised onto `recon_runs` and `recon_exceptions`. The exception list filters and groups by it on every page load, and joining back to the rule for a label would cost that join on every row.
 - Every reconciliation view is rendered in the test suite with the shape its route supplies. These templates are only reachable through a live database, so a local a route stopped passing — or a column a view started reading — used to appear as a blank page in a browser and nowhere else.
+- The run-list query names its columns rather than using `SELECT *`, because `results_json` is the scan document and can be megabytes. That means **adding a column to a run means adding it to `RUN_META_COLUMNS`** — the scope columns were missed when scoping was added, so every run read back as tenant-wide, and a test now pins the list against what its consumers read by name. A pre-migration database falls back to the list without the scope columns rather than failing the read outright.
 - Analysis runs carry their scope (`scope_kind`, `scope_workspaces`) and, when a schedule started them, `schedule_id`. Storing the chosen workspaces as a document is deliberate: it is read as a whole, by one owner, and never filtered on — the same reasoning as the other things left as JSON below.
 - Repository queries that share one connection run one after another. A `tedious` connection carries a single request at a time, so issuing several together leaves the first answered and the rest rejected — which is how the reconciliation dashboard came to render empty panels that looked like stale data. A panel that genuinely cannot be read is now named on the page and logged, rather than blanked silently.
 - Startup migrations run statement by statement, so one failing `ALTER` no longer skips the migrations behind it, and a database that is unreachable at startup no longer prevents the capacity scheduler from starting.

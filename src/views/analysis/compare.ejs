@@ -11,7 +11,9 @@
   var tenantKeys = Object.keys(runsByTenant).sort();
 
   function runLabel(r) {
-    return 'Run #' + r.id + ' — ' + (r.sp_name || 'Unknown SP') + ' — ' +
+    // The coverage leads, because comparing a one-workspace scan with a
+    // whole-tenant one reads as the estate having shrunk by 47 workspaces.
+    return '[' + scopeTag(r) + '] Run #' + r.id + ' — ' + (r.sp_name || 'Unknown SP') + ' — ' +
       (r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A');
   }
 
@@ -81,13 +83,32 @@
   <div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div>
 <% } %>
 
+<%
+  // Two scans of different coverage produce differences that are about the scans,
+  // not about the estate. The page still shows them — refusing would be worse —
+  // but it must not let them be read as change.
+  var scopesDiffer = fromRun && toRun
+    && (scopeTag(fromRun) !== scopeTag(toRun)
+      || describeScope(scopeFromRow(fromRun)) !== describeScope(scopeFromRow(toRun)));
+%>
+<% if (scopesDiffer) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-exclamation-triangle me-2"></i>
+    These two scans did not cover the same thing — run #<%= fromRun.id %> covered
+    <strong><%= describeScope(scopeFromRow(fromRun)) %></strong> and run #<%= toRun.id %> covered
+    <strong><%= describeScope(scopeFromRow(toRun)) %></strong>. Every difference below is at least partly
+    the difference between the two scopes, not a change in the estate.
+  </div>
+<% } %>
 <% if (fromRun && toRun && metrics.length) { %>
   <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
       <span><i class="bi bi-graph-up me-2"></i>Summary Comparison</span>
       <span class="small text-muted">
+        <span title="<%= scopeTagTitle(fromRun) %>">[<%= scopeTag(fromRun) %>]</span>
         Run #<%= fromRun.id %> (<%= fromRun.started_at ? new Date(fromRun.started_at).toLocaleString() : '-' %>)
         &rarr;
+        <span title="<%= scopeTagTitle(toRun) %>">[<%= scopeTag(toRun) %>]</span>
         Run #<%= toRun.id %> (<%= toRun.started_at ? new Date(toRun.started_at).toLocaleString() : '-' %>)
       </span>
     </div>
