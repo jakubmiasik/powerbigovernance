@@ -180,7 +180,7 @@ The scheduler cannot import the analysis route (that would be a cycle, and would
 
 Fabric imposes no naming rules of its own, and everything lands in the same workspace — so without a convention a tenant becomes a list of names only their authors can interpret. The cost is not aesthetic: nobody can tell which lakehouse holds bronze data, or which pipeline feeds which layer, without opening each one.
 
-**Settings → Fabric Artifact Naming Convention** defines one. The default is the convention from the supplied document:
+**Settings → Governance Configuration** defines one. It has its own page rather than another card on Settings: Settings is about *reaching* the tenant — which service principal, whose secret, which vault — and a convention deciding whether a lakehouse is named acceptably is a different question with a different audience. It is also where the rules that follow belong; the triage thresholds are configured per-page today with nowhere obvious to put the next one. The default is the convention from the supplied document:
 
 ```
 EXPERIENCE _ ARTIFACT _ [INDEX] _ [STAGE] _ DESCRIPTION

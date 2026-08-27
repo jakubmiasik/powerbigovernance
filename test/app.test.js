@@ -4956,21 +4956,21 @@ test('triage flags off-convention names only when a convention is switched on', 
   assert.equal(disabled.byFinding.namingConvention, 0);
 });
 
-test('the settings page offers the convention, and triage explains it', async () => {
+test('the governance configuration page offers the convention, and triage explains it', async () => {
   const ejs = require('ejs');
   const convention = namingService.normalizeConvention(NAMING);
-  const settings = await ejs.renderFile('src/views/config.ejs', {
-    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings', breadcrumb: [],
-    availableRuns: [], globalRun: null, title: 'Settings',
-    servicePrincipals: [], secretEncryptionReady: true, success: [], error: [],
+  const page = await ejs.renderFile('src/views/governance-config/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings/governance', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Governance Configuration',
+    success: [], error: [],
     naming: convention, segmentDefs: namingService.SEGMENT_DEFS, letterCases: namingService.LETTER_CASES,
     namingPattern: namingService.describeConvention(convention),
     namingExample: namingService.exampleName(convention),
   });
-  assert.match(settings, /Fabric Artifact Naming Convention/);
-  assert.match(settings, /EXPERIENCE_ARTIFACT/);
-  assert.match(settings, /DE_LH_100_BRONZE_SALES/);
-  assert.match(settings, /action="\/settings\/naming"/);
+  assert.match(page, /Fabric Artifact Naming Convention/);
+  assert.match(page, /EXPERIENCE_ARTIFACT/);
+  assert.match(page, /DE_LH_100_BRONZE_SALES/);
+  assert.match(page, /action="\/settings\/governance\/naming"/);
 
   const triage = await ejs.renderFile('src/views/workspaces/list.ejs', {
     user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [],
@@ -5054,4 +5054,41 @@ test('a name in no recognisable shape gets one problem, not five restatements of
   const specific = namingService.checkName('XX_LH_SALES', 'Lakehouse', NAMING);
   assert.deepEqual(specific.problems.length, 1);
   assert.match(specific.problems[0], /Experience should be one of/);
+});
+
+test('the convention lives on its own page, not on Settings', async () => {
+  // Settings is about reaching the tenant — which service principal, whose secret.
+  // A convention deciding whether a lakehouse is named acceptably is a different
+  // question with a different audience, and Settings should not carry both.
+  const ejs = require('ejs');
+  const settings = await ejs.renderFile('src/views/config.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Settings',
+    servicePrincipals: [], secretEncryptionReady: true, success: [], error: [],
+  });
+
+  // No form, and no locals it would need — the page renders without them at all.
+  assert.doesNotMatch(settings, /action="\/settings\/(governance\/)?naming"/);
+  assert.doesNotMatch(settings, /Experience codes/);
+  // But it still says where the convention went, rather than leaving no trace.
+  assert.match(settings, /Governance Configuration/);
+  assert.match(settings, /href="\/settings\/governance"/);
+});
+
+test('the sidebar lists Governance Configuration under Settings, with its own icon', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/settings/governance', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
+  });
+
+  assert.match(html, /<span>Governance Configuration<\/span>/);
+  assert.match(html, /href="\/settings\/governance"[^>]*active/, 'the page highlights itself');
+  // Settings matches its own path exactly, so it does not also light up here.
+  assert.doesNotMatch(html, /href="\/settings" class="sidebar-link active"/);
+
+  // Governance Overview already uses bi-shield-check; two identical icons in one
+  // sidebar is the confusion Master Data and Deployment Pipelines already caused.
+  const icons = (html.match(/bi bi-[a-z0-9-]+"><\/i> <span>/g) || []);
+  assert.equal(new Set(icons).size, icons.length, 'every sidebar icon must be distinct: ' + icons.join(', '));
 });
