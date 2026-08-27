@@ -5120,15 +5120,36 @@ test('the workspaces missing access are the difference between two live lists', 
   assert.deepEqual(result.missing.map(w => w.id), ['ws-2', 'ws-3']);
 });
 
-test('a personal workspace is listed but marked ungrantable', () => {
-  // A service principal cannot be added to one at all, so offering to grant it
-  // would produce a failure nobody can fix.
+test('personal and deleted workspaces are left out of the list entirely', () => {
+  // A service principal cannot be added to a personal workspace at all, and a
+  // deleted or deleting one is on its way out. Offering either produces a failure
+  // nobody can fix, so neither is offered.
   const result = workspaceAccess.missingServicePrincipalAccess(
-    [{ id: 'p', displayName: 'Personal of Ann', type: 'PersonalGroup' }, { id: 'w', displayName: 'Finance' }],
+    [
+      { id: 'w', displayName: 'Finance' },
+      { id: 'p', displayName: 'Personal of Ann', type: 'PersonalGroup' },
+      { id: 'd', displayName: 'Old', state: 'Deleted' },
+      { id: 'r', displayName: 'Archive', state: 'Removing' },
+      { id: 'g', displayName: 'Going', state: 'Deleting' },
+    ],
     []
   );
-  assert.equal(result.missing.find(w => w.id === 'p').isPersonal, true);
-  assert.equal(result.missing.find(w => w.id === 'w').isPersonal, false);
+  assert.deepEqual(result.missing.map(w => w.id), ['w']);
+  // Counted rather than silently dropped: "12 of 40 unreachable" beside a list of
+  // 9 would look like a bug rather than like workspaces nothing can be done about.
+  assert.equal(result.skipped, 4);
+  assert.equal(result.total, 5);
+});
+
+test('a workspace with no state at all is treated as live', () => {
+  // The Fabric endpoint does not return a state for ordinary workspaces, and
+  // reading its absence as "deleted" would hide most of the tenant.
+  const result = workspaceAccess.missingServicePrincipalAccess([{ id: 'a', displayName: 'Finance' }], []);
+  assert.equal(result.missing.length, 1);
+  assert.equal(result.skipped, 0);
+  assert.equal(workspaceAccess.isRetiredWorkspace({ id: 'a' }), false);
+  assert.equal(workspaceAccess.isRetiredWorkspace({ state: 'Active' }), false);
+  assert.equal(workspaceAccess.isRetiredWorkspace({ state: 'deleted' }), true);
 });
 
 test('a duplicated workspace is offered once, not twice', () => {
@@ -5147,7 +5168,7 @@ test('reaching everything leaves nothing to grant, and reaching nothing leaves a
   assert.equal(workspaceAccess.missingServicePrincipalAccess(all, [{ id: 'a' }]).withAccess, 1);
   // Nothing at all is an empty answer, not a crash.
   assert.deepEqual(workspaceAccess.missingServicePrincipalAccess(null, null),
-    { total: 0, withAccess: 0, missing: [] });
+    { total: 0, withAccess: 0, skipped: 0, missing: [] });
 });
 
 test('the access check asks the tenant, not a scan', async () => {
@@ -5228,4 +5249,139 @@ test('the grant section lists nothing until the tenant has been asked', async ()
   // "Who has access to what" is unchanged — that view is what the scan observed.
   assert.match(html, /Who Has Access to What/);
   assert.match(html, /id="grantsTable"/);
+});
+
+test('a code already in the name is never repeated as description', () => {
+  // Reported: a pipeline named DE_PL_100_LOAD_ALL_TABLES was suggested as
+  // DF_PL_100_DE_LOAD_ALL_TABLES. The DE is an experience code — the wrong one for
+  // a pipeline, which is why the fix is DF — and stripping only the *expected*
+  // code left it behind to be read as business text.
+  assert.equal(
+    namingService.suggestName({ name: 'DE_PL_100_LOAD_ALL_TABLES', type: 'DataPipeline' }, NAMING),
+    'DF_PL_100_LOAD_ALL_TABLES');
+
+  // Any configured code counts, wherever it sits and whichever segment it belongs
+  // to: a token that is a code in this convention was meant as one.
+  assert.equal(namingService.suggestName({ name: '100_DE_LOAD_ALL_TABLES', type: 'DataPipeline' }, NAMING), 'DF_PL_100_LOAD_ALL_TABLES');
+  assert.equal(namingService.suggestName({ name: 'LH_100_LOAD_ALL_TABLES', type: 'DataPipeline' }, NAMING), 'DF_PL_100_LOAD_ALL_TABLES');
+  assert.equal(namingService.suggestName({ name: 'DS_SALES', type: 'Lakehouse' }, NAMING), 'DE_LH_SALES');
+
+  // A name that is nothing but codes has no description left, and says so rather
+  // than producing a name with a part missing.
+  assert.equal(namingService.suggestName({ name: 'DF_PL', type: 'DataPipeline' }, NAMING), 'DF_PL_RENAME_ME');
+
+  // The cases that already worked keep working.
+  assert.equal(namingService.suggestName({ name: 'Sales Bronze Lakehouse', type: 'Lakehouse' }, NAMING), 'DE_LH_BRONZE_SALES');
+  assert.equal(namingService.suggestName({ name: 'Finance DW', type: 'Warehouse' }, NAMING), 'DW_WH_FINANCE');
+});
+
+test('only the codes this convention actually defines are stripped', () => {
+  // A convention with a short code list must not strip words that are codes in
+  // some other convention — the stripping is defined by what is configured.
+  const narrow = namingService.normalizeConvention({
+    ...NAMING,
+    experiences: [{ code: 'DF', label: 'Data Factory' }],
+    artifacts: [{ code: 'PL', label: 'Pipeline', experience: 'DF', itemTypes: ['DataPipeline'] }],
+  });
+  // DE is not a code here, so it stays as description.
+  assert.equal(namingService.suggestName({ name: 'DE_LOAD_ALL', type: 'DataPipeline' }, narrow), 'DF_PL_DE_LOAD_ALL');
+});
+
+test('an interrupted grant is remembered across the administrator sign-in', async () => {
+  // Otherwise the operator picks workspaces, is sent away to authorize, comes back
+  // to an empty page and has to pick them all again — the second time being the
+  // only one that does anything.
+  const original = { getServicePrincipals: dbService.getServicePrincipals, getAnalysisRuns: dbService.getAnalysisRuns };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'sp1' }];
+  dbService.getAnalysisRuns = async () => [];
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const { port } = server.address();
+    // The session cookie is what carries the stash, so the two calls have to share one.
+    const stored = await new Promise((resolve, reject) => {
+      const body = JSON.stringify({ spId: '1', workspaceIds: ['ws-2', ' ws-3 ', '', null] });
+      const req = http.request({
+        hostname: '127.0.0.1', port, path: '/settings/access/pending', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, res => {
+        let text = '';
+        res.on('data', c => { text += c; });
+        res.on('end', () => resolve({ body: JSON.parse(text), cookie: (res.headers['set-cookie'] || [])[0] }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+
+    // Blanks are dropped and ids are trimmed before anything is remembered.
+    assert.equal(stored.body.success, true);
+    assert.equal(stored.body.stored, 2);
+    assert.ok(stored.cookie, 'a session is needed to remember anything');
+
+    const get = query => new Promise((resolve, reject) => {
+      http.get({
+        hostname: '127.0.0.1', port, path: '/settings/access' + query,
+        headers: { Cookie: stored.cookie.split(';')[0] },
+      }, res => {
+        let text = '';
+        res.on('data', c => { text += c; });
+        res.on('end', () => resolve(text));
+      }).on('error', reject);
+    });
+
+    const resumed = await get('?grantAuth=success');
+    assert.match(resumed, /var pendingGrant = \{"spId":"1","workspaceIds":\["ws-2","ws-3"\]\}/);
+
+    // Handed back exactly once: a refresh must not grant the same workspaces again.
+    const refreshed = await get('?grantAuth=success');
+    assert.match(refreshed, /var pendingGrant = null/);
+  } finally {
+    Object.assign(dbService, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('a stash is only acted on when the sign-in actually succeeded', async () => {
+  // An abandoned attempt leaves one behind; picking it up on an ordinary visit
+  // would grant workspaces nobody asked for at that moment.
+  const original = { getServicePrincipals: dbService.getServicePrincipals, getAnalysisRuns: dbService.getAnalysisRuns };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'sp1' }];
+  dbService.getAnalysisRuns = async () => [];
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const { port } = server.address();
+    const stored = await new Promise((resolve, reject) => {
+      const body = JSON.stringify({ spId: '1', workspaceIds: ['ws-9'] });
+      const req = http.request({
+        hostname: '127.0.0.1', port, path: '/settings/access/pending', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, res => {
+        let text = '';
+        res.on('data', c => { text += c; });
+        res.on('end', () => resolve({ cookie: (res.headers['set-cookie'] || [])[0] }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+
+    const plain = await new Promise((resolve, reject) => {
+      http.get({
+        hostname: '127.0.0.1', port, path: '/settings/access',
+        headers: { Cookie: stored.cookie.split(';')[0] },
+      }, res => {
+        let text = '';
+        res.on('data', c => { text += c; });
+        res.on('end', () => resolve(text));
+      }).on('error', reject);
+    });
+    assert.match(plain, /var pendingGrant = null/);
+  } finally {
+    Object.assign(dbService, original);
+    await new Promise(resolve => server.close(resolve));
+  }
 });
