@@ -180,7 +180,7 @@ The scheduler cannot import the analysis route (that would be a cycle, and would
 
 Fabric imposes no naming rules of its own, and everything lands in the same workspace — so without a convention a tenant becomes a list of names only their authors can interpret. The cost is not aesthetic: nobody can tell which lakehouse holds bronze data, or which pipeline feeds which layer, without opening each one.
 
-**Settings → Fabric Artifact Naming Convention** defines one. The default is the convention from the supplied document:
+**Settings → Governance Configuration** defines one. It has its own page rather than another card on Settings: Settings is about *reaching* the tenant — which service principal, whose secret, which vault — and a convention deciding whether a lakehouse is named acceptably is a different question with a different audience. It is also where the rules that follow belong; the triage thresholds are configured per-page today with nowhere obvious to put the next one. The default is the convention from the supplied document:
 
 ```
 EXPERIENCE _ ARTIFACT _ [INDEX] _ [STAGE] _ DESCRIPTION
@@ -246,9 +246,22 @@ Access is what the selected scan observed, not live state. The page names the sc
 
 ### Granting
 
-The grant dialog now says which workspaces **already have** the principal and pre-selects only the ones that do not, so the safe action no longer means checking each workspace by hand first. It grants to the service principal selected on the page rather than to whichever was configured first — with more than one tenant registered, that silently granted access to the wrong application. Failures are named individually: "granted 38 of 50" without saying which twelve, or why, is not something anyone can act on.
+**The list of workspaces to grant into is asked for live, not read from a scan.** A scan reads the admin APIs, which see every workspace whether the principal is a member of it or not — so a scan can say who it *observed* holding access, and cannot say what the principal can reach right now. A grant made since the last scan would not show up at all.
 
-Granting uses the Power BI admin API on behalf of an administrator, so it asks you to sign in as one and returns you to this page afterwards.
+**Check access now** compares every workspace in the tenant against the ones the principal itself can see:
+
+| | |
+|---|---|
+| `GET /admin/groups` | every workspace in the tenant — what a scan uses |
+| `GET /groups` | only what the calling principal is a member of |
+
+The difference is exactly the workspaces it cannot reach. **Two API calls, whatever the size of the tenant** — asking the admin users endpoint per workspace would answer the same question in several hundred. Nothing is listed until you ask, because asking costs those calls.
+
+Only the workspaces **without** access are listed, and only those can be selected. A personal workspace is shown but cannot be ticked: a service principal cannot be added to one at all, so offering it would produce a failure nobody can fix. After a grant the check re-runs automatically, because the list on screen is out of date the moment the grant succeeds and the point of the section is that it reflects the tenant.
+
+It grants to the service principal selected on the page rather than to whichever was configured first — with more than one tenant registered, that silently granted access to the wrong application. Failures are named individually: "granted 38 of 50" without saying which twelve, or why, is not something anyone can act on. Granting uses the Power BI admin API on behalf of an administrator, so it asks you to sign in as one and returns you to this page afterwards.
+
+**Who has access to what** below it is unchanged, and stays scan-based: it is the record of what the last scan observed across every principal, which is a different question from what one principal can reach today.
 
 ## Data Reconciliation
 

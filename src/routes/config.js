@@ -2,8 +2,6 @@ const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
 const { isEncryptionConfigured } = require('../services/secretCryptoService');
-const naming = require('../services/namingConventionService');
-const { loadNamingConvention, saveNamingConvention } = require('../services/namingConventionStore');
 const {
   getAccessTokenForSP,
   getKeyVaultDelegatedAuthUrl,
@@ -41,18 +39,7 @@ function getDelegatedKeyVaultTokenFromSession(req) {
   return token || null;
 }
 
-function namingLocals(convention) {
-  return {
-    naming: convention,
-    segmentDefs: naming.SEGMENT_DEFS,
-    letterCases: naming.LETTER_CASES,
-    namingPattern: naming.describeConvention(convention),
-    namingExample: naming.exampleName(convention),
-  };
-}
-
 router.get('/', async (req, res) => {
-  const convention = await loadNamingConvention();
   try {
     const servicePrincipals = await db.getServicePrincipals();
     res.render('config', {
@@ -61,7 +48,6 @@ router.get('/', async (req, res) => {
       // Never hand the stored ciphertext to the template — only whether one exists.
       servicePrincipals: servicePrincipals.map((sp) => ({ ...sp, client_secret: sp.client_secret ? true : null })),
       secretEncryptionReady: isEncryptionConfigured(),
-      ...namingLocals(convention),
       success: req.flash('success'),
       error: req.flash('error'),
     });
@@ -71,43 +57,10 @@ router.get('/', async (req, res) => {
       user: req.user,
       servicePrincipals: [],
       secretEncryptionReady: isEncryptionConfigured(),
-      ...namingLocals(convention),
       success: [],
       error: [err.message],
     });
   }
-});
-
-/**
- * Saves the naming convention.
- *
- * A convention that cannot be satisfied — no required part, an artifact naming an
- * experience that does not exist — is refused rather than stored, because the
- * result would be a tenant-wide finding nobody can clear.
- */
-router.post('/naming', async (req, res) => {
-  try {
-    const restoring = req.body.restoreDefaults === 'true';
-    const convention = restoring
-      // Restoring keeps whether it is enforced: someone fixing a convention they
-      // broke should not also have to remember to switch it back on.
-      ? naming.normalizeConvention({ ...naming.DEFAULT_CONVENTION, enabled: (await loadNamingConvention()).enabled })
-      : naming.conventionFromForm(req.body);
-
-    const problems = naming.validateConvention(convention);
-    if (problems.length) {
-      req.flash('error', 'The naming convention was not saved: ' + problems.join(' '));
-      return res.redirect('/settings');
-    }
-
-    await saveNamingConvention(convention, req.user ? (req.user.name || req.user.email) : null);
-    req.flash('success', restoring
-      ? 'Naming convention restored to the defaults.'
-      : 'Naming convention saved. Artifacts are checked as ' + naming.describeConvention(convention) + '.');
-  } catch (err) {
-    req.flash('error', 'Could not save the naming convention: ' + err.message);
-  }
-  res.redirect('/settings');
 });
 
 router.post('/sp/save', async (req, res) => {

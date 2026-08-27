@@ -287,6 +287,24 @@ function createPowerBIService(spConfig, authOptions = {}) {
     return data.value || [];
   }
 
+  /**
+   * The workspaces the service principal itself can reach.
+   *
+   * Deliberately the *non-admin* endpoint. `/admin/groups` returns every workspace
+   * in the tenant regardless of membership — that is what makes a tenant-wide scan
+   * possible, and it is also why a scan cannot answer "does the principal have
+   * access". `/groups` returns only what the caller is a member of, so the
+   * difference between the two lists is exactly the workspaces it cannot reach.
+   *
+   * Two calls, whatever the size of the tenant. Asking the admin users endpoint per
+   * workspace would answer the same question in several hundred.
+   */
+  async function getMyWorkspaces() {
+    const token = await getToken();
+    const data = await safeGet(token, PBI_BASE + '/groups', { $top: 5000 });
+    return data.value || [];
+  }
+
   // ── Single workspace detail ──
   async function getWorkspaceById(workspaceId) {
     const fabricData = await tryFabricGet('/workspaces/' + workspaceId);
@@ -1061,6 +1079,7 @@ function createPowerBIService(spConfig, authOptions = {}) {
 
   return {
     getWorkspaces,
+    getMyWorkspaces,
     getWorkspaceById,
     getItemsByWorkspace,
     getItemsByType,

@@ -13,9 +13,15 @@ const router = express.Router();
 const db = require('../services/databaseService');
 const analysisModel = require('../services/analysisModelRepository');
 const {
-  buildAccessOverview, markServicePrincipalAccess,
+  buildAccessOverview, markServicePrincipalAccess, missingServicePrincipalAccess,
   ACCESS_LEVELS, PRINCIPAL_TYPES, accessLevel, principalTypeLabel,
 } = require('../services/workspaceAccessService');
+const powerbi = require('../services/powerbiService');
+
+// Looked up on each call rather than destructured once, so a test can substitute
+// it. Destructuring captures the function at load, which means a stub set
+// afterwards is ignored and the check reaches for a real Azure token instead.
+const createPowerBIService = (...args) => powerbi.createPowerBIService(...args);
 const { pickTenantWideRun, isTenantWide, scopeFromRow, describeScope } = require('../services/analysisScopeService');
 
 /**
@@ -139,6 +145,50 @@ router.get('/workspaces', async (req, res) => {
       objectIdKnown: !!objectId,
       missing: objectId ? workspaces.filter(workspace => !workspace.hasAccess).length : null,
       workspaces,
+    });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * Which workspaces the service principal cannot reach — asked live, not read from
+ * a scan.
+ *
+ * A scan reads the admin API, so it sees every workspace in the tenant whether the
+ * principal is a member or not. It can say who the scan *observed* holding access,
+ * which is what the tables below the grant section are for; it cannot say what the
+ * principal can reach right now, and a grant made since the last scan would not
+ * show up at all.
+ *
+ * The check is the difference between every workspace in the tenant and the ones
+ * the principal itself can see: two API calls, whatever the size of the tenant.
+ */
+router.post('/check', async (req, res) => {
+  try {
+    const servicePrincipals = await db.getServicePrincipals();
+    if (!servicePrincipals.length) {
+      return res.json({ success: false, message: 'No service principal configured.' });
+    }
+    const wanted = Number.parseInt(req.body ? req.body.spId : null, 10);
+    const sp = (Number.isFinite(wanted) && servicePrincipals.find(candidate => Number(candidate.id) === wanted))
+      || servicePrincipals[0];
+
+    const pbi = createPowerBIService(sp);
+    // Sequential rather than together: the second call reuses the token the first
+    // one acquired, and issuing both at once just fetches it twice.
+    const all = await pbi.getWorkspaces();
+    const reachable = await pbi.getMyWorkspaces();
+    const result = missingServicePrincipalAccess(all, reachable);
+
+    res.json({
+      success: true,
+      checkedAt: new Date().toISOString(),
+      servicePrincipal: sp.name,
+      // Granting needs the object id, and without one nothing can be added. Say so
+      // now rather than after the operator has chosen forty workspaces.
+      objectIdKnown: !!sp.enterprise_app_object_id,
+      ...result,
     });
   } catch (err) {
     res.json({ success: false, message: err.message });

@@ -4956,21 +4956,21 @@ test('triage flags off-convention names only when a convention is switched on', 
   assert.equal(disabled.byFinding.namingConvention, 0);
 });
 
-test('the settings page offers the convention, and triage explains it', async () => {
+test('the governance configuration page offers the convention, and triage explains it', async () => {
   const ejs = require('ejs');
   const convention = namingService.normalizeConvention(NAMING);
-  const settings = await ejs.renderFile('src/views/config.ejs', {
-    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings', breadcrumb: [],
-    availableRuns: [], globalRun: null, title: 'Settings',
-    servicePrincipals: [], secretEncryptionReady: true, success: [], error: [],
+  const page = await ejs.renderFile('src/views/governance-config/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings/governance', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Governance Configuration',
+    success: [], error: [],
     naming: convention, segmentDefs: namingService.SEGMENT_DEFS, letterCases: namingService.LETTER_CASES,
     namingPattern: namingService.describeConvention(convention),
     namingExample: namingService.exampleName(convention),
   });
-  assert.match(settings, /Fabric Artifact Naming Convention/);
-  assert.match(settings, /EXPERIENCE_ARTIFACT/);
-  assert.match(settings, /DE_LH_100_BRONZE_SALES/);
-  assert.match(settings, /action="\/settings\/naming"/);
+  assert.match(page, /Fabric Artifact Naming Convention/);
+  assert.match(page, /EXPERIENCE_ARTIFACT/);
+  assert.match(page, /DE_LH_100_BRONZE_SALES/);
+  assert.match(page, /action="\/settings\/governance\/naming"/);
 
   const triage = await ejs.renderFile('src/views/workspaces/list.ejs', {
     user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [],
@@ -5054,4 +5054,178 @@ test('a name in no recognisable shape gets one problem, not five restatements of
   const specific = namingService.checkName('XX_LH_SALES', 'Lakehouse', NAMING);
   assert.deepEqual(specific.problems.length, 1);
   assert.match(specific.problems[0], /Experience should be one of/);
+});
+
+test('the convention lives on its own page, not on Settings', async () => {
+  // Settings is about reaching the tenant — which service principal, whose secret.
+  // A convention deciding whether a lakehouse is named acceptably is a different
+  // question with a different audience, and Settings should not carry both.
+  const ejs = require('ejs');
+  const settings = await ejs.renderFile('src/views/config.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Settings',
+    servicePrincipals: [], secretEncryptionReady: true, success: [], error: [],
+  });
+
+  // No form, and no locals it would need — the page renders without them at all.
+  assert.doesNotMatch(settings, /action="\/settings\/(governance\/)?naming"/);
+  assert.doesNotMatch(settings, /Experience codes/);
+  // But it still says where the convention went, rather than leaving no trace.
+  assert.match(settings, /Governance Configuration/);
+  assert.match(settings, /href="\/settings\/governance"/);
+});
+
+test('the sidebar lists Governance Configuration under Settings, with its own icon', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/settings/governance', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
+  });
+
+  assert.match(html, /<span>Governance Configuration<\/span>/);
+  assert.match(html, /href="\/settings\/governance"[^>]*active/, 'the page highlights itself');
+  // Settings matches its own path exactly, so it does not also light up here.
+  assert.doesNotMatch(html, /href="\/settings" class="sidebar-link active"/);
+
+  // Governance Overview already uses bi-shield-check; two identical icons in one
+  // sidebar is the confusion Master Data and Deployment Pipelines already caused.
+  const icons = (html.match(/bi bi-[a-z0-9-]+"><\/i> <span>/g) || []);
+  assert.equal(new Set(icons).size, icons.length, 'every sidebar icon must be distinct: ' + icons.join(', '));
+});
+
+// ── Which workspaces the service principal cannot reach ──
+//
+// A scan reads the admin APIs, which see every workspace whether the principal is
+// a member or not. It can say who the scan observed holding access; it cannot say
+// what the principal can reach right now, and a grant made since the scan would
+// not show up at all. So this is asked live.
+
+test('the workspaces missing access are the difference between two live lists', () => {
+  const result = workspaceAccess.missingServicePrincipalAccess(
+    [
+      { id: 'ws-1', displayName: 'Finance' },
+      { id: 'ws-2', displayName: 'Marketing' },
+      { id: 'ws-3', name: 'Sales Ops' },
+    ],
+    // What the principal itself can see. Case differs from the admin list, as the
+    // two endpoints do not agree on it.
+    [{ id: 'WS-1' }]
+  );
+
+  assert.equal(result.total, 3);
+  assert.equal(result.withAccess, 1);
+  assert.deepEqual(result.missing.map(w => w.name), ['Marketing', 'Sales Ops']);
+  // The id is carried through as the tenant spelled it, because it is what the
+  // grant call posts back.
+  assert.deepEqual(result.missing.map(w => w.id), ['ws-2', 'ws-3']);
+});
+
+test('a personal workspace is listed but marked ungrantable', () => {
+  // A service principal cannot be added to one at all, so offering to grant it
+  // would produce a failure nobody can fix.
+  const result = workspaceAccess.missingServicePrincipalAccess(
+    [{ id: 'p', displayName: 'Personal of Ann', type: 'PersonalGroup' }, { id: 'w', displayName: 'Finance' }],
+    []
+  );
+  assert.equal(result.missing.find(w => w.id === 'p').isPersonal, true);
+  assert.equal(result.missing.find(w => w.id === 'w').isPersonal, false);
+});
+
+test('a duplicated workspace is offered once, not twice', () => {
+  const result = workspaceAccess.missingServicePrincipalAccess(
+    [{ id: 'a', displayName: 'Finance' }, { id: 'a', displayName: 'Finance again' }, { id: '' }],
+    []
+  );
+  assert.equal(result.total, 1);
+  assert.equal(result.missing.length, 1);
+});
+
+test('reaching everything leaves nothing to grant, and reaching nothing leaves all of it', () => {
+  const all = [{ id: 'a', displayName: 'A' }, { id: 'b', displayName: 'B' }];
+  assert.deepEqual(workspaceAccess.missingServicePrincipalAccess(all, all).missing, []);
+  assert.equal(workspaceAccess.missingServicePrincipalAccess(all, []).missing.length, 2);
+  assert.equal(workspaceAccess.missingServicePrincipalAccess(all, [{ id: 'a' }]).withAccess, 1);
+  // Nothing at all is an empty answer, not a crash.
+  assert.deepEqual(workspaceAccess.missingServicePrincipalAccess(null, null),
+    { total: 0, withAccess: 0, missing: [] });
+});
+
+test('the access check asks the tenant, not a scan', async () => {
+  const original = { getServicePrincipals: dbService.getServicePrincipals, createPowerBIService: pbi.createPowerBIService };
+  const calls = [];
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'sp1' }];
+  pbi.createPowerBIService = () => ({
+    getWorkspaces: async () => { calls.push('all'); return [{ id: 'a', displayName: 'A' }, { id: 'b', displayName: 'B' }]; },
+    getMyWorkspaces: async () => { calls.push('mine'); return [{ id: 'a' }]; },
+  });
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/settings/access/check', { spId: 1 });
+    assert.equal(body.success, true);
+    assert.equal(body.total, 2);
+    assert.equal(body.withAccess, 1);
+    assert.deepEqual(body.missing.map(w => w.id), ['b']);
+    assert.equal(body.objectIdKnown, true);
+    assert.ok(body.checkedAt, 'the answer is dated, because it is a point-in-time reading');
+    // Two calls whatever the size of the tenant — not one per workspace.
+    assert.deepEqual(calls, ['all', 'mine']);
+  } finally {
+    Object.assign(dbService, { getServicePrincipals: original.getServicePrincipals });
+    pbi.createPowerBIService = original.createPowerBIService;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('the check says when the principal has no object id to grant with', async () => {
+  // Without one nothing can be added, and saying so after forty workspaces have
+  // been chosen is too late.
+  const original = { getServicePrincipals: dbService.getServicePrincipals, createPowerBIService: pbi.createPowerBIService };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: null }];
+  pbi.createPowerBIService = () => ({ getWorkspaces: async () => [{ id: 'a' }], getMyWorkspaces: async () => [] });
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/settings/access/check', {});
+    assert.equal(body.objectIdKnown, false);
+  } finally {
+    Object.assign(dbService, { getServicePrincipals: original.getServicePrincipals });
+    pbi.createPowerBIService = original.createPowerBIService;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('the grant section lists nothing until the tenant has been asked', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/access/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings/access',
+    breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Grant Access',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    overview: workspaceAccess.buildAccessOverview(ACCESS_FIXTURE), indexed: true, error: null,
+    grantAuth: false, partialScope: false, runs: [],
+    run: { id: 9, started_at: '2026-08-01T00:00:00Z', scope_kind: 'tenant' },
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 'tid', enterprise_app_object_id: 'sp1' }],
+  });
+
+  // The list is hidden and empty on load — asking the tenant costs API calls, so
+  // it happens when the operator asks for it.
+  assert.match(html, /id="missingAccessPanel" *class="[^"]*d-none|class="mt-3 d-none" id="missingAccessPanel"/);
+  assert.match(html, /Not checked yet/);
+  assert.match(html, /onclick="checkServicePrincipalAccess\(\)"/);
+  assert.match(html, /Checked live, not read from a scan/);
+
+  // The modal it replaced is gone: two lists of workspaces that could disagree
+  // about the same question is exactly what this change removes.
+  assert.doesNotMatch(html, /grantAccessModal/);
+  assert.doesNotMatch(html, /openGrantAccess/);
+
+  // "Who has access to what" is unchanged — that view is what the scan observed.
+  assert.match(html, /Who Has Access to What/);
+  assert.match(html, /id="grantsTable"/);
 });

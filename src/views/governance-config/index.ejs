@@ -1,0 +1,154 @@
+<%- include('../partials/header') %>
+<div class="row">
+  <div class="col-lg-9 mx-auto">
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+      <div>
+        <h2><i class="bi bi-rulers me-2"></i>Governance Configuration</h2>
+        <p class="text-muted mb-0">
+          The rules the estate is judged against. Service principals and access live under
+          <a href="/settings">Configuration</a> and <a href="/settings/access">Grant Access</a> — those are about
+          reaching the tenant, these are about what counts as well-run once you are in it.
+        </p>
+      </div>
+    </div>
+
+    <div id="flash-messages">
+      <% if (success && success.length) { %>
+        <% success.forEach(function(message) { %>
+          <div class="alert alert-success alert-dismissible fade show">
+            <i class="bi bi-check-circle me-2"></i><%= message %>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+          </div>
+        <% }) %>
+      <% } %>
+      <% if (error && error.length) { %>
+        <% error.forEach(function(message) { %>
+          <div class="alert alert-danger alert-dismissible fade show">
+            <i class="bi bi-x-circle me-2"></i><%= message %>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+          </div>
+        <% }) %>
+      <% } %>
+    </div>
+
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span><i class="bi bi-type me-2"></i>Fabric Artifact Naming Convention</span>
+      <span class="badge bg-<%= naming.enabled ? 'success' : 'secondary' %>">
+        <%= naming.enabled ? 'enforced' : 'not enforced' %>
+      </span>
+    </div>
+    <div class="card-body">
+      <p class="text-muted small">
+        Fabric imposes no naming rules of its own, and everything lands in the same workspace — so without a
+        convention a tenant becomes a list of names only their authors can interpret. Define one here and
+        <a href="/workspaces">Workspace Triage</a> will flag the artifacts that do not follow it, each with a
+        suggested name.
+      </p>
+
+      <form method="post" action="/settings/governance/naming">
+        <div class="form-check form-switch mb-3">
+          <input class="form-check-input" type="checkbox" id="namingEnabled" name="enabled" value="true"
+                 <%= naming.enabled ? 'checked' : '' %>>
+          <label class="form-check-label" for="namingEnabled">
+            <strong>Check artifact names against this convention</strong>
+            <div class="form-text">Off by default. Turning it on adds a finding to triage; it never renames anything.</div>
+          </label>
+        </div>
+
+        <div class="row g-2 mb-3">
+          <div class="col-md-3">
+            <label class="form-label small" for="namingSeparator">Separator</label>
+            <input type="text" maxlength="3" class="form-control form-control-sm font-monospace"
+                   id="namingSeparator" name="separator" value="<%= naming.separator %>">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small" for="namingCase">Letter case</label>
+            <select class="form-select form-select-sm" id="namingCase" name="letterCase">
+              <% letterCases.forEach(function(c) { %>
+                <option value="<%= c.key %>" <%= naming.letterCase === c.key ? 'selected' : '' %>><%= c.label %></option>
+              <% }) %>
+            </select>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small" for="namingIndexPattern">Index pattern</label>
+            <input type="text" class="form-control form-control-sm font-monospace"
+                   id="namingIndexPattern" name="indexPattern" value="<%= naming.indexPattern %>">
+            <div class="form-text">A regular expression. The default <code>^[1-9]00$</code> allows 100 to 900.</div>
+          </div>
+        </div>
+
+        <label class="form-label small">Parts of a name, in order</label>
+        <div class="border rounded p-2 mb-3">
+          <% segmentDefs.forEach(function(def) {
+               var chosen = naming.segments.filter(function(s) { return s.key === def.key; })[0];
+          %>
+            <div class="row g-2 align-items-center py-1">
+              <div class="col-md-3">
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" id="seg-<%= def.key %>"
+                         name="segment" value="<%= def.key %>" <%= chosen ? 'checked' : '' %>>
+                  <label class="form-check-label fw-bold" for="seg-<%= def.key %>"><%= def.label %></label>
+                </div>
+              </div>
+              <div class="col-md-3">
+                <select class="form-select form-select-sm" name="required_<%= def.key %>">
+                  <option value="true" <%= chosen && chosen.required ? 'selected' : '' %>>Required</option>
+                  <option value="false" <%= chosen && !chosen.required ? 'selected' : '' %>>Optional</option>
+                </select>
+              </div>
+              <div class="col-md-6"><div class="form-text mb-0"><%= def.description %></div></div>
+            </div>
+          <% }) %>
+          <div class="form-text mt-1">
+            The description is always read as everything that is left, because business text legitimately
+            contains the separator — <code>SOURCE_TO_BRONZE</code> is one description, not three parts.
+          </div>
+        </div>
+
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <label class="form-label small" for="namingExperiences">Experience codes</label>
+            <textarea class="form-control form-control-sm font-monospace" id="namingExperiences"
+                      name="experiences" rows="7"><%= naming.experiences.map(function(e) { return e.code + ' = ' + e.label; }).join('\n') %></textarea>
+            <div class="form-text">One per line, <code>CODE = label</code>.</div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small" for="namingStages">Stages</label>
+            <textarea class="form-control form-control-sm font-monospace" id="namingStages"
+                      name="stages" rows="3"><%= naming.stages.join('\n') %></textarea>
+            <div class="form-text">One per line. Leave empty if your estate has no medallion layers.</div>
+
+            <label class="form-label small mt-2" for="namingIgnored">Item types to skip</label>
+            <textarea class="form-control form-control-sm font-monospace" id="namingIgnored"
+                      name="ignoredItemTypes" rows="2"><%= naming.ignoredItemTypes.join('\n') %></textarea>
+            <div class="form-text">One per line. For artifacts nobody names by hand.</div>
+          </div>
+        </div>
+
+        <label class="form-label small" for="namingArtifacts">Artifact codes</label>
+        <textarea class="form-control form-control-sm font-monospace" id="namingArtifacts" name="artifacts"
+                  rows="10"><%= naming.artifacts.map(function(a) { return a.code + ' = ' + a.label + ' | ' + a.experience + ' | ' + a.itemTypes.join(', '); }).join('\n') %></textarea>
+        <div class="form-text mb-3">
+          One per line: <code>CODE = label | EXPERIENCE | FabricItemType, FabricItemType</code>.
+          The item types are what make a suggested name possible — the scan knows an item is a Lakehouse, so the
+          convention can say the name should start <code>DE_LH</code>. A type listed nowhere is not checked at all.
+        </div>
+
+        <div class="alert alert-light border">
+          <div class="small text-muted mb-1">This convention reads as:</div>
+          <code><%= namingPattern %></code>
+          <div class="small text-muted mt-2 mb-1">For example:</div>
+          <code><%= namingExample %></code>
+        </div>
+
+        <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i>Save convention</button>
+        <button type="submit" name="restoreDefaults" value="true" class="btn btn-outline-secondary">
+          <i class="bi bi-arrow-counterclockwise me-1"></i>Restore the document's defaults
+        </button>
+      </form>
+    </div>
+  </div>
+  </div>
+</div>
+<%- include('../partials/footer') %>

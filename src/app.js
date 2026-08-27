@@ -66,7 +66,9 @@ app.use((req, res, next) => {
     workspaces: 'Workspaces', governance: 'Governance', analysis: 'Run Analysis',
     migrate: 'Migrate', capacities: 'Capacities', settings: 'Configuration',
     overview: 'Overview', users: 'Users', artifacts: 'Artifacts',
-    reconciliation: 'Reconciliation', exceptions: 'Exceptions', rules: 'Rules', runs: 'Runs', sources: 'Sources'
+    reconciliation: 'Reconciliation', exceptions: 'Exceptions', rules: 'Rules', runs: 'Runs', sources: 'Sources',
+    // Under /settings these two are pages of their own, not path noise.
+    governance: 'Governance', access: 'Grant Access'
   };
   const breadcrumb = [];
   let href = '';
@@ -132,6 +134,7 @@ app.get('/api/user', (req, res) => {
 const indexRoutes = require('./routes/index');
 const configRoutes = require('./routes/config');
 const accessRoutes = require('./routes/access');
+const governanceConfigRoutes = require('./routes/governanceConfig');
 const workspaceRoutes = require('./routes/workspaces');
 const governanceRoutes = require('./routes/governance');
 const analysisRoutes = require('./routes/analysis');
@@ -145,6 +148,7 @@ const tenantSettingsRoutes = require('./routes/tenantSettings');
 
 app.use('/', indexRoutes);
 app.use('/settings/access', accessRoutes);
+app.use('/settings/governance', governanceConfigRoutes);
 app.use('/settings', configRoutes);
 app.use('/workspaces', workspaceRoutes);
 app.use('/governance', governanceRoutes);

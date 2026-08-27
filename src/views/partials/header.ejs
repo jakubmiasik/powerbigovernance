@@ -76,6 +76,9 @@
       <a href="/settings" class="sidebar-link <%= pagePath === '/settings' ? 'active' : '' %>" title="Configuration">
         <i class="bi bi-gear"></i> <span>Configuration</span>
       </a>
+      <a href="/settings/governance" class="sidebar-link <%= pagePath.startsWith('/settings/governance') ? 'active' : '' %>" title="Governance Configuration">
+        <i class="bi bi-rulers"></i> <span>Governance Configuration</span>
+      </a>
       <a href="/settings/access" class="sidebar-link <%= pagePath.startsWith('/settings/access') ? 'active' : '' %>" title="Grant Access">
         <i class="bi bi-key"></i> <span>Grant Access</span>
       </a>
