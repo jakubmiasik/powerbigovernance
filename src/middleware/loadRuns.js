@@ -1,4 +1,5 @@
 const db = require('../services/databaseService');
+const { scopeTag, scopeTagTitle } = require('../services/analysisScopeService');
 
 const RUN_CACHE_TTL_MS = parseInt(process.env.RUN_CACHE_TTL_MS || '30000', 10);
 let runCache = { expiresAt: 0, runs: [] };
@@ -13,7 +14,11 @@ async function getCompletedRuns() {
     db.getAnalysisRuns(),
     new Promise((_, reject) => setTimeout(() => reject(new Error('DB timeout')), 5000)),
   ]);
-  const completedRuns = runs.filter(r => r.status === 'completed');
+  // The scope is decorated here rather than in the header partial: the selector is
+  // shared by every page, and a template has no business parsing a stored scope.
+  const completedRuns = runs
+    .filter(r => r.status === 'completed')
+    .map(run => ({ ...run, scopeTag: scopeTag(run), scopeTagTitle: scopeTagTitle(run) }));
   runCache = { expiresAt: now + RUN_CACHE_TTL_MS, runs: completedRuns };
   return completedRuns;
 }

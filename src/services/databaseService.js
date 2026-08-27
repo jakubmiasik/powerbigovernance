@@ -287,17 +287,47 @@ async function updateAnalysisRun(id, data) {
   }
 }
 
+// Every column a caller needs from a run *except* results_json, which is the scan
+// document and potentially megabytes.
+//
+// The scope columns belong here and were missed when scoping was added: this query
+// names its columns, so a run's scope simply never arrived. Every reader then saw
+// `undefined` and fell back to "whole tenant" — which is not a display bug alone,
+// because `pickTenantWideRun` and the schedule overlap check read the same rows.
+const RUN_META_COLUMNS = `id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports,
+  total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by,
+  scope_kind, scope_workspaces, schedule_id`;
+
+// The same list without the columns a pre-scoping deployment has not migrated yet.
+// Naming columns means a missing one fails the whole read rather than arriving as
+// null, so an instance that has not run the migration falls back to this.
+const RUN_META_COLUMNS_LEGACY = `id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports,
+  total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by`;
+
+/**
+ * Reads runs, tolerating a database that predates the scope columns.
+ *
+ * `execWithColumnFallback` covers writes; a SELECT needs the same tolerance, and
+ * the alternative — `SELECT *` — would drag results_json into every run list.
+ */
+async function selectRuns(conn, clause, params = []) {
+  try {
+    return await execSql(conn, 'SELECT ' + RUN_META_COLUMNS + ' FROM analysis_runs ' + clause, params);
+  } catch (err) {
+    if (!/invalid column name/i.test(err.message || '')) throw err;
+    console.warn('[DB] Reading runs without the scope columns; run migrations to record scan coverage.');
+    return execSql(conn, 'SELECT ' + RUN_META_COLUMNS_LEGACY + ' FROM analysis_runs ' + clause, params);
+  }
+}
+
 async function getAnalysisRuns() {
   const conn = await getConnection();
   try {
-    return await execSql(conn, 'SELECT id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports, total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by FROM analysis_runs ORDER BY started_at DESC');
+    return await selectRuns(conn, 'ORDER BY started_at DESC');
   } finally {
     conn.close();
   }
 }
-
-const RUN_META_COLUMNS = `id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports,
-  total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by`;
 
 /**
  * A run without its result document.
@@ -309,9 +339,7 @@ const RUN_META_COLUMNS = `id, sp_id, sp_name, tenant_id, status, total_workspace
 async function getAnalysisRunMeta(id) {
   const conn = await getConnection();
   try {
-    const rows = await execSql(conn, 'SELECT ' + RUN_META_COLUMNS + ' FROM analysis_runs WHERE id=@id', [
-      { name: 'id', type: TYPES.Int, value: id },
-    ]);
+    const rows = await selectRuns(conn, 'WHERE id=@id', [{ name: 'id', type: TYPES.Int, value: id }]);
     return rows[0] || null;
   } finally {
     conn.close();
@@ -1362,7 +1390,7 @@ module.exports = {
   logScheduleExecution,
   getScheduleHistory,
   getLastScheduleExecutions,
-  _private: { buildInsert, buildUpdate, extractProblemColumns },
+  _private: { buildInsert, buildUpdate, extractProblemColumns, RUN_META_COLUMNS, RUN_META_COLUMNS_LEGACY },
   // SQL primitives shared with feature-specific repositories.
   _sql: { getConnection, execSql, TYPES, execWithColumnFallback, buildInsert, buildUpdate },
 };

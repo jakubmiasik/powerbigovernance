@@ -139,6 +139,28 @@ function describeScope(scope, { limit = 3 } = {}) {
     + ': ' + shown + (rest > 0 ? ' and ' + rest + ' more' : '');
 }
 
+/**
+ * A two-letter tag for the run selector: WT for a whole-tenant scan, SC for a
+ * scoped one.
+ *
+ * The selector is a dropdown in the top bar with an SP name, a run number and a
+ * timestamp already in it — there is no room for "3 workspaces: Finance, Sales and
+ * 1 more", and no version of this that reads well at that width. But which of two
+ * scans covered everything is exactly what someone picking between them needs to
+ * know, so it gets two letters and a tooltip.
+ */
+function scopeTag(row) {
+  return isTenantWide(row) ? 'WT' : 'SC';
+}
+
+/** The long form, for the tooltip behind the tag. */
+function scopeTagTitle(row) {
+  const scope = scopeFromRow(row);
+  return scope.kind === SCOPE_KIND.TENANT
+    ? 'WT — whole tenant'
+    : 'SC — scoped to ' + describeScope(scope);
+}
+
 function isTenantWide(row) {
   return scopeFromRow(row).kind === SCOPE_KIND.TENANT;
 }
@@ -168,6 +190,8 @@ module.exports = {
   applyScope,
   filterItemsToScope,
   describeScope,
+  scopeTag,
+  scopeTagTitle,
   isTenantWide,
   pickTenantWideRun,
 };

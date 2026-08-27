@@ -171,13 +171,18 @@
           %>
             <optgroup label="<%= spName %>">
               <% spRuns.forEach(function(r) { %>
-                <option value="<%= r.id %>" <%= (runSelectorValue === r.id) ? 'selected' : '' %>>
-                  <%= spName %>: Run#<%= r.id %> &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
+                <option value="<%= r.id %>" <%= (runSelectorValue === r.id) ? 'selected' : '' %>
+                        title="<%= r.scopeTagTitle || '' %>">
+                  [<%= r.scopeTag || 'WT' %>] <%= spName %>: Run#<%= r.id %> &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
                 </option>
               <% }) %>
             </optgroup>
           <% }) %>
         </select>
+        <% if (typeof globalRun !== 'undefined' && globalRun && globalRun.scopeTag) { %>
+          <span class="badge bg-<%= globalRun.scopeTag === 'WT' ? 'secondary' : 'info text-dark' %>"
+                title="<%= globalRun.scopeTagTitle %>"><%= globalRun.scopeTag %></span>
+        <% } %>
         <% if (runSelectorLocked) { %>
           <% var lockedInfo = (typeof lockedRun !== 'undefined' && lockedRun) ? lockedRun : null; %>
           <span class="badge bg-primary"><i class="bi bi-eye me-1"></i>Viewing Run #<%= lockedInfo ? lockedInfo.id : '-' %></span>

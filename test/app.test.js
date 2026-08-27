@@ -4627,3 +4627,133 @@ test('the run history shows a run without a scope as whole-tenant', async () => 
   assert.match(html, /Whole tenant/);
   assert.doesNotMatch(html, /Scoped ·/);
 });
+
+test('the run list reads every column its consumers depend on', () => {
+  // A scoped run kept reading as "Whole tenant" after it finished, because the run
+  // query names its columns and the scope was never added to the list. Three
+  // things were silently wrong, not one: the run history showed every run as
+  // tenant-wide; `pickTenantWideRun` could not tell a scoped run from a
+  // tenant-wide one, so the Grant Access page's protection never engaged at all;
+  // and the schedule overlap check compared an undefined `schedule_id`, so a
+  // schedule could stack scans on itself.
+  //
+  // Each entry below is read by name somewhere. Adding a column to a run means
+  // adding it here, and this test is what says so.
+  const needed = [
+    'id', 'sp_id', 'sp_name', 'tenant_id', 'status',
+    'total_workspaces', 'total_reports', 'total_datasets', 'total_dashboards', 'total_users',
+    'started_at', 'completed_at', 'run_by',
+    'scope_kind', 'scope_workspaces', 'schedule_id',
+  ];
+  const columns = dbPrivate.RUN_META_COLUMNS.split(',').map(name => name.trim());
+  for (const column of needed) {
+    assert.ok(columns.includes(column), 'the run query must read ' + column);
+  }
+  // results_json is the scan document and can be megabytes; a run list must not
+  // drag it along.
+  assert.ok(!columns.includes('results_json'));
+});
+
+test('the pre-scoping fallback names only columns the full read also names', () => {
+  // The fallback exists for a database that has not migrated yet. It must be a
+  // strict subset: a column in the fallback but not the main list would be one
+  // nothing ever verified.
+  const columns = dbPrivate.RUN_META_COLUMNS.split(',').map(name => name.trim());
+  const legacy = dbPrivate.RUN_META_COLUMNS_LEGACY.split(',').map(name => name.trim());
+  for (const column of legacy) assert.ok(columns.includes(column), column + ' is not in the full read');
+  // And it must drop exactly the columns the migration adds.
+  assert.deepEqual(columns.filter(c => !legacy.includes(c)), ['scope_kind', 'scope_workspaces', 'schedule_id']);
+});
+
+test('a run gets a two-letter coverage tag for the run selector', () => {
+  // The selector already carries an SP name, a run number and a timestamp. There
+  // is no room for "3 workspaces: Finance, Sales and 1 more" — but which of two
+  // scans covered everything is exactly what someone picking between them needs.
+  assert.equal(analysisScope.scopeTag({ scope_kind: 'tenant' }), 'WT');
+  assert.equal(analysisScope.scopeTag({ scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]' }), 'SC');
+  // A run recorded before scopes existed was tenant-wide.
+  assert.equal(analysisScope.scopeTag({ id: 4 }), 'WT');
+
+  assert.equal(analysisScope.scopeTagTitle({ scope_kind: 'tenant' }), 'WT — whole tenant');
+  assert.equal(
+    analysisScope.scopeTagTitle({ scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]' }),
+    'SC — scoped to 1 workspace: Finance');
+});
+
+test('the run selector shows each scan\'s coverage, and the current one carries a badge', async () => {
+  const ejs = require('ejs');
+  const decorate = run => ({ ...run, scopeTag: analysisScope.scopeTag(run), scopeTagTitle: analysisScope.scopeTagTitle(run) });
+  const scoped = decorate({ id: 7, sp_name: 'Contoso SP', status: 'completed', started_at: '2026-08-26T02:00:00Z', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]' });
+  const wide = decorate({ id: 6, sp_name: 'Contoso SP', status: 'completed', started_at: '2026-08-25T02:00:00Z', scope_kind: 'tenant' });
+
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [], title: 'x',
+    availableRuns: [scoped, wide], globalRun: scoped, selectedRunId: 7,
+  });
+
+  assert.match(html, /\[SC\] Contoso SP: Run#7/);
+  assert.match(html, /\[WT\] Contoso SP: Run#6/);
+  assert.match(html, /title="SC — scoped to 1 workspace: Finance"/);
+});
+
+test('a run list with no scope decoration still renders the selector', async () => {
+  // The middleware decorates the runs, but the partial is rendered from several
+  // places and must not depend on it having happened.
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [], title: 'x',
+    availableRuns: [{ id: 1, sp_name: 'SP', status: 'completed', started_at: '2026-08-01T00:00:00Z' }],
+    globalRun: null, selectedRunId: 1,
+  });
+  assert.match(html, /\[WT\] SP: Run#1/, 'an undecorated run reads as whole tenant, which is what it was');
+});
+
+test('the middleware decorates every run it hands the selector', async () => {
+  const { clearRunCache } = require('../src/middleware/loadRuns');
+  const loadRuns = require('../src/middleware/loadRuns').loadRuns;
+  const original = dbService.getAnalysisRuns;
+  clearRunCache();
+  dbService.getAnalysisRuns = async () => ([
+    { id: 7, status: 'completed', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]' },
+    { id: 6, status: 'completed', scope_kind: 'tenant' },
+    { id: 5, status: 'failed', scope_kind: 'tenant' },
+  ]);
+
+  try {
+    const res = { locals: {} };
+    await new Promise(resolve => loadRuns({ query: {}, session: {}, user: null }, res, resolve));
+    assert.deepEqual(res.locals.availableRuns.map(r => r.scopeTag), ['SC', 'WT'], 'only completed runs, each tagged');
+    assert.match(res.locals.availableRuns[0].scopeTagTitle, /Finance/);
+  } finally {
+    dbService.getAnalysisRuns = original;
+    clearRunCache();
+  }
+});
+
+test('comparing two scans of different coverage says so before the numbers', async () => {
+  // Comparing a one-workspace scan with a whole-tenant one produces "-47
+  // workspaces", which reads as the estate having shrunk. The page still shows
+  // the comparison — refusing would be worse — but it must not be read as change.
+  const ejs = require('ejs');
+  const scoped = { id: 7, sp_name: 'SP', tenant_id: 't', started_at: '2026-08-26T00:00:00Z', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]', total_workspaces: 1 };
+  const wide = { id: 6, sp_name: 'SP', tenant_id: 't', started_at: '2026-08-25T00:00:00Z', scope_kind: 'tenant', total_workspaces: 48 };
+  const base = {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis/compare',
+    breadcrumb: [], availableRuns: [], globalRun: null, title: 'Compare Runs',
+    scopeTag: analysisScope.scopeTag, scopeTagTitle: analysisScope.scopeTagTitle,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    runs: [scoped, wide], metrics: [], changedMetrics: [], error: null, tenantSettingsComparable: true,
+  };
+
+  const mismatched = await ejs.renderFile('src/views/analysis/compare.ejs', { ...base, fromRun: wide, toRun: scoped });
+  assert.match(mismatched, /did not cover the same thing/);
+  assert.match(mismatched, /1 workspace: Finance/);
+
+  // Two scans of the same coverage need no such warning.
+  const matched = await ejs.renderFile('src/views/analysis/compare.ejs', { ...base, fromRun: wide, toRun: { ...wide, id: 5 } });
+  assert.doesNotMatch(matched, /did not cover the same thing/);
+
+  // And the picker leads with the coverage either way.
+  assert.match(mismatched, /\[SC\] Run #7/);
+  assert.match(mismatched, /\[WT\] Run #6/);
+});
