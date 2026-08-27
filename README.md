@@ -13,6 +13,7 @@ A web application to investigate and govern Power BI workspaces, reports, datase
 - **Configurable Connection** — Set up service principal credentials via UI or environment variables
 - **Entra ID Authentication** — Protect the app with Microsoft Entra ID sign-in (optional)
 - **Scoped and Scheduled Scans** — Scan the whole tenant or just the workspaces you care about, on demand or on a schedule
+- **Naming Conventions** — Define how Fabric artifacts should be named, then see which ones do not follow it and what they should be called
 - **Workspace Access** — See who can reach which workspace across the tenant, spot workspaces nobody administers, and grant the service principal access where it is missing
 - **Data Reconciliation** — Define controls that verify records agree between two business systems, run them, and manage the resulting exceptions through a controlled lifecycle
 - **Master Data Management** — Match records that arrived from many systems, build one golden record per entity, and publish it to a chosen destination with full provenance
@@ -174,6 +175,47 @@ They share the existing scheduler's tick rather than running their own — a sec
 | **Run now** | Goes through the same executor the scheduler uses, so testing a schedule cannot behave differently from the schedule itself — including refusing to stack |
 
 The scheduler cannot import the analysis route (that would be a cycle, and would make it untestable without an Express app), and the runner has to stay with the route because it owns the in-memory progress map. So the route registers its runner with `analysisLauncher` at load and the scheduler asks that.
+
+## Naming Conventions
+
+Fabric imposes no naming rules of its own, and everything lands in the same workspace — so without a convention a tenant becomes a list of names only their authors can interpret. The cost is not aesthetic: nobody can tell which lakehouse holds bronze data, or which pipeline feeds which layer, without opening each one.
+
+**Settings → Fabric Artifact Naming Convention** defines one. The default is the convention from the supplied document:
+
+```
+EXPERIENCE _ ARTIFACT _ [INDEX] _ [STAGE] _ DESCRIPTION
+DE_LH_100_BRONZE_SALES      a lakehouse holding bronze data for Sales
+DW_WH_300_GOLD_SALES        the gold-layer warehouse for Sales
+DF_PL_100_BRONZE_SOURCE_TO_BRONZE   the pipeline that ingests raw data
+```
+
+Every part is configurable, because a convention nobody chose is one nobody follows: the separator, the letter case, which parts a name has and which are required, the experience and artifact codes, the stages, the index pattern, and which item types to skip entirely.
+
+- **Optional parts may be absent in any combination.** Not every artifact belongs to a medallion layer and not everything needs ordering, so `DE_LH_SALES`, `DE_LH_100_SALES` and `DE_LH_100_BRONZE_SALES` are all correct.
+- **The description is everything left over.** Business text legitimately contains the separator — `SOURCE_TO_BRONZE` is one description, not three parts.
+- **The artifact code must agree with what the item is.** A lakehouse named `DE_PL_100_SALES` passes a shape check that means nothing, so the item's actual type is checked against the code.
+- **A convention that could never be satisfied is refused** rather than stored — no required part, an artifact naming an experience that does not exist, one item type claimed by two codes, a broken index pattern. The alternative is a tenant-wide finding nobody can clear.
+- **Checking is off until you turn it on.** An unconfigured convention would flag an entire tenant on its first scan, which is noise rather than a finding.
+
+Artifact codes carry the Fabric item types they cover, and that is what makes a suggestion possible: the scan knows an item is a Lakehouse, so the convention can say the name should start `DE_LH`. **A type listed nowhere is not checked at all**, so bringing something into scope means adding its type to a code.
+
+### Where it shows up
+
+**Workspace Triage** gains an *Off-convention names* finding, listing how many of a workspace's checked artifacts break the convention and naming the first few. The card is hidden entirely when nothing is enforced — a permanent zero reads as "clean" rather than "not looked at".
+
+**A workspace's page** gains a **Naming** tab: every off-convention artifact, why, and the name it should have.
+
+| Current name | Type | Suggested name | Why |
+|---|---|---|---|
+| Sales Report | Report | `PBI_RPT_SALES` | Should be upper case; not in the form … |
+| finance dw | Warehouse | `DW_WH_FINANCE` | Should be upper case; not in the form … |
+| Ingest Silver Pipeline | DataPipeline | `DF_PL_SILVER_INGEST` | Should be upper case; not in the form … |
+
+The suggestion **keeps the business meaning already in the name** rather than replacing it with a placeholder: anything that looks like a stage or an index is reused, the artifact and experience codes come from what the item actually is, and codes or type names already present are dropped so `Sales Lakehouse` does not become `DE_LH_SALES_LAKEHOUSE`. A name with nothing left to describe suggests `RENAME_ME`, which is honest about needing a human.
+
+A name in no recognisable shape gets **one** problem rather than five restatements of it — walking the segments against an unsegmented name derives "Experience should be one of…", "Artifact is missing", "Description is missing", which is a wall of text saying one thing. The suggested name is what the reader needs next.
+
+**Nothing is renamed by this application.** Fabric renames are done in the portal, so the useful thing this page can do is hand over the exact string, which the copy button does.
 
 ## Workspace Access
 
@@ -360,7 +402,7 @@ Rows written before this schema keep working: readers fall back to the stored JS
 
 ### What was left as JSON, deliberately
 
-A golden record's provenance and a run's progress snapshot are each read as a whole, by one owner, and never filtered on. Splitting them would add joins and buy nothing — 3NF is worth it where you query the parts.
+The naming convention lives in `app_settings` as a document, and a golden record's provenance and a run's progress snapshot are each read as a whole, by one owner, and never filtered on. Splitting them would add joins and buy nothing — 3NF is worth it where you query the parts.
 
 ## Operational Notes
 

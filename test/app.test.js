@@ -4757,3 +4757,301 @@ test('comparing two scans of different coverage says so before the numbers', asy
   assert.match(mismatched, /\[SC\] Run #7/);
   assert.match(mismatched, /\[WT\] Run #6/);
 });
+
+// ── Fabric artifact naming conventions ──
+//
+// Fabric imposes no naming rules of its own and everything lands in the same
+// workspace, so without a convention nobody can tell which lakehouse holds bronze
+// data without opening it. The default here is the convention from the supplied
+// document; every part of it is configurable.
+
+const namingService = require('../src/services/namingConventionService');
+
+const NAMING = { ...namingService.DEFAULT_CONVENTION, enabled: true };
+
+test('the document\'s own examples pass the default convention', () => {
+  for (const [name, type] of [
+    ['DE_LH_100_BRONZE_SALES', 'Lakehouse'],
+    ['DW_WH_300_GOLD_SALES', 'Warehouse'],
+    ['DF_PL_100_BRONZE_RUN_DATA_INGESTION', 'DataPipeline'],
+  ]) {
+    const result = namingService.checkName(name, type, NAMING);
+    assert.ok(result.ok, name + ': ' + result.problems.join(' '));
+  }
+  assert.equal(namingService.describeConvention(NAMING), 'EXPERIENCE_ARTIFACT_[INDEX]_[STAGE]_DESCRIPTION');
+  assert.equal(namingService.exampleName(NAMING), 'DE_LH_100_BRONZE_SALES');
+});
+
+test('optional parts may be absent, in any combination', () => {
+  // Not every artifact belongs to a medallion layer and not everything needs
+  // ordering, so a checker that demanded both would flag correct names.
+  for (const name of ['DE_LH_SALES', 'DE_LH_100_SALES', 'DE_LH_BRONZE_SALES', 'DE_LH_100_BRONZE_SALES']) {
+    assert.ok(namingService.checkName(name, 'Lakehouse', NAMING).ok, name);
+  }
+});
+
+test('a description may contain the separator, because business text does', () => {
+  // SOURCE_TO_BRONZE is one description, not three parts.
+  const result = namingService.checkName('DF_PL_100_BRONZE_SOURCE_TO_BRONZE', 'DataPipeline', NAMING);
+  assert.ok(result.ok, result.problems.join(' '));
+  assert.equal(result.matched.description, 'SOURCE_TO_BRONZE');
+});
+
+test('each problem names the part at fault, not just "invalid"', () => {
+  const wrongExperience = namingService.checkName('XX_LH_SALES', 'Lakehouse', NAMING);
+  assert.match(wrongExperience.problems[0], /Experience should be one of/);
+
+  const wrongCase = namingService.checkName('de_lh_100_bronze_sales', 'Lakehouse', NAMING);
+  assert.deepEqual(wrongCase.problems, ['Should be upper case.']);
+
+  const noName = namingService.checkName('', 'Lakehouse', NAMING);
+  assert.match(noName.problems[0], /no name/);
+});
+
+test('the artifact code has to agree with what the item actually is', () => {
+  // Otherwise a lakehouse named DE_PL_100_SALES passes a check that means nothing.
+  const result = namingService.checkName('DE_PL_100_BRONZE_SALES', 'Lakehouse', NAMING);
+  assert.ok(!result.ok);
+  assert.match(result.problems[0], /This is a Lakehouse, so the artifact code should be "LH"/);
+});
+
+test('a suggested name keeps the meaning already in the name', () => {
+  // The point is a name someone will actually use, so the business words survive
+  // and only the codes are added.
+  assert.equal(namingService.suggestName({ name: 'Sales Bronze Lakehouse', type: 'Lakehouse' }, NAMING), 'DE_LH_BRONZE_SALES');
+  assert.equal(namingService.suggestName({ name: '100 Silver Ingest Pipeline', type: 'DataPipeline' }, NAMING), 'DF_PL_100_SILVER_INGEST');
+  // "Finance DW" — DW is the experience code, so it is not repeated as description.
+  assert.equal(namingService.suggestName({ name: 'Finance DW', type: 'Warehouse' }, NAMING), 'DW_WH_FINANCE');
+  // Nothing left to describe is said plainly rather than produced as DE_LH.
+  assert.equal(namingService.suggestName({ name: 'Lakehouse', type: 'Lakehouse' }, NAMING), 'DE_LH_RENAME_ME');
+});
+
+test('a type the convention says nothing about gets no suggestion and no finding', () => {
+  // A suggestion nobody could act on is worse than none, and judging an item by a
+  // rule that does not cover it is not a finding.
+  assert.equal(namingService.suggestName({ name: 'thing', type: 'MirroredDatabase' }, NAMING), null);
+  const workspace = { items: [{ id: '1', name: 'whatever', type: 'MirroredDatabase' }] };
+  const result = namingService.checkWorkspace(workspace, NAMING);
+  assert.equal(result.checked, 0);
+  assert.equal(result.offenders.length, 0);
+});
+
+test('checking a workspace reports only the artifacts that break the rules', () => {
+  const workspace = {
+    items: [
+      { id: '1', name: 'DE_LH_100_BRONZE_SALES', type: 'Lakehouse' },
+      { id: '2', name: 'Sales Report', type: 'Report' },
+      { id: '3', name: 'finance dw', type: 'Warehouse' },
+    ],
+  };
+  const result = namingService.checkWorkspace(workspace, NAMING);
+  assert.equal(result.checked, 3);
+  assert.deepEqual(result.offenders.map(o => o.name), ['Sales Report', 'finance dw']);
+  assert.equal(result.offenders[0].suggestion, 'PBI_RPT_SALES');
+  assert.equal(result.offenders[1].suggestion, 'DW_WH_FINANCE');
+});
+
+test('an item type the convention is told to skip is not checked', () => {
+  // For artifacts nobody names by hand — a finding nobody can clear is noise.
+  const convention = { ...NAMING, ignoredItemTypes: ['report'] };
+  const workspace = { items: [{ id: '2', name: 'Sales Report', type: 'Report' }] };
+  assert.equal(namingService.checkWorkspace(workspace, convention).checked, 0);
+});
+
+test('a convention is configurable down to the separator and the case', () => {
+  const dashed = namingService.normalizeConvention({
+    ...NAMING, separator: '-', letterCase: 'lower',
+    segments: [{ key: 'artifact', required: true }, { key: 'description', required: true }],
+  });
+  assert.ok(namingService.checkName('lh-sales', 'Lakehouse', dashed).ok);
+  assert.ok(!namingService.checkName('LH-SALES', 'Lakehouse', dashed).ok);
+  assert.equal(namingService.suggestName({ name: 'Sales Lakehouse', type: 'Lakehouse' }, dashed), 'lh-sales');
+  assert.equal(namingService.describeConvention(dashed), 'ARTIFACT-DESCRIPTION');
+});
+
+test('a half-written convention falls back to the default rather than to no rules', () => {
+  // A convention with no codes would report every name as fine, which is worse
+  // than not checking at all.
+  const empty = namingService.normalizeConvention({ enabled: true, experiences: [], artifacts: [], segments: [] });
+  assert.ok(empty.experiences.length > 0);
+  assert.ok(empty.artifacts.length > 0);
+  assert.ok(empty.segments.length > 0);
+  assert.equal(namingService.normalizeConvention(null).enabled, false);
+});
+
+test('a broken index pattern is reported, not silently ignored', () => {
+  const broken = { ...NAMING, indexPattern: '([' };
+  const result = namingService.checkName('DE_LH_100_SALES', 'Lakehouse', broken);
+  assert.ok(result.problems.some(p => /not a valid regular expression/.test(p)));
+});
+
+test('the settings form parses into a convention', () => {
+  const convention = namingService.conventionFromForm({
+    enabled: 'true', separator: '_', letterCase: 'upper', indexPattern: '^[1-9]00$',
+    segment: ['experience', 'artifact', 'description'],
+    required_experience: 'true', required_artifact: 'true', required_description: 'true',
+    experiences: 'PBI = Power BI\nDE = Data Engineering\n\n  ',
+    artifacts: 'LH = Lakehouse | DE | Lakehouse\nRPT = Report | PBI | Report, PaginatedReport',
+    stages: '', ignoredItemTypes: 'Dashboard\n',
+  });
+
+  assert.equal(convention.enabled, true);
+  assert.deepEqual(convention.segments.map(s => s.key), ['experience', 'artifact', 'description']);
+  assert.deepEqual(convention.experiences.map(e => e.code), ['PBI', 'DE']);
+  assert.deepEqual(convention.artifacts[1].itemTypes, ['Report', 'PaginatedReport']);
+  assert.deepEqual(convention.ignoredItemTypes, ['dashboard']);
+  // Segments keep the definition order, not the order the checkboxes arrived in.
+  const reordered = namingService.conventionFromForm({
+    segment: ['description', 'experience'], required_description: 'true', required_experience: 'true',
+  });
+  assert.deepEqual(reordered.segments.map(s => s.key), ['experience', 'description']);
+});
+
+test('a convention that could never be satisfied is refused', () => {
+  const problems = namingService.validateConvention(namingService.normalizeConvention({
+    segments: [{ key: 'stage', required: false }],
+    indexPattern: '([',
+    stages: [],
+    experiences: [{ code: 'DE', label: 'Data Engineering' }],
+    artifacts: [
+      { code: 'X', experience: 'NOPE', itemTypes: ['Lakehouse'] },
+      { code: 'Y', experience: 'DE', itemTypes: ['lakehouse'] },
+    ],
+  }));
+
+  assert.ok(problems.some(p => /At least one part of the name must be required/.test(p)));
+  assert.ok(problems.some(p => /not a valid regular expression/.test(p)));
+  assert.ok(problems.some(p => /no stages are listed/.test(p)));
+  assert.ok(problems.some(p => /refers to experience "NOPE"/.test(p)));
+  // The same item type under two codes would make the suggestion arbitrary.
+  assert.ok(problems.some(p => /claimed by both/.test(p)));
+
+  assert.deepEqual(namingService.validateConvention(NAMING), []);
+});
+
+test('triage flags off-convention names only when a convention is switched on', () => {
+  const results = { workspaces: [{
+    id: 'a', name: 'Finance',
+    users: [{ name: 'Ann', email: 'a@x.com', role: 'Admin', type: 'User' }],
+    items: [
+      { id: '1', name: 'DE_LH_100_BRONZE_SALES', type: 'Lakehouse' },
+      { id: '2', name: 'Sales Report', type: 'Report' },
+    ],
+  }] };
+
+  // An unconfigured convention would flag an entire tenant on its first scan.
+  const off = insights.computeWorkspaceInsights(results, {});
+  assert.equal(off.byFinding.namingConvention, 0);
+  assert.equal(off.namingConventionEnabled, false);
+
+  const on = insights.computeWorkspaceInsights(results, { namingConvention: NAMING });
+  assert.equal(on.byFinding.namingConvention, 1);
+  assert.equal(on.namingConventionEnabled, true);
+  const finding = on.workspaces[0].findings.find(f => f.key === 'namingConvention');
+  assert.match(finding.detail, /1 of 2 checked artifact\(s\)/);
+  assert.match(finding.detail, /Sales Report/);
+
+  // A convention that exists but is switched off changes nothing.
+  const disabled = insights.computeWorkspaceInsights(results, { namingConvention: { ...NAMING, enabled: false } });
+  assert.equal(disabled.byFinding.namingConvention, 0);
+});
+
+test('the settings page offers the convention, and triage explains it', async () => {
+  const ejs = require('ejs');
+  const convention = namingService.normalizeConvention(NAMING);
+  const settings = await ejs.renderFile('src/views/config.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Settings',
+    servicePrincipals: [], secretEncryptionReady: true, success: [], error: [],
+    naming: convention, segmentDefs: namingService.SEGMENT_DEFS, letterCases: namingService.LETTER_CASES,
+    namingPattern: namingService.describeConvention(convention),
+    namingExample: namingService.exampleName(convention),
+  });
+  assert.match(settings, /Fabric Artifact Naming Convention/);
+  assert.match(settings, /EXPERIENCE_ARTIFACT/);
+  assert.match(settings, /DE_LH_100_BRONZE_SALES/);
+  assert.match(settings, /action="\/settings\/naming"/);
+
+  const triage = await ejs.renderFile('src/views/workspaces/list.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Workspaces', fromSavedData: true, run: null,
+    insights: insights.computeWorkspaceInsights({ workspaces: [] }, { namingConvention: NAMING }),
+    findingDefs: insights.FINDING_DEFS,
+    namingPattern: namingService.describeConvention(convention),
+  });
+  assert.match(triage, /Off-convention names/);
+  assert.match(triage, /Artifact names are checked as/);
+});
+
+test('the triage card for naming is hidden when nothing is enforced', async () => {
+  // A permanent zero reads as "clean" rather than "not looked at".
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/workspaces/list.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Workspaces', fromSavedData: true, run: null,
+    insights: insights.computeWorkspaceInsights({ workspaces: [] }, {}),
+    findingDefs: insights.FINDING_DEFS, namingPattern: null,
+  });
+  // The label still appears in the filter's lookup table, which is JSON for the
+  // page's own script — what must be absent is the card.
+  assert.doesNotMatch(html, /setFindingFilter\('namingConvention'\)/);
+  assert.match(html, /No naming convention is being enforced/);
+});
+
+test('the workspace page lists each off-convention artifact with its suggestion', async () => {
+  const ejs = require('ejs');
+  const workspace = {
+    id: 'a', name: 'Finance',
+    items: [
+      { id: '1', name: 'DE_LH_100_BRONZE_SALES', type: 'Lakehouse' },
+      { id: '2', name: 'Sales Report', type: 'Report' },
+    ],
+    users: [],
+  };
+  const html = await ejs.renderFile('src/views/workspaces/detail.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces/a', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Finance',
+    workspace, items: workspace.items, users: [], sourceRun: null,
+    reports: [workspace.items[1]], datasets: [], dashboards: [], dataflows: [],
+    lakehouses: [workspace.items[0]], notebooks: [], pipelines: [], warehouses: [], others: [],
+    naming: namingService.checkWorkspace(workspace, NAMING),
+    namingPattern: namingService.describeConvention(NAMING),
+  });
+
+  assert.match(html, /tab-naming/);
+  assert.match(html, /PBI_RPT_SALES/);
+  // The compliant lakehouse is not listed as an offender.
+  const table = (html.match(/id="naming-offenders-table"[\s\S]*?<\/table>/) || [''])[0];
+  assert.ok(!/DE_LH_100_BRONZE_SALES/.test(table));
+  // Renaming happens in the Fabric portal; the page must not imply otherwise.
+  assert.match(html, /Nothing is renamed here/);
+});
+
+test('a workspace page with no convention configured has no naming tab', async () => {
+  const ejs = require('ejs');
+  const workspace = { id: 'a', name: 'Finance', items: [], users: [] };
+  const html = await ejs.renderFile('src/views/workspaces/detail.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces/a', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Finance',
+    workspace, items: [], users: [], sourceRun: null,
+    reports: [], datasets: [], dashboards: [], dataflows: [],
+    lakehouses: [], notebooks: [], pipelines: [], warehouses: [], others: [],
+    naming: null, namingPattern: null,
+  });
+  assert.doesNotMatch(html, /tab-naming/);
+});
+
+test('a name in no recognisable shape gets one problem, not five restatements of it', () => {
+  // Walking the segments against an unsegmented name derives "Experience should be
+  // one of…", "Artifact is missing", "Description is missing" — a wall of text
+  // saying one thing. The suggested name is what the reader needs next.
+  const result = namingService.checkName('Sales Report', 'Report', NAMING);
+  assert.equal(result.problems.length, 2);
+  assert.match(result.problems[0], /upper case/);
+  assert.match(result.problems[1], /Not in the form EXPERIENCE_ARTIFACT/);
+
+  // A name that *is* in the right shape still gets the specific problem.
+  const specific = namingService.checkName('XX_LH_SALES', 'Lakehouse', NAMING);
+  assert.deepEqual(specific.problems.length, 1);
+  assert.match(specific.problems[0], /Experience should be one of/);
+});

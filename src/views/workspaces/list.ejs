@@ -44,7 +44,12 @@
         </div>
       </a>
     </div>
-    <% findingDefs.forEach(function(def) { var count = (data.byFinding || {})[def.key] || 0; %>
+    <% findingDefs.forEach(function(def) {
+         // A check nobody switched on would sit here as a permanent zero, which
+         // reads as "clean" rather than "not looked at".
+         if (def.key === 'namingConvention' && !data.namingConventionEnabled) return;
+         var count = (data.byFinding || {})[def.key] || 0;
+    %>
       <div class="col-sm-6 col-md-4 col-xl-2">
         <a href="#triage-table-card" class="text-decoration-none text-reset" onclick="setFindingFilter('<%= def.key %>'); return false;" title="<%= def.description %>">
           <div class="card text-center h-100 stat-card <%= count === 0 ? 'opacity-50' : '' %>">
@@ -79,6 +84,13 @@
           <div class="form-text">
             <i class="bi bi-info-circle me-1"></i>Staleness is measured against the scan date<% if (data.referenceDate) { %> (<%= new Date(data.referenceDate).toLocaleDateString() %>)<% } %>,
             not today, so re-opening an older scan gives the same answer it gave then.
+            <% if (data.namingConventionEnabled && namingPattern) { %>
+              <br><i class="bi bi-type me-1"></i>Artifact names are checked as <code><%= namingPattern %></code>
+              (<a href="/settings">change in Settings</a>). Open a workspace to see each off-convention name and what it should be.
+            <% } else { %>
+              <br><i class="bi bi-type me-1"></i>No naming convention is being enforced.
+              <a href="/settings">Define one in Settings</a> to see which artifacts do not follow it.
+            <% } %>
             <% if (!data.orphanDetectionAvailable) { %>
               <br><i class="bi bi-exclamation-triangle me-1 text-warning"></i>Orphaned-content detection is off: this scan captured no workspace users to compare creators against.
             <% } %>

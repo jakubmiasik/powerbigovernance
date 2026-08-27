@@ -683,6 +683,48 @@ async function markWorkspaceDeletedInRuns(workspaceId) {
   }
 }
 
+// ── Application settings ──
+// Values are JSON documents. A caller that stored something unparseable gets the
+// fallback rather than an exception: a broken setting must not take a page down.
+async function getAppSetting(key, fallback = null) {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(conn, 'SELECT setting_value FROM app_settings WHERE setting_key=@key', [
+      { name: 'key', type: TYPES.NVarChar, value: key },
+    ]);
+    if (!rows.length || rows[0].setting_value == null) return fallback;
+    try {
+      return JSON.parse(rows[0].setting_value);
+    } catch {
+      console.warn('[DB] Setting "' + key + '" is not valid JSON; using the default.');
+      return fallback;
+    }
+  } catch (err) {
+    if (err.message && err.message.includes('Invalid object name')) return fallback;
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+async function saveAppSetting(key, value, actor) {
+  const conn = await getConnection();
+  try {
+    // MERGE rather than delete-then-insert: a reader between the two would see the
+    // setting absent and fall back to the default.
+    await execSql(conn, `MERGE app_settings AS target
+      USING (SELECT @key AS setting_key) AS source ON target.setting_key = source.setting_key
+      WHEN MATCHED THEN UPDATE SET setting_value=@value, updated_at=SYSUTCDATETIME(), updated_by=@by
+      WHEN NOT MATCHED THEN INSERT (setting_key, setting_value, updated_by) VALUES (@key, @value, @by);`, [
+      { name: 'key', type: TYPES.NVarChar, value: key },
+      { name: 'value', type: TYPES.NVarChar, value: JSON.stringify(value) },
+      { name: 'by', type: TYPES.NVarChar, value: actor || null },
+    ]);
+  } finally {
+    conn.close();
+  }
+}
+
 // ── Analysis schedules ──
 // Deliberately its own table rather than a `kind` column on capacity_schedules:
 // the two share only their timing, and nothing else about a capacity action
@@ -1159,6 +1201,21 @@ async function runMigrations() {
       END
     `);
 
+    // A small key/value store for settings that are documents rather than tables —
+    // read as a whole, by one owner, never filtered on. A file would not do: App
+    // Service can run several instances, and each would have its own copy.
+    await runStatement(conn, 'create app_settings', `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'app_settings') AND type = 'U')
+      BEGIN
+        CREATE TABLE app_settings (
+          setting_key NVARCHAR(100) NOT NULL PRIMARY KEY,
+          setting_value NVARCHAR(MAX) NULL,
+          updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+          updated_by NVARCHAR(255) NULL
+        )
+      END
+    `);
+
     // ── Scheduled analysis scans ──
     // A scan used to be something people did by hand, because it always meant the
     // whole tenant and took hours. A scoped scan is short enough to schedule, so
@@ -1375,6 +1432,8 @@ module.exports = {
   getComparableRuns,
   getItemDetailsCache,
   saveItemDetailsCache,
+  getAppSetting,
+  saveAppSetting,
   getAnalysisSchedules,
   saveAnalysisSchedule,
   updateAnalysisSchedule,

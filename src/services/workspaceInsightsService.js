@@ -2,6 +2,8 @@
 // and why. Everything here is derived from data already stored in results_json —
 // no extra API calls — and every function is pure so it can be tested directly.
 
+const { checkWorkspace, normalizeConvention } = require('./namingConventionService');
+
 const DEFAULT_STALE_DAYS = 90;
 const DEFAULT_OVERSHARED_USERS = 50;
 
@@ -63,6 +65,14 @@ const FINDING_DEFS = [
     weight: 20,
     icon: 'people',
     description: 'Access has been granted to an unusually large number of principals.',
+  },
+  {
+    key: 'namingConvention',
+    label: 'Off-convention names',
+    severity: 'low',
+    weight: 18,
+    icon: 'type',
+    description: 'Artifacts whose names do not follow the configured Fabric naming convention. Open the workspace to see each one and the name it should have.',
   },
   {
     key: 'emptyWorkspace',
@@ -209,6 +219,20 @@ function analyzeWorkspace(workspace, context) {
     }
   }
 
+  // Names that do not follow the configured convention. Only when one is
+  // configured *and* switched on: an unconfigured convention would flag an entire
+  // tenant on its first scan, which is noise, not a finding.
+  if (context.namingConvention && items.length) {
+    const naming = checkWorkspace(workspace, context.namingConvention);
+    if (naming.offenders.length) {
+      const named = naming.offenders.slice(0, 3).map(offender => offender.name).join(', ');
+      addFinding('namingConvention',
+        naming.offenders.length + ' of ' + naming.checked + ' checked artifact(s) do not follow the convention: '
+        + named + (naming.offenders.length > 3 ? ', …' : '') + '.',
+        { count: naming.offenders.length, checked: naming.checked });
+    }
+  }
+
   // Fabric-only content in a workspace that is not on dedicated capacity.
   const onDedicatedCapacity = !!workspace.capacityId && workspace.capacityId !== EMPTY_CAPACITY_ID;
   if (!onDedicatedCapacity) {
@@ -262,7 +286,14 @@ function computeWorkspaceInsights(results, options = {}) {
   // nothing than to report a tenant-wide false positive.
   const detectOrphans = knownPrincipals.size > 0;
 
-  const context = { referenceDate, staleDays, overSharedUsers, knownPrincipals, detectOrphans };
+  // Normalized once for the whole run rather than per workspace: a tenant has
+  // thousands of items, and re-deriving the rules for each of them is work that
+  // produces the same answer every time.
+  const namingConvention = options.namingConvention && options.namingConvention.enabled
+    ? normalizeConvention(options.namingConvention)
+    : null;
+
+  const context = { referenceDate, staleDays, overSharedUsers, knownPrincipals, detectOrphans, namingConvention };
   const analyzed = workspaces.map(workspace => analyzeWorkspace(workspace, context));
 
   analyzed.sort((a, b) => b.score - a.score || b.totalItems - a.totalItems || a.name.localeCompare(b.name));
@@ -281,6 +312,9 @@ function computeWorkspaceInsights(results, options = {}) {
     totalCount: analyzed.length,
     byFinding,
     thresholds: { staleDays, overSharedUsers },
+    // So the page can hide the naming card rather than showing a permanent zero
+    // for a check nobody has switched on.
+    namingConventionEnabled: !!namingConvention,
     referenceDate: referenceDate.toISOString(),
     orphanDetectionAvailable: detectOrphans,
   };
