@@ -266,6 +266,20 @@ function markServicePrincipalAccess(overview, servicePrincipalObjectId) {
  * Pure, so the set arithmetic — which is the whole correctness of the feature —
  * is testable without touching an API.
  */
+// A workspace a service principal cannot be added to, whatever its access.
+// Personal workspaces take no members at all, and a deleted or deleting one is on
+// its way out — offering either would produce a failure nobody can fix.
+function isPersonalWorkspace(workspace) {
+  return String((workspace && workspace.type) || '').toLowerCase() === 'personalgroup';
+}
+
+function isRetiredWorkspace(workspace) {
+  const state = String((workspace && workspace.state) || '').trim().toLowerCase();
+  // An absent state means the API did not say, which the Fabric endpoint does for
+  // ordinary live workspaces. Only an explicit end-of-life state excludes one.
+  return state === 'deleted' || state === 'removing' || state === 'deleting';
+}
+
 function missingServicePrincipalAccess(all, reachable) {
   const idOf = workspace => String((workspace && (workspace.id || workspace.workspaceId)) || '').trim().toLowerCase();
   const nameOf = workspace => (workspace && (workspace.displayName || workspace.name)) || null;
@@ -275,6 +289,7 @@ function missingServicePrincipalAccess(all, reachable) {
   const seen = new Set();
   const missing = [];
   let withAccess = 0;
+  let skipped = 0;
 
   for (const workspace of all || []) {
     const id = idOf(workspace);
@@ -286,22 +301,29 @@ function missingServicePrincipalAccess(all, reachable) {
       withAccess += 1;
       continue;
     }
+
+    // Counted, not silently dropped: "12 of 40 unreachable" and a list of 9 would
+    // look like a bug rather than like three workspaces nothing can be done about.
+    if (isPersonalWorkspace(workspace) || isRetiredWorkspace(workspace)) {
+      skipped += 1;
+      continue;
+    }
+
     missing.push({
       id: workspace.id || workspace.workspaceId,
       name: nameOf(workspace) || '(unnamed)',
       state: workspace.state || 'Active',
-      // Personal workspaces cannot take a service principal as a member at all, so
-      // offering to grant one would produce a failure nobody can fix.
-      isPersonal: String(workspace.type || '').toLowerCase() === 'personalgroup',
     });
   }
 
   missing.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-  return { total: seen.size, withAccess, missing };
+  return { total: seen.size, withAccess, skipped, missing };
 }
 
 module.exports = {
   missingServicePrincipalAccess,
+  isPersonalWorkspace,
+  isRetiredWorkspace,
   ACCESS_LEVELS,
   ACCESS_BY_KEY,
   PRINCIPAL_TYPES,

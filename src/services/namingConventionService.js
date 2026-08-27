@@ -387,11 +387,18 @@ function suggestName(item, convention) {
 
   // Codes and type names already in the name are dropped, so "Sales Lakehouse"
   // does not become DE_LH_SALES_LAKEHOUSE.
+  //
+  // *Every* configured code counts as noise, not only the ones this item maps to.
+  // A pipeline named DE_PL_100_LOAD_ALL_TABLES carries the wrong experience code —
+  // the fix is DF, not keeping DE as part of the description, which is what
+  // stripping only the expected code produced: DF_PL_100_DE_LOAD_ALL_TABLES. A
+  // token that is a code in this convention belongs to a segment of its own, so
+  // finding one among the leftovers means it was meant as a code, not as prose.
   const noise = new Set([
-    artifact.code.toUpperCase(),
+    ...rules.experiences.map(entry => entry.code.toUpperCase()),
+    ...rules.artifacts.map(entry => entry.code.toUpperCase()),
     (artifact.label || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
     String(itemType).toUpperCase(),
-    ...(experience ? [experience.code.toUpperCase()] : []),
   ].filter(Boolean));
   words = words.filter(word => !noise.has(word.toUpperCase()));
 

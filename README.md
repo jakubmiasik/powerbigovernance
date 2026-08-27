@@ -211,7 +211,9 @@ Artifact codes carry the Fabric item types they cover, and that is what makes a 
 | finance dw | Warehouse | `DW_WH_FINANCE` | Should be upper case; not in the form … |
 | Ingest Silver Pipeline | DataPipeline | `DF_PL_SILVER_INGEST` | Should be upper case; not in the form … |
 
-The suggestion **keeps the business meaning already in the name** rather than replacing it with a placeholder: anything that looks like a stage or an index is reused, the artifact and experience codes come from what the item actually is, and codes or type names already present are dropped so `Sales Lakehouse` does not become `DE_LH_SALES_LAKEHOUSE`. A name with nothing left to describe suggests `RENAME_ME`, which is honest about needing a human.
+The suggestion **keeps the business meaning already in the name** rather than replacing it with a placeholder: anything that looks like a stage or an index is reused, the artifact and experience codes come from what the item actually is, and codes or type names already present are dropped so `Sales Lakehouse` does not become `DE_LH_SALES_LAKEHOUSE`.
+
+**Every code the convention defines counts as one already present**, not only the codes this item maps to. A pipeline named `DE_PL_100_LOAD_ALL_TABLES` carries the wrong experience code — the fix is `DF` — and stripping only the expected code left the `DE` behind to be read as business text, suggesting `DF_PL_100_DE_LOAD_ALL_TABLES`. A token that is a code in this convention belongs to a segment of its own, so finding one among the leftovers means it was meant as a code and not as prose. The stripping follows what is *configured*: a convention that does not define `DE` keeps it as description. A name with nothing left to describe suggests `RENAME_ME`, which is honest about needing a human.
 
 A name in no recognisable shape gets **one** problem rather than five restatements of it — walking the segments against an unsegmented name derives "Experience should be one of…", "Artifact is missing", "Description is missing", which is a wall of text saying one thing. The suggested name is what the reader needs next.
 
@@ -257,7 +259,11 @@ Access is what the selected scan observed, not live state. The page names the sc
 
 The difference is exactly the workspaces it cannot reach. **Two API calls, whatever the size of the tenant** — asking the admin users endpoint per workspace would answer the same question in several hundred. Nothing is listed until you ask, because asking costs those calls.
 
-Only the workspaces **without** access are listed, and only those can be selected. A personal workspace is shown but cannot be ticked: a service principal cannot be added to one at all, so offering it would produce a failure nobody can fix. After a grant the check re-runs automatically, because the list on screen is out of date the moment the grant succeeds and the point of the section is that it reflects the tenant.
+Only the workspaces **without** access are listed. Personal workspaces and deleted or deleting ones are left out entirely — a service principal cannot be added to a personal workspace at all, and a workspace on its way out will refuse the grant — but they are *counted*, because "12 of 40 unreachable" beside a list of 9 looks like a bug rather than like workspaces nothing can be done about.
+
+After a grant the check re-runs automatically, because the list on screen is out of date the moment the grant succeeds and the point of the section is that it reflects the tenant.
+
+**The administrator sign-in does not cost the selection.** Granting acts on behalf of an administrator, so an operator who is not signed in as one is sent away to authorize. The chosen workspaces are handed to the server before the redirect and picked up on the way back, and the grant finishes by itself — rather than returning to an empty page and having to choose the same workspaces a second time. The stash is handed back exactly once and only after a *successful* sign-in, so a refresh cannot repeat the grant and an abandoned attempt cannot be acted on later.
 
 It grants to the service principal selected on the page rather than to whichever was configured first — with more than one tenant registered, that silently granted access to the wrong application. Failures are named individually: "granted 38 of 50" without saying which twelve, or why, is not something anyone can act on. Granting uses the Power BI admin API on behalf of an administrator, so it asks you to sign in as one and returns you to this page afterwards.
 

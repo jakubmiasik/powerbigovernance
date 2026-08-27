@@ -424,6 +424,10 @@ function escapeHtml(s) { var d = document.createElement('div'); d.textContent = 
 
 var missingAccess = { workspaces: [], selected: new Set(), checkedAt: null, objectIdKnown: true };
 
+// A grant the administrator sign-in interrupted. Handed back by the server exactly
+// once, so a refresh cannot repeat it.
+var pendingGrant = <%- JSON.stringify(typeof pendingGrant !== 'undefined' && pendingGrant ? pendingGrant : null) %>;
+
 function onGrantSpChanged() {
   // A different principal has a different answer; keeping the previous one on
   // screen would invite granting against a check that was never run for it.
@@ -470,9 +474,14 @@ async function checkServicePrincipalAccess(options) {
       '<br><span class="text-muted">Checked ' + new Date(data.checkedAt).toLocaleTimeString() + '</span>';
 
     document.getElementById('missingAccessPanel').classList.remove('d-none');
+    // Skipped workspaces are named in the count, not silently dropped: "12 of 40
+    // unreachable" beside a list of 9 would look like a bug.
+    var skippedNote = data.skipped
+      ? ' (' + data.skipped + ' personal or deleted workspace(s) left out — nothing can be granted on those)'
+      : '';
     document.getElementById('missingAccessHeading').textContent = missingAccess.workspaces.length
-      ? missingAccess.workspaces.length + ' workspace(s) ' + escapeHtml(data.servicePrincipal) + ' cannot reach'
-      : escapeHtml(data.servicePrincipal) + ' can reach every workspace';
+      ? missingAccess.workspaces.length + ' workspace(s) ' + data.servicePrincipal + ' cannot reach' + skippedNote
+      : data.servicePrincipal + ' can reach every workspace it could be granted' + skippedNote;
     document.getElementById('missingAccessFilter').value = '';
     renderMissingAccess();
   } catch (e) {
@@ -503,17 +512,11 @@ function renderMissingAccess() {
   });
 
   list.innerHTML = notice + (shown.map(function(ws) {
-    // A personal workspace cannot take a service principal as a member at all, so
-    // offering to grant one would produce a failure nobody can fix.
-    var blocked = ws.isPersonal || !missingAccess.objectIdKnown;
     return '<div class="form-check missing-ws" data-name="' + escapeHtml((ws.name || '').toLowerCase()) + '">' +
       '<input class="form-check-input missing-ws-cb" type="checkbox" value="' + escapeHtml(ws.id) + '" id="missws-' + escapeHtml(ws.id) + '"' +
-      (missingAccess.selected.has(ws.id) ? ' checked' : '') + (blocked ? ' disabled' : '') +
+      (missingAccess.selected.has(ws.id) ? ' checked' : '') + (missingAccess.objectIdKnown ? '' : ' disabled') +
       ' onchange="onMissingAccessToggled(this)">' +
-      '<label class="form-check-label small" for="missws-' + escapeHtml(ws.id) + '">' + escapeHtml(ws.name) +
-      (ws.state && ws.state !== 'Active' ? ' <span class="text-muted">(' + escapeHtml(ws.state) + ')</span>' : '') +
-      (ws.isPersonal ? ' <span class="badge bg-secondary">personal workspace — cannot be granted</span>' : '') +
-      '</label></div>';
+      '<label class="form-check-label small" for="missws-' + escapeHtml(ws.id) + '">' + escapeHtml(ws.name) + '</label></div>';
   }).join('') || '<div class="small text-muted py-2">Nothing matches that filter.</div>');
 
   updateMissingAccessCount();
@@ -545,8 +548,12 @@ function updateMissingAccessCount() {
 /**
  * Granting acts on behalf of an administrator, so it needs a delegated sign-in
  * rather than the application's own credential.
+ *
+ * The selection is handed to the server before the redirect and picked up on the
+ * way back, so the sign-in is an interruption rather than a reason to choose the
+ * same workspaces a second time.
  */
-async function ensureGrantAuth() {
+async function ensureGrantAuth(selected) {
   try {
     var resp = await fetch('/governance/grant-auth/status');
     var data = await resp.json();
@@ -559,18 +566,58 @@ async function ensureGrantAuth() {
   showConfirmAction({
     title: 'Sign in as a Power BI administrator',
     message: 'Granting workspace access uses the Power BI admin API on behalf of an administrator. You will be '
-      + 'redirected to sign in and brought back here. The access check will need running again afterwards.',
-    confirmText: 'Sign in',
+      + 'redirected to sign in. The ' + selected.length + ' workspace(s) you selected are remembered, and the grant '
+      + 'finishes by itself when you come back.',
+    confirmText: 'Sign in and continue',
     confirmClass: 'btn-primary',
-    onConfirm: function() { window.location.href = '/governance/grant-auth?returnTo=access'; },
+    onConfirm: async function() {
+      try {
+        await fetch('/settings/access/pending', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ spId: document.getElementById('grantSpSelect').value, workspaceIds: selected }),
+        });
+      } catch (e) {
+        // Losing the stash costs a second selection, not correctness — going on to
+        // the sign-in is still better than stopping here.
+        showToast('The selection could not be remembered: ' + e.message, 'error');
+      }
+      window.location.href = '/governance/grant-auth?returnTo=access';
+    },
   });
   return false;
 }
 
+/**
+ * Finishes the grant the sign-in interrupted.
+ *
+ * Runs from the remembered ids rather than from the on-screen list, which is empty
+ * on a fresh page load — the whole point is that the operator does not have to
+ * rebuild the selection.
+ */
+async function resumePendingGrant() {
+  if (!pendingGrant || !pendingGrant.workspaceIds || !pendingGrant.workspaceIds.length) return;
+
+  var select = document.getElementById('grantSpSelect');
+  if (select && pendingGrant.spId) select.value = pendingGrant.spId;
+
+  document.getElementById('missingAccessPanel').classList.remove('d-none');
+  document.getElementById('missingAccessHeading').textContent =
+    'Finishing the grant you started before signing in';
+  document.getElementById('missingAccessList').innerHTML =
+    '<div class="small text-muted py-2">' + pendingGrant.workspaceIds.length + ' workspace(s) remembered.</div>';
+
+  missingAccess.selected = new Set(pendingGrant.workspaceIds);
+  pendingGrant = null;
+  await grantSpAccess();
+}
+
+document.addEventListener('DOMContentLoaded', resumePendingGrant);
+
 async function grantSpAccess() {
   var selected = Array.from(missingAccess.selected);
   if (!selected.length) return;
-  if (!(await ensureGrantAuth())) return;
+  if (!(await ensureGrantAuth(selected))) return;
 
   var button = document.getElementById('grantAccessBtn');
   var result = document.getElementById('grantResult');

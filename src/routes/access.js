@@ -83,11 +83,19 @@ async function loadAccess(runId) {
 }
 
 router.get('/', async (req, res) => {
+  // A grant interrupted by the administrator sign-in is handed back to the page so
+  // it can finish on its own. Read once and cleared: a refresh must not repeat it.
+  const pendingGrant = req.session ? req.session.pendingGrant || null : null;
+  if (req.session) delete req.session.pendingGrant;
+
   const base = {
     title: 'Grant Access', user: req.user, hideRunSelector: true,
     accessLevels: ACCESS_LEVELS, principalTypes: PRINCIPAL_TYPES,
     accessLevel, principalTypeLabel, describeScope, scopeFromRow,
     grantAuth: req.query.grantAuth === 'success',
+    // Only resumed on the way back from a successful sign-in. A stash left behind
+    // by an abandoned attempt is dropped rather than acted on later.
+    pendingGrant: req.query.grantAuth === 'success' ? pendingGrant : null,
     partialScope: false,
   };
   try {
@@ -193,6 +201,29 @@ router.post('/check', async (req, res) => {
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
+});
+
+/**
+ * Remembers a grant that has to wait for an administrator sign-in.
+ *
+ * Without this the operator picks workspaces, is sent away to authorize, comes
+ * back to an empty page and has to pick them all again — the second time being
+ * the only one that does anything.
+ */
+router.post('/pending', (req, res) => {
+  const body = req.body || {};
+  const workspaceIds = (Array.isArray(body.workspaceIds) ? body.workspaceIds : [])
+    .map(id => String(id || '').trim())
+    .filter(Boolean);
+
+  if (!req.session) return res.json({ success: false, message: 'No session to remember the selection in.' });
+  if (!workspaceIds.length) {
+    delete req.session.pendingGrant;
+    return res.json({ success: true, stored: 0 });
+  }
+
+  req.session.pendingGrant = { spId: body.spId || null, workspaceIds };
+  res.json({ success: true, stored: workspaceIds.length });
 });
 
 module.exports = router;
