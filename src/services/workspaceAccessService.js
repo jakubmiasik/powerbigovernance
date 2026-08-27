@@ -254,7 +254,54 @@ function markServicePrincipalAccess(overview, servicePrincipalObjectId) {
   });
 }
 
+/**
+ * Which workspaces the service principal cannot reach, from two live lists.
+ *
+ * `all` is every workspace in the tenant (the admin endpoint); `reachable` is what
+ * the principal itself can see. The difference is what it has no access to — the
+ * question the grant flow actually has to answer, and the one a scan cannot,
+ * because a scan reads the admin API and so sees every workspace whether the
+ * principal is a member or not.
+ *
+ * Pure, so the set arithmetic — which is the whole correctness of the feature —
+ * is testable without touching an API.
+ */
+function missingServicePrincipalAccess(all, reachable) {
+  const idOf = workspace => String((workspace && (workspace.id || workspace.workspaceId)) || '').trim().toLowerCase();
+  const nameOf = workspace => (workspace && (workspace.displayName || workspace.name)) || null;
+
+  const held = new Set((reachable || []).map(idOf).filter(Boolean));
+
+  const seen = new Set();
+  const missing = [];
+  let withAccess = 0;
+
+  for (const workspace of all || []) {
+    const id = idOf(workspace);
+    // A tenant list with a duplicate would offer the same workspace twice to grant.
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+
+    if (held.has(id)) {
+      withAccess += 1;
+      continue;
+    }
+    missing.push({
+      id: workspace.id || workspace.workspaceId,
+      name: nameOf(workspace) || '(unnamed)',
+      state: workspace.state || 'Active',
+      // Personal workspaces cannot take a service principal as a member at all, so
+      // offering to grant one would produce a failure nobody can fix.
+      isPersonal: String(workspace.type || '').toLowerCase() === 'personalgroup',
+    });
+  }
+
+  missing.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return { total: seen.size, withAccess, missing };
+}
+
 module.exports = {
+  missingServicePrincipalAccess,
   ACCESS_LEVELS,
   ACCESS_BY_KEY,
   PRINCIPAL_TYPES,
