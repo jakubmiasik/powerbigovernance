@@ -64,6 +64,74 @@
     <% }) %>
   </div>
 
+  <!-- What the Risk number means. Kept beside the table rather than in a tooltip:
+       a ranking nobody can explain is a ranking nobody acts on. -->
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span><i class="bi bi-speedometer2 me-2"></i>How the Risk score works</span>
+      <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse"
+              data-bs-target="#riskExplainer" aria-expanded="false">
+        <i class="bi bi-chevron-down me-1"></i>Show the scoring
+      </button>
+    </div>
+    <div class="card-body py-3">
+      <p class="mb-2">
+        Every check below that fires on a workspace adds its weight to that workspace's score, and the
+        <strong>Risk</strong> column is the total. Nothing is averaged and nothing is capped, so the number is a measure
+        of <em>how much is wrong</em>, not a percentage: two medium problems outrank one, and one severe problem outranks
+        several trivial ones. The highest possible score with every check firing at once is <%= data.maxScore || 0 %>.
+      </p>
+      <div class="d-flex flex-wrap gap-2 mb-1">
+        <% (data.riskBands || []).forEach(function(band) { %>
+          <span class="badge bg-<%= band.color %>" title="<%= band.description %>">
+            <%= band.label %><%= band.min > 0 ? ' — ' + band.min + '+' : ' — 0' %>
+          </span>
+        <% }) %>
+      </div>
+      <div class="small text-muted">
+        A score is only ever about what the scan could see. A workspace whose access list could not be read is not
+        scored on access at all — that is a gap in the evidence, not a clean result.
+      </div>
+
+      <div class="collapse mt-3" id="riskExplainer">
+        <div class="table-responsive">
+          <table class="table table-sm mb-0">
+            <thead>
+              <tr><th style="width:70px;">Weight</th><th>Check</th><th>Severity</th><th>What it means</th><th class="text-end">Workspaces</th></tr>
+            </thead>
+            <tbody>
+              <% findingDefs.forEach(function(def) { %>
+                <tr class="<%= def.key === 'namingConvention' && !data.namingConventionEnabled ? 'opacity-50' : '' %>">
+                  <td><span class="badge bg-<%= severityColor(def.severity) %>">+<%= def.weight %></span></td>
+                  <td class="small"><i class="bi bi-<%= def.icon %> me-1"></i><strong><%= def.label %></strong></td>
+                  <td class="small text-capitalize"><%= def.severity %></td>
+                  <td class="small"><%= def.description %>
+                    <% if (def.key === 'namingConvention' && !data.namingConventionEnabled) { %>
+                      <em>Not enforced — <a href="/settings/governance">define a convention</a> to switch this check on.</em>
+                    <% } %>
+                    <% if (def.key === 'staleContent') { %>
+                      <em>Currently <%= thresholds.staleDays %> days.</em>
+                    <% } %>
+                    <% if (def.key === 'overShared') { %>
+                      <em>Currently <%= thresholds.overSharedUsers %> principals.</em>
+                    <% } %>
+                  </td>
+                  <td class="text-end small"><%= (data.byFinding || {})[def.key] || 0 %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+        <div class="small text-muted mt-2">
+          <i class="bi bi-people me-1"></i><strong>No group-based access</strong> is the one to read carefully: it fires
+          when every principal holding a role is an individual account and no security group holds any. That access has
+          to be maintained by hand, so it survives the person leaving.
+          <a href="/settings/access/roles">Grant a security group a role</a> to resolve it.
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="card mb-4">
     <div class="card-header"><i class="bi bi-sliders me-2"></i>Thresholds</div>
     <div class="card-body py-3">
@@ -154,10 +222,16 @@
                 <% } %>
               </td>
               <td>
-                <% if (ws.score > 0) { %>
-                  <span class="badge bg-<%= severityColor(ws.highestSeverity) %>"><%= ws.score %></span>
+                <% if (ws.score > 0) {
+                     // The sum is spelled out on hover, so the number can be checked
+                     // rather than believed.
+                     var sum = ws.findings.map(function(f) { return f.label + ' +' + f.weight; }).join(', ');
+                     var band = ws.band || { label: '', color: severityColor(ws.highestSeverity) };
+                %>
+                  <span class="badge bg-<%= band.color %>"
+                        title="<%= band.label %> risk — <%= ws.score %> = <%= sum %>"><%= ws.score %></span>
                 <% } else { %>
-                  <span class="badge bg-success"><i class="bi bi-check"></i></span>
+                  <span class="badge bg-success" title="Nothing found by any check"><i class="bi bi-check"></i></span>
                 <% } %>
               </td>
               <td>

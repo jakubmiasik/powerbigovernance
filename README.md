@@ -14,7 +14,8 @@ A web application to investigate and govern Power BI workspaces, reports, datase
 - **Entra ID Authentication** — Protect the app with Microsoft Entra ID sign-in (optional)
 - **Scoped and Scheduled Scans** — Scan the whole tenant or just the workspaces you care about, on demand or on a schedule
 - **Naming Conventions** — Define how Fabric artifacts should be named, then see which ones do not follow it and what they should be called
-- **Workspace Access** — See who can reach which workspace across the tenant, spot workspaces nobody administers, and grant the service principal access where it is missing
+- **Workspace Access** — See who can reach which workspace across the tenant, spot workspaces nobody administers and ones that belong to a person rather than the organisation, grant the service principal access where it is missing, and give a user or security group a role where it is Admin
+- **Workspace Triage** — Rank workspaces by a risk score built from named, weighted checks, with the arithmetic shown rather than asserted
 - **Data Reconciliation** — Define controls that verify records agree between two business systems, run them, and manage the resulting exceptions through a controlled lifecycle
 - **Master Data Management** — Match records that arrived from many systems, build one golden record per entity, and publish it to a chosen destination with full provenance
 
@@ -219,6 +220,35 @@ A name in no recognisable shape gets **one** problem rather than five restatemen
 
 **Nothing is renamed by this application.** Fabric renames are done in the portal, so the useful thing this page can do is hand over the exact string, which the copy button does.
 
+## Workspace Triage
+
+`/workspaces` ranks workspaces by how much needs attention, rather than listing them alphabetically — Governance Overview already does that.
+
+### The risk score
+
+Every check that fires on a workspace adds its weight to that workspace's score, and the **Risk** column is the total. Nothing is averaged and nothing is capped, so the number is a measure of *how much is wrong* rather than a percentage: two medium problems outrank one, and one severe problem outranks several trivial ones. With every check firing at once the total would be **413**.
+
+| Weight | Check | Severity | What it means |
+|---|---|---|---|
+| `100` | **No admin** | high | Nobody has Admin access, so no one can grant access, fix a broken refresh, or delete the workspace |
+| `80` | **Only non-user admins** | high | Every admin is a service principal or app. There is no person accountable for this workspace |
+| `50` | **Single admin** | medium | One admin is a single point of failure — access is lost the moment that account is disabled |
+| `40` | **Stale content** | medium | Nothing updated for a long time (threshold configurable on the page) |
+| `35` | **Orphaned content** | medium | Items created by principals who no longer appear anywhere in the tenant |
+| `30` | **Fabric items off capacity** | medium | Fabric-only items in a workspace with no dedicated capacity, so they cannot run |
+| `25` | **No group-based access** | medium | Every principal holding a role is an individual account and no security group holds any |
+| `20` | **Broadly shared** | low | Access granted to an unusually large number of principals (threshold configurable) |
+| `18` | **Off-convention names** | low | Artifacts breaking the configured naming convention. Only when one is enforced |
+| `15` | **Empty workspace** | low | No content, but people still have access |
+
+The bands exist so a number on a badge can be read without the table beside it: **Critical** 150+, **High** 80+, **Medium** 35+, **Low** 1+, **Clean** 0. They are read off the total rather than off the worst single finding — a workspace with four medium problems is not "medium". Hovering the badge spells out its own arithmetic (`Critical risk — 165 = No admin +100, Stale content +40, No group-based access +25`), because a ranking nobody can explain is a ranking nobody acts on.
+
+A score is only ever about what the scan could see. **A workspace whose access list could not be read is not scored on access at all** — that is a gap in the evidence, not a clean result.
+
+### No group-based access
+
+Access held only by named people works today and falls apart quietly: nothing tells anyone to remove a leaver, and nothing grants a joiner. The check fires when at least one individual account holds a role and **no security group holds any** — a single group anywhere in the list clears it, because that is the thing whose membership is maintained somewhere else. The [role granting page](#granting-a-user-or-a-group-a-role) is where a group is given one.
+
 ## Workspace Access
 
 **Settings → Grant Access** (`/settings/access`) answers who can reach which workspace, and adds the service principal where it is missing. The two belong on one page: granting a principal access without seeing the access model is how a service account ends up Admin on every workspace in the tenant, and reviewing access without being able to act on it is a report nobody comes back to.
@@ -229,9 +259,26 @@ The **Grant SP Access to Workspaces** button has moved here from the Run Analysi
 
 Three views of the same grants, driven by one filter (text, role, principal type):
 
-- **Every grant** — the flat list: workspace, principal, email, type, role.
-- **By workspace** — each workspace expands to show who is in it, with the role mix summarised.
+- **Every grant** — the flat list: workspace, status, principal, email, type, role.
+- **By workspace** — each workspace expands to show who is in it, with its status, the role mix summarised, and a button granting a user or group a role in it.
 - **By principal** — each principal expands to show every workspace they can reach, and the strongest role they hold anywhere.
+
+**The workspace's status travels with every row.** Active, Deleted, Removing, Orphaned or Personal — and a state this application has not heard of is shown as itself rather than flattened into "Unknown", because the state the API reported is the only fact available about it. An absent state is not a state: the Fabric endpoint returns none for ordinary live workspaces, so it reads as *Unknown* rather than as anything having gone wrong.
+
+### Personal workspaces
+
+A workspace that belongs to one person is not a workspace governance can manage, and there are two quite different ways to know that:
+
+| Badge | What it means | Can a role be granted in it |
+|---|---|---|
+| **personal** | The API reports the workspace as somebody's "My workspace" | **No.** It takes no members at all, so every grant against it fails |
+| **looks personal** | The name reads as a person or a mailbox, or nobody holds Admin | Yes — this is a guess, not a fact |
+
+The distinction is the point. Presenting a guess as a fact is how a legitimate workspace ends up excluded from a grant nothing else can perform, so the heuristics **warn and still offer**; only the API's own verdict withholds the action. The name test is deliberately narrow — two or three Title Case words, no digits, and none of them a subject-area word — so `Anna Nowak` and `ann.smith@contoso.com` qualify while `Finance Reporting`, `EMEA Sales`, `DWH Prod` and `Finance 2026` do not.
+
+"Nobody holds Admin" only counts **when the access list was actually read**. "We could not see who holds Admin" is the opposite claim, and treating the two alike would mark every unreadable workspace as somebody's own.
+
+**Check access now** carries the same verdict on every row it offers. A confirmed personal workspace is skipped and counted with the deleted ones; one that merely reads like a person is listed with the reason underneath it, so granting into somebody's private working area is a decision made in front of the evidence rather than by accident.
 
 Above them, the facts a grant list cannot show you:
 
@@ -267,7 +314,23 @@ After a grant the check re-runs automatically, because the list on screen is out
 
 It grants to the service principal selected on the page rather than to whichever was configured first — with more than one tenant registered, that silently granted access to the wrong application. Failures are named individually: "granted 38 of 50" without saying which twelve, or why, is not something anyone can act on. Granting uses the Power BI admin API on behalf of an administrator, so it asks you to sign in as one and returns you to this page afterwards.
 
-**Who has access to what** below it is unchanged, and stays scan-based: it is the record of what the last scan observed across every principal, which is a different question from what one principal can reach today.
+**Who has access to what** below it stays scan-based: it is the record of what the last scan observed across every principal, which is a different question from what one principal can reach today.
+
+### Granting a user or a group a role
+
+**Settings → Grant Access → Grant a user or group a role** (`/settings/access/roles`) is a different operation from the one above, and the difference is why it has its own page:
+
+| | Adding the service principal | Granting anyone else |
+|---|---|---|
+| API | Power BI admin API | Fabric workspace role assignments |
+| Acting as | A signed-in tenant administrator | The service principal itself |
+| Needs | A delegated administrator sign-in | The principal to be **workspace Admin** there |
+
+Pick the service principal, load the workspaces it can reach — one call — then pick one. **Listing role assignments requires workspace Admin, so the list is the permission check**: a workspace that answers is one this principal can manage, and a 403 is reported as "this service principal is not an Admin of that workspace" rather than as a status code. The last scan is used only to sort the ones it is probably Admin of to the top; with no scan the page says so instead of reporting zero.
+
+Then search Entra ID for a **security group**, a user or another service principal, choose Admin, Member, Contributor or Viewer, and grant. Personal and deleted workspaces are not offered. A distribution list is found but marked unusable — it cannot hold a workspace role, and saying so at the point of choosing saves a failed grant. A role the API does not have is refused here rather than at the far end.
+
+The page leads with **security groups**, and links the [Fabric role assignment guide](https://qubexon-pl.github.io/fabricrolesassigment/) beside the form. Granting roles is the easy half; which groups exist is the half that decides whether access stays manageable, and a workspace granting four groups rather than forty people is the difference.
 
 ## Data Reconciliation
 

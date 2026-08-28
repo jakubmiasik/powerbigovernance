@@ -59,6 +59,14 @@ const FINDING_DEFS = [
     description: 'Fabric-only items sit in a workspace that is not on dedicated capacity, so they cannot run.',
   },
   {
+    key: 'personalAccess',
+    label: 'No group-based access',
+    severity: 'medium',
+    weight: 25,
+    icon: 'person-lines-fill',
+    description: 'Access is held by individual accounts and no security group holds any role. Every joiner and leaver then has to be remembered by hand, which is how access outlives the job that needed it.',
+  },
+  {
     key: 'overShared',
     label: 'Broadly shared',
     severity: 'low',
@@ -86,6 +94,28 @@ const FINDING_DEFS = [
 
 const FINDING_BY_KEY = new Map(FINDING_DEFS.map(def => [def.key, def]));
 
+/**
+ * What a risk score means, in words.
+ *
+ * The score is the sum of the weights of everything found — nothing is averaged
+ * and nothing is capped, so it is a workload figure rather than a percentage:
+ * two medium problems outrank one, and one severe problem outranks three trivial
+ * ones. The bands exist so a number on a badge can be read without the table of
+ * weights beside it.
+ */
+const RISK_BANDS = [
+  { key: 'critical', label: 'Critical', min: 150, color: 'danger', description: 'Several serious problems at once, or one severe problem in a workspace that also has others. Deal with these first.' },
+  { key: 'high', label: 'High', min: 80, color: 'danger', description: 'At least one high-severity finding — typically nobody accountable for the workspace.' },
+  { key: 'medium', label: 'Medium', min: 35, color: 'warning', description: 'Worth scheduling: a single point of failure, abandoned content, or access nobody manages as a group.' },
+  { key: 'low', label: 'Low', min: 1, color: 'secondary', description: 'Housekeeping. Nothing here stops anyone working today.' },
+  { key: 'clean', label: 'Clean', min: 0, color: 'success', description: 'Nothing found by any of the checks below.' },
+];
+
+function riskBand(score) {
+  const value = Number(score) || 0;
+  return RISK_BANDS.find(band => value >= band.min) || RISK_BANDS[RISK_BANDS.length - 1];
+}
+
 // Item types that only exist on Fabric capacity.
 const FABRIC_ONLY_TYPES = new Set([
   'lakehouse', 'warehouse', 'notebook', 'datapipeline', 'kqldatabase', 'kqlqueryset',
@@ -104,6 +134,14 @@ function isAdminRole(role) {
 function isPersonPrincipal(user) {
   const type = (user && user.type ? String(user.type) : 'User').toLowerCase();
   return type === 'user' || type === '';
+}
+
+// A security group is the only principal whose membership is managed somewhere
+// else — which is what makes joiner/leaver handling somebody's job rather than
+// nobody's.
+function isGroupPrincipal(user) {
+  const type = (user && user.type ? String(user.type) : '').toLowerCase();
+  return type === 'group' || type === 'securitygroup' || type === 'distributionlist';
 }
 
 function userDisplay(user) {
@@ -180,6 +218,18 @@ function analyzeWorkspace(workspace, context) {
       addFinding('orphanedAdmin', 'Admins are only: ' + admins.map(userDisplay).join(', ') + '.');
     } else if (humanAdmins.length === 1) {
       addFinding('singleAdmin', 'Only ' + userDisplay(humanAdmins[0]) + ' has Admin access.');
+    }
+
+    // Access held only by named people. The workspace works today and falls apart
+    // quietly: nothing tells anyone to remove a leaver, and nothing grants a joiner.
+    const groupPrincipals = users.filter(isGroupPrincipal);
+    const peoplePrincipals = users.filter(isPersonPrincipal);
+    if (peoplePrincipals.length && !groupPrincipals.length) {
+      const named = peoplePrincipals.slice(0, 3).map(userDisplay).join(', ');
+      addFinding('personalAccess',
+        peoplePrincipals.length + ' individual account(s) hold access and no security group does: '
+        + named + (peoplePrincipals.length > 3 ? ', …' : '') + '.',
+        { count: peoplePrincipals.length });
     }
 
     if (users.length >= overSharedUsers) {
@@ -260,6 +310,9 @@ function analyzeWorkspace(workspace, context) {
     lastActivityDays: lastActivity ? daysBetween(lastActivity, context.referenceDate) : null,
     findings,
     score,
+    // Read off the number actually shown on the badge, rather than off the worst
+    // single finding: a workspace with four medium problems is not "medium".
+    band: riskBand(score),
     highestSeverity: findings.length ? findings[0].severity : null,
   };
 }
@@ -312,6 +365,10 @@ function computeWorkspaceInsights(results, options = {}) {
     totalCount: analyzed.length,
     byFinding,
     thresholds: { staleDays, overSharedUsers },
+    // So the page can explain the number on the badge instead of asking the
+    // reader to take it on trust.
+    riskBands: RISK_BANDS,
+    maxScore: FINDING_DEFS.reduce((sum, def) => sum + def.weight, 0),
     // So the page can hide the naming card rather than showing a permanent zero
     // for a check nobody has switched on.
     namingConventionEnabled: !!namingConvention,
@@ -322,6 +379,8 @@ function computeWorkspaceInsights(results, options = {}) {
 
 module.exports = {
   FINDING_DEFS,
+  RISK_BANDS,
+  riskBand,
   DEFAULT_STALE_DAYS,
   DEFAULT_OVERSHARED_USERS,
   computeWorkspaceInsights,
