@@ -16,7 +16,7 @@ A web application to investigate and govern Power BI workspaces, reports, datase
 - **Naming Conventions** — Define how Fabric artifacts should be named, then see which ones do not follow it and what they should be called
 - **Workspace Access** — See who can reach which workspace across the tenant, spot workspaces nobody administers and ones that belong to a person rather than the organisation, grant the service principal access where it is missing, and give a user or security group a role where it is Admin
 - **Workspace Triage** — Rank workspaces by a risk score built from named, weighted checks, with the arithmetic shown rather than asserted
-- **Security Groups** — Design the groups a tenant grants roles to, and generate the group plan for a domain
+- **Security Groups** — Design the groups a tenant grants roles to, map people into them by stream, role and environment, link the real Entra ID groups, attach them to workspaces, and check whether the tenant agrees
 - **Data Reconciliation** — Define controls that verify records agree between two business systems, run them, and manage the resulting exceptions through a controlled lifecycle
 - **Master Data Management** — Match records that arrived from many systems, build one golden record per entity, and publish it to a chosen destination with full provenance
 
@@ -355,6 +355,54 @@ Four roles per environment plus one application group, named identically every t
 
 The content was written for this application following the approach set out at <https://qubexon-pl.github.io/fabricrolesassigment/>. What a role permits is Microsoft's to define and change; what is here is how to organise around it.
 
+### The mapping: people, groups, workspaces
+
+The design tab says what the groups should be. The **Mapping** tab is the record of what they are, and it is stored — the guidance half needs no database, this half is the point of having one.
+
+**One row per person per stream per project role.** A stream (`IBP`, `RGM`, `CORP`), a project role (DE, BI, AI, PM, ADMIN, UX, OTHER), a name, an optional email, and the environments they work in. From that, everything else is derived:
+
+| | |
+|---|---|
+| Security groups | `SG-{STREAM}-{ROLE}-{ENV}`, one per environment |
+| Fabric role | `CORP` is central platform work and is granted across workspaces — ADMIN → Admin (All), PM → Viewer (All), everyone else → Contributor (All). Otherwise **production takes no builders**: anyone who is not an administrator gets Viewer in PROD. Elsewhere ADMIN → Admin, PM → Viewer, everyone else → Contributor |
+| Justification | Why this person is in these groups and why the groups exist, per row |
+
+Load a CSV (`Stream, Project Role, Name, Email, Environments`) by dropping it on the page, and export the mapping with the derived columns filled in. **A row that cannot be read is named with its line number** rather than dropped in silence: an import that quietly loses eleven of forty rows produces an access model that is wrong in a way nobody looks for. An unrecognised project role is imported as OTHER and said so, because it still describes somebody who needs access.
+
+#### Linking the group that actually exists
+
+The suggested name and the group in the directory routinely differ — somebody created it before the convention existed, or the directory has its own. So the link is **stored**, not assumed: search Entra ID from the row, pick the real group, and the mapping records its object id. A name that differs is flagged rather than treated as an error. Without this, a check would report every group missing and be right about none of them.
+
+#### Attaching workspaces, and asking whether the tenant agrees
+
+A group is attached to the workspaces it should hold a role in, with the role it should hold there (defaulted from the derived one, overridable per workspace). Workspaces come from the last completed scan — attaching is planning, so it costs no live call.
+
+**Check the tenant** then reads each attached workspace's role assignments and compares. One read per workspace, cached across every group pointing at it: a group is not the unit the API answers about, and reading per attachment turns a plan of forty rows into forty calls. Five answers, kept apart:
+
+| | |
+|---|---|
+| **In the workspace** | The group holds the role the mapping says |
+| **Wrong role** | It is there, holding something else — the mapping and the tenant disagree |
+| **Not in the workspace** | It holds no role there at all |
+| **No directory group linked** | Nothing to look for. Not a finding about the tenant |
+| **Could not be read** | The workspace refused. Also not a finding about the tenant |
+
+Only the first two of those are counted as needing attention. Every check is appended rather than overwritten, so drift is visible over time; each row shows the latest.
+
+#### The shape of it, in third normal form
+
+| Table | Holds |
+|---|---|
+| `sg_streams`, `sg_project_roles`, `sg_environments` | The lookups. Streams are created on demand, because a tenant invents them as it goes and a hand-maintained list means an import fails on one nobody thought of |
+| `sg_people` | A person. Email is stored blank rather than NULL so the unique index treats "no email" as one value instead of letting the same person in twice |
+| `sg_assignments` | One person's involvement in one stream under one project role — unique on all three, which is the duplicate rule enforced where it cannot be worked around |
+| `sg_assignment_environments` | Which environments that assignment covers |
+| `sg_groups` | Unique on stream × role × environment, carrying the one fact that is not derivable: which directory group it is |
+| `sg_group_workspaces` | A group attached to a workspace, with the role it should hold |
+| `sg_group_workspace_checks` | What each check found, appended |
+
+**What is deliberately not a table: group membership.** Who is in a group follows from the assignments, and a stored copy would disagree with them the moment either changed, with nothing to say which was right. It is a join. The same argument keeps the group's *name* and its *Fabric role* out of the database — both are computed from the rules, and storing a derivation means a rule change leaves rows behind that quietly contradict it.
+
 ## Data Reconciliation
 
 Verifies that records representing the same business event exist and agree across two systems — an invoice in an ERP and the same invoice in the reporting platform, for example.
@@ -365,7 +413,7 @@ Reconciliation and master data sit together under **Quality** in the navigation,
 |---|---|
 | `/quality` | What is configured across both disciplines, and the guides |
 | `/quality/sources` | Register the systems reconciliation and master data read — the only place registration happens |
-| `/quality/security-groups` | Which security groups a Fabric tenant should have, and the group plan for a domain |
+| `/quality/security-groups` | Which security groups should exist, who is in them, which Entra ID groups they are, and whether the workspaces agree |
 | `/reconciliation` | Oversight: active rules, open exceptions by type, severity, owner and age, a **Rules Overview** that expands each rule into the runs behind it, and recent runs. A dropdown scopes the whole page to what a single run found |
 | `/reconciliation/rules` | Create, version, activate and retire controls; change status or assign an owner across several at once; run one or more of them |
 | `/reconciliation/runs` | Full run history: what was checked, when, under which rule version, and what it produced. Runs can be deleted individually, per rule, or entirely |

@@ -5876,15 +5876,14 @@ test('the security group page is part of the application, and generates from the
   const html = await withServer(server =>
     request(server, '/quality/security-groups?domain=Finance&environments=DEV,PROD').then(r => r.body));
 
-  assert.match(html, /Which Security Groups Should Exist/);
   assert.match(html, /FAB-FINANCE-PROD-CONTRIBUTOR/);
   // The reasoning, not just the names.
   assert.match(html, /Grant roles to groups, never to people/);
   assert.match(html, /Service principals allowed to use Fabric APIs/);
   // And the way back to acting on it.
   assert.match(html, /\/settings\/access\/roles/);
-  // Nothing here touches the tenant, which the page says rather than implying.
-  assert.match(html, /Nothing on this page reads or changes your tenant/);
+  // Nothing in the design tab touches the tenant, which it says rather than implies.
+  assert.match(html, /Nothing in this tab reads or changes your tenant/);
 });
 
 test('the role panel is one panel, reached from the page and from the table', async () => {
@@ -5927,4 +5926,395 @@ test('the role panel is one panel, reached from the page and from the table', as
   // The grant button sits with the label it belongs to rather than at the foot of
   // the form.
   assert.match(page, /Grant a role<\/span>[\s\S]{0,400}id="grantRoleBtn"/);
+});
+
+// ── People → security groups → workspaces ─────────────────────────────────────
+//
+// The mapping is mechanical: who somebody is decides which groups they belong to
+// and what those groups should hold. Doing it by hand across three environments
+// is where the inconsistencies come from, and an inconsistency in access is not a
+// typo — it is somebody who can publish to production.
+
+const sgMapping = require('../src/services/securityGroupMappingService');
+const sgRepo = require('../src/services/securityGroupRepository');
+
+test('a group name is stream, role and environment, and nothing that was typed by hand', () => {
+  assert.equal(sgMapping.groupName('IBP', 'DE', 'DEV'), 'SG-IBP-DE-DEV');
+  // These names are created in a directory and then matched against what is there,
+  // so a stray space produces a name that does not match the pattern it claims to.
+  assert.equal(sgMapping.groupName(' i b p ', 'de', 'dev'), 'SG-IBP-DE-DEV');
+  assert.equal(sgMapping.groupName('', '', ''), 'SG-STREAM-ROLE-ENV');
+});
+
+test('production takes no builders, whatever their project role', () => {
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'DE', 'DEV').role, 'Contributor');
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'DE', 'TEST').role, 'Contributor');
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'DE', 'PROD').role, 'Viewer');
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'BI', 'PROD').role, 'Viewer');
+  // The exception is the person who administers the platform.
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'ADMIN', 'PROD').role, 'Admin');
+  // And the rule can be turned off, in which case a builder builds in production.
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'DE', 'PROD', { prodViewerNonAdmin: false }).role, 'Contributor');
+});
+
+test('project managers read and administrators administer, in every environment', () => {
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'PM', 'DEV').role, 'Viewer');
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'ADMIN', 'DEV').role, 'Admin');
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'UX', 'DEV').role, 'Contributor');
+});
+
+test('central platform work is granted across workspaces rather than within one stream', () => {
+  const admin = sgMapping.fabricRoleFor('CORP', 'ADMIN', 'PROD');
+  assert.equal(admin.role, 'Admin');
+  assert.equal(admin.allWorkspaces, true);
+  assert.equal(admin.label, 'Admin (All)');
+
+  // And the production rule does not override it — CORP is decided first.
+  const engineer = sgMapping.fabricRoleFor('CORP', 'DE', 'PROD');
+  assert.equal(engineer.label, 'Contributor (All)');
+  assert.equal(sgMapping.fabricRoleFor('CORP', 'PM', 'DEV').label, 'Viewer (All)');
+});
+
+test('an assignment with no environment covers development, not nothing', () => {
+  // A row that grants nothing is never what was meant by leaving the boxes alone.
+  assert.deepEqual(sgMapping.normalizeEnvironments([]), ['DEV']);
+  assert.deepEqual(sgMapping.normalizeEnvironments(['prod', 'dev']), ['DEV', 'PROD'],
+    'listed in the order work moves through them, not the order they were ticked');
+  assert.deepEqual(sgMapping.normalizeEnvironments(['nonsense']), ['DEV']);
+});
+
+test('the same group gathers everyone the assignments put in it', () => {
+  const mappingResult = sgMapping.buildMapping([
+    { id: 1, name: 'Anna', stream: 'IBP', projectRole: 'DE', environments: ['DEV', 'PROD'] },
+    { id: 2, name: 'Bob', stream: 'IBP', projectRole: 'DE', environments: ['DEV'] },
+    { id: 3, name: 'Cleo', stream: 'CORP', projectRole: 'ADMIN', environments: ['PROD'] },
+  ]);
+
+  assert.deepEqual(mappingResult.groups.map(group => group.name),
+    ['SG-CORP-ADMIN-PROD', 'SG-IBP-DE-DEV', 'SG-IBP-DE-PROD']);
+
+  const dev = mappingResult.groups.find(group => group.name === 'SG-IBP-DE-DEV');
+  assert.deepEqual(dev.members.map(member => member.name), ['Anna', 'Bob']);
+  assert.equal(dev.fabricRole.role, 'Contributor');
+
+  const prod = mappingResult.groups.find(group => group.name === 'SG-IBP-DE-PROD');
+  assert.deepEqual(prod.members.map(member => member.name), ['Anna']);
+  assert.equal(prod.fabricRole.role, 'Viewer');
+});
+
+test('the justification says what was decided and why, not just what was decided', () => {
+  const why = sgMapping.personJustification(
+    { name: 'Anna', stream: 'IBP', projectRole: 'DE', environments: ['DEV', 'PROD'] });
+  assert.match(why, /Anna/);
+  assert.match(why, /IBP/);
+  assert.match(why, /Contributor \(DEV\)/);
+  assert.match(why, /Viewer \(PROD\)/);
+
+  const prodGroup = { stream: 'IBP', projectRole: 'DE', environment: 'PROD' };
+  assert.match(sgMapping.groupJustification(prodGroup), /Production is read-only/);
+});
+
+test('a CSV keeps names that contain commas, and names the rows it could not read', () => {
+  const parsed = sgMapping.parseMappingCsv([
+    'Stream,Project Role,Name,Email,Environments',
+    'IBP,DE,"Nowak, Anna",anna@x.com,DEV;PROD',
+    'RGM,WIZARD,Bob,,TEST',
+    ',DE,Nobody,,DEV',
+    'IBP,DE,"Nowak, Anna",anna@x.com,DEV',
+  ].join('\n'));
+
+  assert.equal(parsed.error, null);
+  assert.deepEqual(parsed.assignments.map(a => a.name), ['Nowak, Anna', 'Bob']);
+  assert.deepEqual(parsed.assignments[0].environments, ['DEV', 'PROD']);
+  // An unknown project role still describes somebody who needs access.
+  assert.equal(parsed.assignments[1].projectRole, 'OTHER');
+  assert.ok(parsed.skipped.some(note => /Unknown project role/.test(note.reason)));
+  // And the two that cannot be used are named rather than dropped in silence.
+  assert.ok(parsed.skipped.some(note => /Needs both a stream and a name/.test(note.reason)));
+  assert.ok(parsed.skipped.some(note => /Already in this file/.test(note.reason)));
+});
+
+test('a CSV without the columns it needs is refused, not half-read', () => {
+  const parsed = sgMapping.parseMappingCsv('Person,Team\nAnna,IBP');
+  assert.match(parsed.error, /Stream, Project Role and Name/);
+  assert.deepEqual(parsed.assignments, []);
+});
+
+test('the export carries the derived columns, not only what was typed', () => {
+  const csv = sgMapping.toMappingCsv([
+    { name: 'Anna', email: 'a@x.com', stream: 'IBP', projectRole: 'DE', environments: ['DEV', 'PROD'] },
+  ]);
+  const [header, row] = csv.split('\n');
+  assert.match(header, /Security Groups/);
+  assert.match(row, /SG-IBP-DE-DEV;SG-IBP-DE-PROD/);
+  assert.match(row, /Contributor \(DEV\);Viewer \(PROD\)/);
+
+  // What went out comes back in.
+  const back = sgMapping.parseMappingCsv(csv);
+  assert.equal(back.assignments.length, 1);
+  assert.deepEqual(back.assignments[0].environments, ['DEV', 'PROD']);
+});
+
+test('checking a workspace tells apart absent, wrong, unlinked and unreadable', () => {
+  const roles = [
+    { id: 'ra1', role: 'Contributor', principal: { id: 'G-1', type: 'Group', displayName: 'BI Builders' } },
+  ];
+
+  assert.equal(sgMapping.compareAssignment({ entraGroupId: 'g-1', intendedRole: 'Contributor' }, roles).state, 'present');
+  const wrong = sgMapping.compareAssignment({ entraGroupId: 'g-1', intendedRole: 'Viewer' }, roles);
+  assert.equal(wrong.state, 'wrong-role');
+  assert.equal(wrong.actualRole, 'Contributor');
+  assert.equal(sgMapping.compareAssignment({ entraGroupId: 'other', intendedRole: 'Viewer' }, roles).state, 'missing');
+  // Never linked cannot be looked for, and is not the same as being absent.
+  assert.equal(sgMapping.compareAssignment({ entraGroupId: null }, roles).state, 'unlinked');
+  // And "could not read the workspace" is not the tenant disagreeing with you.
+  assert.equal(sgMapping.compareAssignment({ entraGroupId: 'g-1' }, null).state, 'unreadable');
+
+  const summary = sgMapping.summarizeChecks([
+    { state: 'present' }, { state: 'missing' }, { state: 'wrong-role' }, { state: 'unreadable' },
+  ]);
+  assert.equal(summary.actionable, 2, 'only what somebody can act on');
+  assert.equal(summary.total, 4);
+});
+
+test('saving a person creates the lookups, the assignment, its environments and its groups', async () => {
+  // Lookup rows are created on demand because a tenant invents streams as it goes
+  // — a fixed list somebody maintains by hand means an import fails on a stream
+  // nobody thought of.
+  const { result, executed } = await withFakeSql(sql => {
+    if (/OUTPUT INSERTED\.id/.test(sql)) return [{ id: 7 }];
+    return [];
+  }, () => sgRepo.saveAssignment(
+    { stream: 'IBP', projectRole: 'DE', name: 'Anna', email: 'A@X.com', environments: ['DEV', 'PROD'] }, 'tester'));
+
+  assert.equal(result.created, true);
+  const statements = executed.map(entry => entry.sql).join('\n');
+  assert.match(statements, /INSERT INTO sg_streams/);
+  assert.match(statements, /INSERT INTO sg_project_roles/);
+  assert.match(statements, /INSERT INTO sg_people/);
+  assert.match(statements, /INSERT INTO sg_assignments/);
+  // One environment row and one group row per environment.
+  assert.equal(executed.filter(e => /INSERT INTO sg_assignment_environments/.test(e.sql)).length, 2);
+  assert.equal(executed.filter(e => /INSERT INTO sg_groups/.test(e.sql)).length, 2);
+
+  // Email is stored folded, so the same person typed two ways is one person.
+  const person = executed.find(entry => /INSERT INTO sg_people/.test(entry.sql));
+  assert.equal(person.params.find(p => p.name === 'email').value, 'a@x.com');
+});
+
+test('the same person, stream and role is updated rather than duplicated', async () => {
+  const { result, executed } = await withFakeSql(sql => {
+    // Every lookup and the assignment itself already exist.
+    if (/SELECT id FROM/.test(sql)) return [{ id: 3 }];
+    if (/OUTPUT INSERTED\.id/.test(sql)) return [{ id: 3 }];
+    return [];
+  }, () => sgRepo.saveAssignment(
+    { stream: 'IBP', projectRole: 'DE', name: 'Anna', environments: ['TEST'] }, 'tester'));
+
+  assert.equal(result.created, false);
+  const statements = executed.map(entry => entry.sql).join('\n');
+  assert.match(statements, /UPDATE sg_assignments/);
+  assert.doesNotMatch(statements, /INSERT INTO sg_assignments/);
+  // Environments are replaced, not merged: unticking a box has to mean something.
+  assert.match(statements, /DELETE FROM sg_assignment_environments/);
+});
+
+test('an assignment refuses to be saved without the two things that identify it', async () => {
+  await assert.rejects(() => sgRepo.saveAssignment({ projectRole: 'DE', name: 'Anna' }), /stream is required/);
+  await assert.rejects(() => sgRepo.saveAssignment({ stream: 'IBP', projectRole: 'DE' }), /name is required/);
+});
+
+test('removing the last assignment removes the person, and an earlier one does not', async () => {
+  const lonely = await withFakeSql(sql => {
+    if (/SELECT person_id/.test(sql)) return [{ person_id: 4 }];
+    if (/COUNT\(\*\)/.test(sql)) return [{ total: 0 }];
+    return [];
+  }, () => sgRepo.deleteAssignment(1));
+  assert.match(lonely.executed.map(e => e.sql).join('\n'), /DELETE FROM sg_people/);
+
+  const stillUsed = await withFakeSql(sql => {
+    if (/SELECT person_id/.test(sql)) return [{ person_id: 4 }];
+    if (/COUNT\(\*\)/.test(sql)) return [{ total: 2 }];
+    return [];
+  }, () => sgRepo.deleteAssignment(1));
+  assert.doesNotMatch(stillUsed.executed.map(e => e.sql).join('\n'), /DELETE FROM sg_people/);
+});
+
+test('a group carries its directory link and the latest answer for each workspace', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/FROM sg_groups/.test(sql)) {
+      return [{
+        id: 5, stream: 'IBP', project_role: 'DE', environment: 'PROD',
+        entra_group_id: 'g-1', entra_group_name: 'BI Prod Readers', entra_group_type: 'Security group',
+      }];
+    }
+    if (/FROM sg_group_workspaces/.test(sql)) {
+      return [{
+        id: 11, group_id: 5, workspace_id: 'w1', workspace_name: 'Finance', intended_role: 'Viewer',
+        state: 'missing', actual_role: null, message: 'The group holds no role in this workspace.',
+        checked_at: '2026-08-20T10:00:00Z',
+      }];
+    }
+    return [];
+  }, () => sgRepo.listGroups());
+
+  assert.equal(result[0].entraGroupName, 'BI Prod Readers');
+  assert.equal(result[0].workspaces[0].lastCheck.state, 'missing');
+  // The latest answer only. A row showing five checks would bury the current state.
+  assert.equal(result[0].workspaces.length, 1);
+});
+
+test('the mapping page shows people, their derived groups and what the tenant said', async () => {
+  const original = {
+    loadMapping: sgRepo.loadMapping,
+    getServicePrincipals: dbService.getServicePrincipals,
+  };
+  sgRepo.loadMapping = async () => ({
+    assignments: [
+      { id: 1, personId: 1, name: 'Anna Nowak', email: 'anna@x.com', stream: 'IBP', projectRole: 'DE', environments: ['DEV', 'PROD'] },
+    ],
+    groups: [
+      { id: 5, stream: 'IBP', projectRole: 'DE', environment: 'PROD', entraGroupId: 'g-1',
+        entraGroupName: 'BI Prod Readers', workspaces: [
+          { id: 11, workspaceId: 'w1', workspaceName: 'Finance', intendedRole: 'Viewer',
+            lastCheck: { state: 'missing', message: 'The group holds no role in this workspace.', checkedAt: '2026-08-20T10:00:00Z' } },
+        ] },
+    ],
+  });
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+
+  try {
+    const html = await withServer(server => request(server, '/quality/security-groups').then(r => r.body));
+    assert.match(html, /Anna Nowak/);
+    // The derived columns, computed from the rules rather than read from a table.
+    assert.match(html, /SG-IBP-DE-DEV/);
+    assert.match(html, /Viewer \(PROD\)/);
+    // The directory group, and that its name differs from the suggested one.
+    assert.match(html, /BI Prod Readers/);
+    assert.match(html, /named differently/);
+    // And the workspace it should be in, with what the last check found.
+    assert.match(html, /Finance/);
+    assert.match(html, /holds no role in this workspace/);
+  } finally {
+    sgRepo.loadMapping = original.loadMapping;
+    dbService.getServicePrincipals = original.getServicePrincipals;
+  }
+});
+
+test('the check reads each workspace once, however many groups point at it', async () => {
+  const original = {
+    listGroups: sgRepo.listGroups,
+    recordChecks: sgRepo.recordChecks,
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  const reads = [];
+  let recorded = null;
+
+  sgRepo.listGroups = async () => [
+    { id: 1, stream: 'IBP', projectRole: 'DE', environment: 'DEV', entraGroupId: 'g-1', entraGroupName: 'Builders',
+      workspaces: [{ id: 11, workspaceId: 'w1', workspaceName: 'Finance', intendedRole: 'Contributor' }] },
+    { id: 2, stream: 'IBP', projectRole: 'PM', environment: 'DEV', entraGroupId: 'g-2', entraGroupName: 'Managers',
+      workspaces: [{ id: 12, workspaceId: 'w1', workspaceName: 'Finance', intendedRole: 'Viewer' }] },
+    // Never linked: nothing to look for, and no call to make.
+    { id: 3, stream: 'RGM', projectRole: 'DE', environment: 'DEV', entraGroupId: null, entraGroupName: null,
+      workspaces: [{ id: 13, workspaceId: 'w2', workspaceName: 'Sales', intendedRole: 'Contributor' }] },
+  ];
+  sgRepo.recordChecks = async results => { recorded = results; return { recorded: results.length }; };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({
+    getRoleAssignments: async workspaceId => {
+      reads.push(workspaceId);
+      return [{ id: 'ra1', role: 'Contributor', principal: { id: 'g-1', type: 'Group', displayName: 'Builders' } }];
+    },
+  });
+
+  try {
+    const body = await withServer(server => postJson(server, '/quality/security-groups/verify', { spId: 1 }));
+
+    assert.equal(body.success, true);
+    // Two groups point at Finance; reading it twice would turn a plan of forty rows
+    // into forty calls. The unlinked group needs no call at all.
+    assert.deepEqual(reads, ['w1']);
+    assert.equal(body.workspacesRead, 1);
+
+    const states = body.results.map(result => result.state);
+    assert.deepEqual(states, ['present', 'missing', 'unlinked']);
+    assert.equal(body.summary.actionable, 1, 'unlinked is not the tenant disagreeing with you');
+    // What was found is kept, so drift is visible over time rather than only now.
+    assert.equal(recorded.length, 3);
+  } finally {
+    Object.assign(sgRepo, { listGroups: original.listGroups, recordChecks: original.recordChecks });
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('a workspace that cannot be read is reported as unreadable, not as missing', async () => {
+  const original = {
+    listGroups: sgRepo.listGroups,
+    recordChecks: sgRepo.recordChecks,
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  sgRepo.listGroups = async () => [
+    { id: 1, stream: 'IBP', projectRole: 'DE', environment: 'DEV', entraGroupId: 'g-1', entraGroupName: 'Builders',
+      workspaces: [{ id: 11, workspaceId: 'w1', workspaceName: 'Finance', intendedRole: 'Contributor' }] },
+  ];
+  sgRepo.recordChecks = async () => ({ recorded: 1 });
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({
+    getRoleAssignments: async () => { throw new Error('Request failed with status code 403'); },
+  });
+
+  try {
+    const body = await withServer(server => postJson(server, '/quality/security-groups/verify', {}));
+    assert.equal(body.results[0].state, 'unreadable');
+    assert.equal(body.summary.actionable, 0);
+  } finally {
+    Object.assign(sgRepo, { listGroups: original.listGroups, recordChecks: original.recordChecks });
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('importing a CSV saves the rows it could read and names the ones it could not', async () => {
+  const original = sgRepo.saveAssignment;
+  const saved = [];
+  sgRepo.saveAssignment = async assignment => { saved.push(assignment); return { id: saved.length, created: true }; };
+
+  try {
+    const body = await withServer(server => postJson(server, '/quality/security-groups/import', {
+      csv: [
+        'Stream,Project Role,Name,Environments',
+        'IBP,DE,Anna,DEV;PROD',
+        ',DE,Nobody,DEV',
+        'RGM,PM,Bob,TEST',
+      ].join('\n'),
+    }));
+
+    assert.equal(body.success, true);
+    assert.equal(body.imported, 2);
+    assert.deepEqual(saved.map(entry => entry.name), ['Anna', 'Bob']);
+    // The row that could not be used is named, with its line number.
+    assert.equal(body.skipped.length, 1);
+    assert.equal(body.skipped[0].line, 3);
+  } finally {
+    sgRepo.saveAssignment = original;
+  }
+});
+
+test('the export is a file, not a page', async () => {
+  const original = sgRepo.listAssignments;
+  sgRepo.listAssignments = async () => [
+    { name: 'Anna', email: 'a@x.com', stream: 'IBP', projectRole: 'DE', environments: ['DEV'] },
+  ];
+  try {
+    const response = await withServer(server => request(server, '/quality/security-groups/export.csv'));
+    assert.match(response.headers['content-type'], /text\/csv/);
+    assert.match(response.headers['content-disposition'], /attachment; filename="fabric-security-mapping\.csv"/);
+    assert.match(response.body, /SG-IBP-DE-DEV/);
+  } finally {
+    sgRepo.listAssignments = original;
+  }
 });
