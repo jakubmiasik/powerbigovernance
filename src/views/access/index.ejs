@@ -16,6 +16,9 @@
     </p>
   </div>
   <div class="d-flex gap-2 align-items-center flex-wrap">
+    <a href="/settings/access/roles" class="btn btn-sm btn-primary">
+      <i class="bi bi-person-plus me-1"></i>Grant a user or group a role
+    </a>
     <% if ((runs || []).length > 1) { %>
       <select class="form-select form-select-sm" style="max-width:280px;"
               onchange="window.location = '/settings/access?accessRunId=' + this.value">
@@ -102,6 +105,15 @@
       <div class="text-muted small">Access unreadable</div>
       <div class="h4 mb-0"><%= t.unreadable || 0 %></div>
       <div class="small text-muted">Not "no users" — not seen</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-lg-2">
+    <div class="card h-100 <%= (t.personal || 0) ? 'border-info' : '' %>"><div class="card-body py-3">
+      <div class="text-muted small">Personal</div>
+      <div class="h4 mb-0"><%= t.personal || 0 %></div>
+      <div class="small text-muted">
+        <%= t.personalConfirmed || 0 %> confirmed — no grants possible
+      </div>
     </div></div>
   </div>
 </div>
@@ -217,17 +229,24 @@
       <div class="table-responsive" style="max-height:600px;">
         <table class="table table-sm table-hover mb-0" id="grantsTable">
           <thead class="sticky-top"><tr>
-            <th>Workspace</th><th>Principal</th><th>Email</th><th>Type</th><th>Role</th>
+            <th>Workspace</th><th>Status</th><th>Principal</th><th>Email</th><th>Type</th><th>Role</th>
           </tr></thead>
           <tbody>
             <% if (!o.grants.length) { %>
-              <tr><td colspan="5" class="text-muted small py-3">No access grants recorded in this scan.</td></tr>
+              <tr><td colspan="6" class="text-muted small py-3">No access grants recorded in this scan.</td></tr>
             <% } %>
             <% o.grants.forEach(function(g) { %>
               <tr data-search="<%= [g.workspaceName || '', g.displayName || '', g.email || ''].join(' ').toLowerCase() %>"
                   data-role="<%= g.accessRight %>" data-type="<%= g.principalType %>">
                 <td class="small">
                   <a href="/workspaces/<%= g.workspaceId %>"><%= g.workspaceName || g.workspaceId %></a>
+                  <% if (g.workspacePersonal && g.workspacePersonal.personal) { %>
+                    <i class="bi bi-person text-info ms-1" title="<%= g.workspacePersonal.reasons.join(' ') %>"></i>
+                  <% } %>
+                </td>
+                <td class="small">
+                  <% var gs = g.workspaceStatus || { label: g.workspaceState || 'Unknown', color: 'secondary', description: '' }; %>
+                  <span class="badge bg-<%= gs.color %>" title="<%= gs.description %>"><%= gs.label %></span>
                 </td>
                 <td class="small"><%= g.displayName || '(no name recorded)' %></td>
                 <td class="small text-muted"><%= g.email || '-' %></td>
@@ -246,12 +265,12 @@
         <table class="table table-sm mb-0" id="workspacesTable">
           <thead class="sticky-top"><tr>
             <th style="width:32px;"></th>
-            <th>Workspace</th><th>Capacity</th><th class="text-end">Items</th>
-            <th class="text-end">People &amp; apps</th><th>Roles</th>
+            <th>Workspace</th><th>Status</th><th>Capacity</th><th class="text-end">Items</th>
+            <th class="text-end">People &amp; apps</th><th>Roles</th><th style="width:40px;"></th>
           </tr></thead>
           <tbody>
             <% if (!o.workspaces.length) { %>
-              <tr><td colspan="6" class="text-muted small py-3">This scan recorded no workspaces.</td></tr>
+              <tr><td colspan="8" class="text-muted small py-3">This scan recorded no workspaces.</td></tr>
             <% } %>
             <% o.workspaces.forEach(function(w, index) { %>
               <tr data-search="<%= (w.name || '').toLowerCase() %>" data-role="" data-type=""
@@ -273,6 +292,16 @@
                   <% } else if (w.counts.admin === 1) { %>
                     <span class="badge bg-warning text-dark ms-1" title="One departure from having no admin at all">single admin</span>
                   <% } %>
+                  <% if (w.personal && w.personal.personal) { %>
+                    <span class="badge bg-<%= w.personal.confidence === 'confirmed' ? 'info' : 'light text-dark border' %> ms-1"
+                          title="<%= w.personal.reasons.join(' ') %><%= w.personal.grantable ? '' : ' A service principal cannot be granted access to a personal workspace.' %>">
+                      <i class="bi bi-person me-1"></i><%= w.personal.confidence === 'confirmed' ? 'personal' : 'looks personal' %>
+                    </span>
+                  <% } %>
+                </td>
+                <td class="small">
+                  <% var status = w.status || { label: w.state || 'Unknown', color: 'secondary', description: '' }; %>
+                  <span class="badge bg-<%= status.color %>" title="<%= status.description %>"><%= status.label %></span>
                 </td>
                 <td class="small text-muted"><%= w.capacityName || '-' %></td>
                 <td class="text-end small"><%= w.itemCount %></td>
@@ -285,11 +314,24 @@
                   <% }) %>
                   <% if (w.counts.unknown) { %><span class="badge bg-light text-dark border"><%= w.counts.unknown %> unknown</span><% } %>
                 </td>
+                <td class="text-end">
+                  <% if (w.personal && !w.personal.grantable) { %>
+                    <span class="text-muted" title="A personal workspace takes no members, so no role can be granted in it">
+                      <i class="bi bi-slash-circle"></i>
+                    </span>
+                  <% } else { %>
+                    <a class="btn btn-sm btn-outline-primary p-0 px-1"
+                       href="/settings/access/roles?workspaceId=<%= w.workspaceId %>"
+                       title="Grant a user or security group a role in this workspace">
+                      <i class="bi bi-person-plus"></i>
+                    </a>
+                  <% } %>
+                </td>
               </tr>
               <% if (w.grants.length) { %>
                 <tr class="collapse" id="wsAccess-<%= index %>">
                   <td></td>
-                  <td colspan="5" class="p-0">
+                  <td colspan="7" class="p-0">
                     <table class="table table-sm mb-0" style="background: var(--color-surface-2);">
                       <tbody>
                         <% w.grants.forEach(function(g) { %>
@@ -372,6 +414,12 @@
     Access is what the selected scan observed, not live state — grant a role after this scan ran and it appears on the
     next one. A workspace marked <strong>not readable</strong> is one the scan could not read the access list for,
     which is a gap in the evidence rather than a workspace with nobody in it.
+    <br>
+    <strong>Personal</strong> means the API reports the workspace as somebody's "My workspace": it takes no members at
+    all, so a service principal cannot be granted access to it and no role can be assigned in it.
+    <strong>Looks personal</strong> is a guess, not a fact — the name reads as a person or a mailbox, or nobody holds
+    Admin. Those are still ordinary workspaces and can still be granted; the badge is there because a workspace that
+    belongs to one person is a workspace that leaves with them.
   </div>
 </div>
 
@@ -479,8 +527,13 @@ async function checkServicePrincipalAccess(options) {
     var skippedNote = data.skipped
       ? ' (' + data.skipped + ' personal or deleted workspace(s) left out — nothing can be granted on those)'
       : '';
+    // Named separately from the skipped ones: these can be granted, they just may
+    // not be workspaces the organisation should be granting into.
+    var personalNote = data.personalLikely
+      ? ' — ' + data.personalLikely + ' of them look like somebody’s personal workspace'
+      : '';
     document.getElementById('missingAccessHeading').textContent = missingAccess.workspaces.length
-      ? missingAccess.workspaces.length + ' workspace(s) ' + data.servicePrincipal + ' cannot reach' + skippedNote
+      ? missingAccess.workspaces.length + ' workspace(s) ' + data.servicePrincipal + ' cannot reach' + skippedNote + personalNote
       : data.servicePrincipal + ' can reach every workspace it could be granted' + skippedNote;
     document.getElementById('missingAccessFilter').value = '';
     renderMissingAccess();
@@ -512,11 +565,22 @@ function renderMissingAccess() {
   });
 
   list.innerHTML = notice + (shown.map(function(ws) {
+    // The status and the personal warning travel with the row rather than being
+    // left to the operator to know: granting into somebody's private working area
+    // is a decision, and it can only be made if it is visible at the point of it.
+    var status = ws.status
+      ? ' <span class="badge bg-' + escapeHtml(ws.status.color) + '">' + escapeHtml(ws.status.label) + '</span>'
+      : '';
+    var personal = ws.personal && ws.personal.personal
+      ? '<div class="small text-warning ms-4"><i class="bi bi-person-exclamation me-1"></i>' +
+        escapeHtml(ws.personal.reasons.join(' ')) + '</div>'
+      : '';
     return '<div class="form-check missing-ws" data-name="' + escapeHtml((ws.name || '').toLowerCase()) + '">' +
       '<input class="form-check-input missing-ws-cb" type="checkbox" value="' + escapeHtml(ws.id) + '" id="missws-' + escapeHtml(ws.id) + '"' +
       (missingAccess.selected.has(ws.id) ? ' checked' : '') + (missingAccess.objectIdKnown ? '' : ' disabled') +
       ' onchange="onMissingAccessToggled(this)">' +
-      '<label class="form-check-label small" for="missws-' + escapeHtml(ws.id) + '">' + escapeHtml(ws.name) + '</label></div>';
+      '<label class="form-check-label small" for="missws-' + escapeHtml(ws.id) + '">' + escapeHtml(ws.name) + status + '</label>' +
+      personal + '</div>';
   }).join('') || '<div class="small text-muted py-2">Nothing matches that filter.</div>');
 
   updateMissingAccessCount();

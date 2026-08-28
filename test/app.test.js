@@ -636,6 +636,9 @@ test('triage flags workspaces with no admin and with only non-user admins', () =
       ws({ name: 'Healthy', users: [
         { name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' },
         { name: 'Cleo', email: 'cleo@x.com', role: 'Admin', type: 'User' },
+        // A security group somewhere in the list, or this workspace is flagged for
+        // being held by named people alone — see the group-based access tests.
+        { name: 'BI Readers', role: 'Viewer', type: 'Group' },
       ] }),
     ],
   }, { referenceDate: SCAN_DATE });
@@ -5168,7 +5171,7 @@ test('reaching everything leaves nothing to grant, and reaching nothing leaves a
   assert.equal(workspaceAccess.missingServicePrincipalAccess(all, [{ id: 'a' }]).withAccess, 1);
   // Nothing at all is an empty answer, not a crash.
   assert.deepEqual(workspaceAccess.missingServicePrincipalAccess(null, null),
-    { total: 0, withAccess: 0, skipped: 0, missing: [] });
+    { total: 0, withAccess: 0, skipped: 0, personalLikely: 0, missing: [] });
 });
 
 test('the access check asks the tenant, not a scan', async () => {
@@ -5384,4 +5387,427 @@ test('a stash is only acted on when the sign-in actually succeeded', async () =>
     Object.assign(dbService, original);
     await new Promise(resolve => server.close(resolve));
   }
+});
+
+// ── Personal workspaces, workspace status, and granting roles ──────────────────
+//
+// A workspace that belongs to one person is not a workspace governance can
+// manage: a confirmed personal one takes no members at all, and one merely named
+// after a person is somebody's private working area holding organisational
+// content. The distinction between those two is the whole point — the first is a
+// fact from the API, the second is a guess from a name, and presenting a guess as
+// a fact is how a legitimate workspace ends up excluded from a grant.
+
+test('the API saying PersonalGroup is a fact; a name that reads like a person is not', () => {
+  const confirmed = workspaceAccess.classifyWorkspacePersonal({ name: 'Ann Smith', type: 'PersonalGroup' });
+  assert.equal(confirmed.personal, true);
+  assert.equal(confirmed.confidence, 'confirmed');
+  assert.equal(confirmed.grantable, false, 'a personal workspace rejects every member add');
+
+  const guessed = workspaceAccess.classifyWorkspacePersonal({ name: 'Ann Smith' });
+  assert.equal(guessed.personal, true);
+  assert.equal(guessed.confidence, 'likely');
+  assert.equal(guessed.grantable, true, 'refusing to grant on a guess blocks work nothing else can do');
+  assert.match(guessed.reasons[0], /Named after a person/);
+});
+
+test('a mailbox for a name is personal; a subject area is not', () => {
+  assert.equal(workspaceAccess.classifyWorkspacePersonal({ name: 'ann.smith@contoso.com' }).personal, true);
+
+  // The false positives that matter: two capitalized words that are a subject
+  // area, an acronym, anything with a digit, and a single word.
+  for (const name of ['Finance Reporting', 'Global Sales', 'EMEA Sales', 'DWH Prod', 'Finance 2026', 'Finance', 'Sales_Ops']) {
+    assert.equal(workspaceAccess.classifyWorkspacePersonal({ name }).personal, false, name + ' is not a person');
+  }
+});
+
+test('nobody holding Admin is evidence a workspace is somebody\'s own, but only when the list was read', () => {
+  const noAdmin = workspaceAccess.classifyWorkspacePersonal({ name: 'Project Alpha', adminCount: 0, usersReadable: true });
+  assert.equal(noAdmin.personal, true);
+  assert.match(noAdmin.reasons[0], /Nobody holds Admin/);
+
+  // "We could not see who holds Admin" is the opposite claim to "nobody does".
+  const unreadable = workspaceAccess.classifyWorkspacePersonal({ name: 'Project Alpha', adminCount: null, usersReadable: false });
+  assert.equal(unreadable.personal, false);
+});
+
+test('workspace status names what the API said, including states it has not heard of', () => {
+  assert.equal(workspaceAccess.workspaceStatus({ state: 'Active' }).key, 'active');
+  assert.equal(workspaceAccess.workspaceStatus({ state: 'Deleted' }).key, 'deleted');
+  assert.equal(workspaceAccess.workspaceStatus({ state: 'Removing' }).key, 'removing');
+  assert.equal(workspaceAccess.workspaceStatus({ state: 'Orphaned' }).key, 'orphaned');
+  assert.equal(workspaceAccess.workspaceStatus({ type: 'PersonalGroup' }).key, 'personal');
+  // No state is not a state. The Fabric endpoint returns none for live workspaces.
+  assert.equal(workspaceAccess.workspaceStatus({}).key, 'unknown');
+  assert.equal(workspaceAccess.workspaceStatus({ state: 'Provisioning' }).label, 'Provisioning');
+});
+
+test('the access overview carries a status and a personal verdict for every workspace', () => {
+  const overview = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE);
+
+  const finance = overview.workspaces.find(w => w.workspaceId === 'ws-1');
+  assert.equal(finance.status.key, 'active');
+  assert.equal(finance.personal.personal, false);
+
+  // Nobody administers this one, which is the supporting signal.
+  const orphan = overview.workspaces.find(w => w.workspaceId === 'ws-2');
+  assert.equal(orphan.personal.personal, true);
+  assert.match(orphan.personal.reasons.join(' '), /Nobody holds Admin/);
+
+  // Unreadable: no user data, so no verdict drawn from user data.
+  const marketing = overview.workspaces.find(w => w.workspaceId === 'ws-3');
+  assert.equal(marketing.personal.personal, false);
+
+  assert.equal(overview.totals.personal, 1);
+  assert.equal(overview.totals.personalConfirmed, 0);
+});
+
+test('the live check annotates what it offers rather than dropping it', () => {
+  const result = workspaceAccess.missingServicePrincipalAccess(
+    [
+      { id: 'a', displayName: 'Finance Reporting' },
+      { id: 'b', displayName: 'Anna Nowak' },
+      { id: 'c', displayName: 'Ann Smith', type: 'PersonalGroup' },
+    ],
+    []
+  );
+
+  // The confirmed personal one is skipped — nothing can be granted on it. The one
+  // that merely reads like a person is still offered, with the reason attached.
+  // Sorted by name, so "Anna Nowak" comes before "Finance Reporting".
+  assert.deepEqual(result.missing.map(w => w.id), ['b', 'a']);
+  assert.equal(result.skipped, 1);
+  assert.equal(result.personalLikely, 1);
+
+  const anna = result.missing.find(w => w.id === 'b');
+  assert.equal(anna.personal.personal, true);
+  assert.match(anna.personal.reasons[0], /Named after a person/);
+  assert.equal(anna.status.key, 'unknown', 'the tenant listing reports no state for a live workspace');
+});
+
+test('access held only by named people is a finding; a security group clears it', () => {
+  const result = insights.computeWorkspaceInsights({
+    workspaces: [
+      ws({ name: 'ByPeople', users: [
+        { name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' },
+        { name: 'Bob', email: 'bob@x.com', role: 'Admin', type: 'User' },
+      ] }),
+      ws({ name: 'ByGroup', users: [
+        { name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' },
+        { name: 'Bob', email: 'bob@x.com', role: 'Admin', type: 'User' },
+        { name: 'BI Admins', role: 'Member', type: 'Group' },
+      ] }),
+    ],
+  }, { referenceDate: SCAN_DATE });
+
+  assert.ok(findingKeys(result, 'ByPeople').includes('personalAccess'));
+  assert.ok(!findingKeys(result, 'ByGroup').includes('personalAccess'));
+
+  const detail = result.workspaces.find(w => w.name === 'ByPeople').findings
+    .find(f => f.key === 'personalAccess').detail;
+  assert.match(detail, /2 individual account\(s\)/);
+  assert.match(detail, /Ann/);
+});
+
+test('a workspace whose access could not be read is not accused of lacking a group', () => {
+  // No user list is a gap in the evidence, not an access model made of people.
+  const result = insights.computeWorkspaceInsights({
+    workspaces: [ws({ name: 'Unreadable', users: [] })],
+  }, { referenceDate: SCAN_DATE });
+  assert.ok(!findingKeys(result, 'Unreadable').includes('personalAccess'));
+});
+
+test('the risk score is the sum of the weights of what was found', () => {
+  const result = insights.computeWorkspaceInsights({
+    workspaces: [ws({ name: 'Bad', users: [{ name: 'Bob', email: 'b@x.com', role: 'Viewer', type: 'User' }] })],
+  }, { referenceDate: SCAN_DATE });
+
+  const bad = result.workspaces.find(w => w.name === 'Bad');
+  assert.equal(bad.score, bad.findings.reduce((sum, f) => sum + f.weight, 0),
+    'the number on the badge has to be the sum of the rows behind it');
+  assert.equal(bad.band.key, insights.riskBand(bad.score).key);
+
+  // The bands are read off the total, not off the worst single finding.
+  assert.equal(insights.riskBand(0).key, 'clean');
+  assert.equal(insights.riskBand(1).key, 'low');
+  assert.equal(insights.riskBand(35).key, 'medium');
+  assert.equal(insights.riskBand(80).key, 'high');
+  assert.equal(insights.riskBand(150).key, 'critical');
+
+  // The page explains the score from these, so they have to reach it.
+  assert.ok(result.riskBands.length);
+  assert.equal(result.maxScore, insights.FINDING_DEFS.reduce((sum, def) => sum + def.weight, 0));
+});
+
+// ── Granting a user or a group a role ─────────────────────────────────────────
+//
+// A different operation from adding the service principal itself, and the
+// difference is the whole reason this has its own page: adding the principal is
+// an admin-API call made on behalf of a signed-in administrator, while granting
+// anyone else a role is an ordinary workspace role assignment the principal makes
+// itself — and only where it is a workspace Admin.
+
+async function withServer(fn) {
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try { return await fn(server); } finally { await new Promise(resolve => server.close(resolve)); }
+}
+
+test('the role page names the roles, explains the Admin requirement and links the group guide', async () => {
+  const original = dbService.getServicePrincipals;
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 'tid' }];
+  try {
+    const html = await withServer(server => request(server, '/settings/access/roles').then(r => r.body));
+    for (const role of ['Admin', 'Member', 'Contributor', 'Viewer']) {
+      assert.match(html, new RegExp('>' + role + '<'), role + ' has to be offered');
+    }
+    // The one thing that makes this page fail in practice, said before it does.
+    assert.match(html, /workspace Admin/);
+    // Designing the groups comes before granting them anything.
+    assert.match(html, /qubexon-pl\.github\.io\/fabricrolesassigment/);
+  } finally {
+    dbService.getServicePrincipals = original;
+  }
+});
+
+test('the workspaces offered are the live ones, with the last scan marking where it is Admin', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    getAnalysisRuns: dbService.getAnalysisRuns,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'sp1' }];
+  dbService.getAnalysisRuns = async () => [];
+  pbi.createPowerBIService = () => ({
+    getMyWorkspaces: async () => [
+      { id: 'w1', name: 'Finance' },
+      { id: 'w2', name: 'Ann Smith', type: 'PersonalGroup' },
+      { id: 'w3', name: 'Old', state: 'Deleted' },
+      { id: 'w4', name: 'Anna Nowak' },
+    ],
+  });
+
+  try {
+    const body = await withServer(async server => {
+      const res = await request(server, '/settings/access/roles/candidates?spId=1');
+      return JSON.parse(res.body);
+    });
+
+    assert.equal(body.success, true);
+    // Nothing can be granted in a personal workspace and nothing should be granted
+    // in a deleted one, so neither is offered.
+    assert.deepEqual(body.workspaces.map(w => w.id), ['w4', 'w1']);
+    // The one named after a person is offered, with the reason attached.
+    assert.equal(body.workspaces.find(w => w.id === 'w4').personal.personal, true);
+    // No scan to read roles from is said plainly rather than reported as "none".
+    assert.equal(body.rolesFromScan, false);
+  } finally {
+    Object.assign(dbService, {
+      getServicePrincipals: original.getServicePrincipals,
+      getAnalysisRuns: original.getAnalysisRuns,
+    });
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('a 403 reading role assignments is reported as "not an Admin there", not as a status code', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({
+    getRoleAssignments: async () => {
+      const err = new Error('Request failed with status code 403');
+      err.response = { status: 403 };
+      throw err;
+    },
+  });
+
+  try {
+    const body = await withServer(async server => {
+      const res = await request(server, '/settings/access/roles/w1/assignments?spId=1');
+      return JSON.parse(res.body);
+    });
+    assert.equal(body.success, false);
+    assert.equal(body.canManage, false, 'the failure is the answer to "can it manage roles here"');
+    assert.match(body.message, /not an Admin/);
+  } finally {
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('role assignments are flattened so the page can show who the principal is', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({
+    getRoleAssignments: async () => [
+      { id: 'ra1', role: 'Admin', principal: { id: 'u1', type: 'User', displayName: 'Ann', userDetails: { userPrincipalName: 'ann@x.com' } } },
+      { id: 'ra2', role: 'Viewer', principal: { id: 'g1', type: 'Group', displayName: 'BI Readers', groupDetails: { email: 'bi@x.com' } } },
+    ],
+  });
+
+  try {
+    const body = await withServer(async server => {
+      const res = await request(server, '/settings/access/roles/w1/assignments?spId=1');
+      return JSON.parse(res.body);
+    });
+    assert.equal(body.success, true);
+    // The identifier is nested differently per principal type; the page should not
+    // have to know that.
+    assert.deepEqual(body.assignments.map(a => a.detail), ['ann@x.com', 'bi@x.com']);
+    assert.deepEqual(body.assignments.map(a => a.role), ['Admin', 'Viewer']);
+  } finally {
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('granting a role posts the principal and role through, and refuses an unknown role', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  const calls = [];
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({
+    addRoleAssignment: async (...args) => { calls.push(args); return {}; },
+  });
+
+  try {
+    await withServer(async server => {
+      const granted = await postJson(server, '/settings/access/roles/w1',
+        { spId: 1, principalId: 'g1', principalType: 'Group', role: 'Contributor' });
+      assert.equal(granted.success, true);
+      assert.deepEqual(calls[0], ['w1', 'g1', 'Group', 'Contributor']);
+
+      // A role the API does not have would fail at the far end with nothing useful
+      // said; it is refused here instead.
+      const bogus = await postJson(server, '/settings/access/roles/w1',
+        { spId: 1, principalId: 'g1', principalType: 'Group', role: 'Owner' });
+      assert.equal(bogus.success, false);
+      assert.match(bogus.message, /Unknown role/);
+
+      const incomplete = await postJson(server, '/settings/access/roles/w1', { spId: 1, role: 'Viewer' });
+      assert.equal(incomplete.success, false);
+      assert.equal(calls.length, 1, 'nothing is posted for an incomplete form');
+    });
+  } finally {
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('a distribution list is found but marked as unusable for a workspace role', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({
+    searchEntraGroups: async () => [
+      { id: 'g1', displayName: 'BI Readers', securityEnabled: true },
+      { id: 'g2', displayName: 'BI Newsletter', securityEnabled: false },
+    ],
+  });
+
+  try {
+    const body = await withServer(async server => {
+      const res = await request(server, '/settings/access/roles/entra/search?q=BI&type=Group&spId=1');
+      return JSON.parse(res.body);
+    });
+    assert.deepEqual(body.results.map(r => r.usable), [true, false]);
+    assert.match(body.results[1].detail, /cannot hold a workspace role/);
+  } finally {
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('a one-character search does not reach Entra ID at all', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  let searched = false;
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({ searchEntraUsers: async () => { searched = true; return []; } });
+
+  try {
+    const body = await withServer(async server => {
+      const res = await request(server, '/settings/access/roles/entra/search?q=a&spId=1');
+      return JSON.parse(res.body);
+    });
+    assert.deepEqual(body.results, []);
+    assert.equal(searched, false, 'a prefix search on one character returns most of the directory');
+  } finally {
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('the triage page explains the risk score rather than asking for it to be trusted', async () => {
+  const ejs = require('ejs');
+  const computed = insights.computeWorkspaceInsights({
+    workspaces: [{
+      id: 'a', name: 'Solo', state: 'Active', items: [],
+      users: [{ name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' }],
+    }],
+  }, { referenceDate: SCAN_DATE });
+
+  const html = await ejs.renderFile('src/views/workspaces/list.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Workspaces', fromSavedData: true, run: null,
+    insights: computed, findingDefs: insights.FINDING_DEFS, namingPattern: null,
+  });
+
+  // How the number is arrived at, what it is out of, and what a given number means.
+  assert.match(html, /How the Risk score works/);
+  assert.match(html, /adds its weight/);
+  assert.match(html, new RegExp('is ' + computed.maxScore));
+  for (const band of computed.riskBands) assert.match(html, new RegExp('>\\s*' + band.label));
+
+  // Every check, with its weight, so the sum can be checked by hand.
+  for (const def of insights.FINDING_DEFS) assert.match(html, new RegExp('\\+' + def.weight + '<'));
+
+  // And the score on the row spells out its own arithmetic.
+  const solo = computed.workspaces[0];
+  assert.match(html, new RegExp('title="' + solo.band.label + ' risk — ' + solo.score + ' = '));
+});
+
+test('the access page shows workspace status, marks personal ones and offers the role page', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/access/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings/access',
+    breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Grant Access',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    overview: workspaceAccess.buildAccessOverview({
+      workspaces: [
+        { workspace_id: 'w1', name: 'Finance', state: 'Active', item_count: 2, users_readable: 1 },
+        { workspace_id: 'w2', name: 'Ann Smith', type: 'PersonalGroup', state: 'Active', users_readable: 1 },
+      ],
+      grants: [
+        { workspace_id: 'w1', principal_id: 'u1', principal_type: 'User', display_name: 'Ann', email: 'ann@x.com', access_right: 'Admin' },
+      ],
+    }),
+    indexed: true, error: null, grantAuth: false, partialScope: false, runs: [],
+    run: { id: 9, started_at: '2026-08-01T00:00:00Z', scope_kind: 'tenant' },
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 'tid', enterprise_app_object_id: 'sp1' }],
+  });
+
+  assert.match(html, /<th>Status<\/th>/);
+  assert.match(html, />Active</);
+  // The personal one is named as such, and offers no way to grant a role in it.
+  assert.match(html, />\s*personal\s*</);
+  assert.match(html, /takes no members/);
+  // The one that can take a role links to the page that grants one.
+  assert.match(html, /\/settings\/access\/roles\?workspaceId=w1/);
+  assert.match(html, /Grant a user or group a role/);
 });

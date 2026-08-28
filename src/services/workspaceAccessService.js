@@ -22,6 +22,16 @@ const ACCESS_LEVELS = [
 ];
 
 const ACCESS_BY_KEY = new Map(ACCESS_LEVELS.map(level => [level.key, level]));
+
+// The same four roles as the Fabric role assignment API names them. Kept next to
+// the levels above rather than typed out again wherever a grant is made, so the
+// two can never drift apart.
+const FABRIC_ROLES = ACCESS_LEVELS.map(level => ({
+  key: level.label,
+  label: level.label,
+  color: level.color,
+  description: level.description,
+}));
 const UNKNOWN_ACCESS = { key: 'unknown', label: 'Unknown', rank: 0, color: 'light', description: 'The scan recorded no role for this grant.' };
 
 function normalizeAccess(value) {
@@ -92,6 +102,124 @@ function emptyCounts() {
 }
 
 /**
+ * What state a workspace is in, said in one badge.
+ *
+ * The API reports this three different ways — `state` on the admin endpoint, a
+ * missing state on the Fabric one, and a deletion this tool recorded itself —
+ * and "Active" and "not reported" are not the same claim.
+ */
+const WORKSPACE_STATUSES = [
+  { key: 'active', label: 'Active', color: 'success', description: 'In use and reachable.' },
+  { key: 'deleted', label: 'Deleted', color: 'danger', description: 'Removed from the tenant. Nothing can be granted on it.' },
+  { key: 'removing', label: 'Removing', color: 'danger', description: 'On its way out. Nothing can be granted on it.' },
+  { key: 'orphaned', label: 'Orphaned', color: 'warning', description: 'The API reports it as orphaned — no owner remains.' },
+  { key: 'personal', label: 'Personal', color: 'info', description: 'A personal workspace ("My workspace"). It takes no members at all.' },
+  { key: 'unknown', label: 'Unknown', color: 'secondary', description: 'The scan recorded no state for this workspace.' },
+];
+
+const STATUS_BY_KEY = new Map(WORKSPACE_STATUSES.map(status => [status.key, status]));
+
+function workspaceStatus(workspace) {
+  if (isPersonalWorkspace(workspace)) return STATUS_BY_KEY.get('personal');
+  const state = String((workspace && workspace.state) || '').trim().toLowerCase();
+  if (!state) return STATUS_BY_KEY.get('unknown');
+  if (state === 'deleted') return STATUS_BY_KEY.get('deleted');
+  if (state === 'removing' || state === 'deleting') return STATUS_BY_KEY.get('removing');
+  if (state === 'orphaned') return STATUS_BY_KEY.get('orphaned');
+  if (state === 'active') return STATUS_BY_KEY.get('active');
+  // A state the API introduced since this was written is shown as itself rather
+  // than flattened into "unknown", which would lose the only fact we have.
+  return { key: state, label: (workspace.state || '').trim(), color: 'secondary', description: 'Reported by the API as "' + workspace.state + '".' };
+}
+
+// Words that make a workspace name a subject area rather than a person. Without
+// them "Finance Reporting" and "Global Sales" read as two capitalized words the
+// same way "Anna Nowak" does.
+const SUBJECT_WORDS = new Set([
+  'workspace', 'workspaces', 'team', 'teams', 'data', 'analytics', 'analysis', 'report', 'reports',
+  'reporting', 'finance', 'financial', 'accounting', 'sales', 'marketing', 'people', 'operations',
+  'ops', 'dev', 'development', 'test', 'testing', 'prod', 'production', 'uat', 'sandbox', 'demo',
+  'pilot', 'project', 'projects', 'platform', 'warehouse', 'lakehouse', 'insights', 'dashboard',
+  'dashboards', 'metrics', 'model', 'models', 'shared', 'common', 'corporate', 'group', 'global',
+  'central', 'enterprise', 'customer', 'customers', 'product', 'products', 'supply', 'chain',
+  'logistics', 'inventory', 'revenue', 'budget', 'planning', 'forecast', 'quality', 'governance',
+  'security', 'audit', 'compliance', 'admin', 'service', 'services', 'engineering', 'science',
+  'master', 'gold', 'silver', 'bronze', 'staging', 'archive', 'legacy', 'personal', 'sample',
+  'training', 'template', 'sync', 'hub', 'lab', 'portal', 'source', 'landing', 'curated',
+]);
+
+function looksLikeEmail(name) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(name || '').trim());
+}
+
+/**
+ * Whether a workspace name reads as somebody's name.
+ *
+ * Deliberately narrow. Two or three Title Case words, no digits, and none of them
+ * a subject-area word: "Anna Nowak" qualifies, "Finance Reporting", "EMEA Sales"
+ * and "DWH_Prod" do not. A false positive here is a warning on a legitimate
+ * workspace, so the rule errs towards saying nothing.
+ */
+function looksLikePersonName(name) {
+  const trimmed = String(name || '').replace(/,/g, ' ').trim();
+  if (!trimmed || /\d/.test(trimmed)) return false;
+  const words = trimmed.split(/\s+/);
+  if (words.length < 2 || words.length > 3) return false;
+  return words.every(word =>
+    /^[A-ZÀ-ÖØ-Þ][a-zß-öø-ÿ'’-]+$/.test(word) && !SUBJECT_WORDS.has(word.toLowerCase()));
+}
+
+/**
+ * Whether a workspace belongs to one person rather than to the organisation.
+ *
+ * Two tiers, because the evidence comes in two strengths. The API saying
+ * `PersonalGroup` is a fact — a personal workspace takes no members at all, so a
+ * grant against one fails whatever anyone does. A name that reads like a person,
+ * or a workspace nobody administers, is a signal: it usually means somebody's
+ * private working area, but it can equally be a badly named team workspace, so it
+ * is reported as a warning and still offered.
+ *
+ * `adminCount` is optional — the live tenant listing has no user data, and the
+ * absence of that evidence must not read as "no admin".
+ */
+function classifyWorkspacePersonal(workspace) {
+  const source = workspace || {};
+  const name = String(source.name || source.displayName || '').trim();
+  const reasons = [];
+  let confirmed = false;
+
+  if (isPersonalWorkspace(source)) {
+    confirmed = true;
+    reasons.push('The API reports this as a personal workspace ("My workspace").');
+  }
+  if (looksLikeEmail(name)) {
+    reasons.push('Named after a mailbox (' + name + ') rather than a subject area.');
+  } else if (looksLikePersonName(name)) {
+    reasons.push('Named after a person ("' + name + '") rather than a subject area.');
+  }
+
+  const adminCount = Number.isFinite(Number(source.adminCount)) && source.adminCount !== null
+    ? Number(source.adminCount)
+    : null;
+  // Only when the access list was actually read. "Nobody holds Admin" and "we
+  // could not see who holds Admin" are opposite claims.
+  if (adminCount === 0 && source.usersReadable !== false) {
+    reasons.push('Nobody holds Admin, so no one in the organisation is accountable for it.');
+  }
+
+  const personal = confirmed || reasons.length > 0;
+  return {
+    personal,
+    confidence: confirmed ? 'confirmed' : (personal ? 'likely' : null),
+    reasons,
+    // A real personal workspace rejects every member add. The heuristics only
+    // warn: refusing to grant on a guess would block work nothing else can do.
+    grantable: !confirmed,
+    summary: reasons[0] || null,
+  };
+}
+
+/**
  * Reshapes one run's workspaces and access grants into the three views the page
  * needs: every grant, the same grants by workspace, and the same grants by
  * principal.
@@ -117,6 +245,9 @@ function buildAccessOverview(input) {
       workspaceId: id,
       name: row.name || null,
       state: row.state || null,
+      // Carried through because it is the only reliable way to tell a personal
+      // workspace from a badly named team one.
+      type: row.type || null,
       capacityName: row.capacity_name || row.capacityName || null,
       itemCount: Number(row.item_count || row.itemCount) || 0,
       // Written as a bit, so it arrives as 0/1 from SQL and as a boolean from a
@@ -140,7 +271,7 @@ function buildAccessOverview(input) {
       workspace = {
         workspaceId: grant.workspaceId,
         name: row.workspace_name || row.workspaceName || null,
-        state: null, capacityName: null, itemCount: 0, usersReadable: true,
+        state: null, type: null, capacityName: null, itemCount: 0, usersReadable: true,
         grants: [], counts: emptyCounts(),
       };
       byWorkspace.set(grant.workspaceId, workspace);
@@ -189,6 +320,27 @@ function buildAccessOverview(input) {
 
   const workspaceList = [...byWorkspace.values()].sort((a, b) =>
     String(a.name || '').localeCompare(String(b.name || '')));
+
+  // Classified once the grants are attached, because "nobody holds Admin" is part
+  // of the evidence and is not known until then.
+  for (const workspace of workspaceList) {
+    workspace.status = workspaceStatus(workspace);
+    workspace.personal = classifyWorkspacePersonal({
+      name: workspace.name,
+      type: workspace.type,
+      adminCount: workspace.usersReadable ? workspace.counts.admin : null,
+      usersReadable: workspace.usersReadable,
+    });
+  }
+  // The flat grant list is built before the workspaces are classified, so the
+  // verdict is copied onto it afterwards rather than computed twice.
+  const statusById = new Map(workspaceList.map(workspace => [workspace.workspaceId, workspace]));
+  for (const grant of flat) {
+    const workspace = statusById.get(grant.workspaceId);
+    grant.workspaceStatus = workspace ? workspace.status : null;
+    grant.workspacePersonal = workspace ? workspace.personal : null;
+  }
+
   const principalList = [...byPrincipal.values()].sort((a, b) =>
     b.workspaces.length - a.workspaces.length
     || String(a.displayName || a.email || '').localeCompare(String(b.displayName || b.email || '')));
@@ -225,6 +377,10 @@ function summarizeAccess(workspaces, principals) {
     singleAdmin: readable.filter(workspace => workspace.counts.admin === 1).length,
     // Access held by a person rather than a group is what nobody remembers to remove.
     adminPeople: principals.filter(p => p.principalType === 'user' && p.counts.admin > 0).length,
+    // Somebody's private working area holding organisational content. Nothing can
+    // be granted on a confirmed one, so it is not a workspace governance can reach.
+    personal: workspaces.filter(workspace => workspace.personal && workspace.personal.personal).length,
+    personalConfirmed: workspaces.filter(workspace => workspace.personal && workspace.personal.confidence === 'confirmed').length,
     servicePrincipals: principals.filter(p => p.principalType === 'app').length,
   };
 }
@@ -246,6 +402,8 @@ function markServicePrincipalAccess(overview, servicePrincipalObjectId) {
       workspaceId: workspace.workspaceId,
       name: workspace.name,
       state: workspace.state,
+      status: workspace.status || workspaceStatus(workspace),
+      personal: workspace.personal || classifyWorkspacePersonal(workspace),
       itemCount: workspace.itemCount,
       usersReadable: workspace.usersReadable,
       hasAccess: !!grant,
@@ -290,6 +448,7 @@ function missingServicePrincipalAccess(all, reachable) {
   const missing = [];
   let withAccess = 0;
   let skipped = 0;
+  let personalLikely = 0;
 
   for (const workspace of all || []) {
     const id = idOf(workspace);
@@ -309,23 +468,37 @@ function missingServicePrincipalAccess(all, reachable) {
       continue;
     }
 
+    // The tenant listing carries no user data, so a name is the only evidence
+    // available here. It is a warning attached to the row, not a reason to drop
+    // it: the operator decides, and the grant is what settles it either way.
+    const personal = classifyWorkspacePersonal({ name: nameOf(workspace), type: workspace.type });
+    if (personal.personal) personalLikely += 1;
+
     missing.push({
       id: workspace.id || workspace.workspaceId,
       name: nameOf(workspace) || '(unnamed)',
       state: workspace.state || 'Active',
+      status: workspaceStatus(workspace),
+      personal,
     });
   }
 
   missing.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-  return { total: seen.size, withAccess, skipped, missing };
+  return { total: seen.size, withAccess, skipped, personalLikely, missing };
 }
 
 module.exports = {
   missingServicePrincipalAccess,
   isPersonalWorkspace,
   isRetiredWorkspace,
+  WORKSPACE_STATUSES,
+  workspaceStatus,
+  looksLikeEmail,
+  looksLikePersonName,
+  classifyWorkspacePersonal,
   ACCESS_LEVELS,
   ACCESS_BY_KEY,
+  FABRIC_ROLES,
   PRINCIPAL_TYPES,
   UNKNOWN_ACCESS,
   normalizeAccess,

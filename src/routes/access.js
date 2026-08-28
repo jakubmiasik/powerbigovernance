@@ -14,9 +14,15 @@ const db = require('../services/databaseService');
 const analysisModel = require('../services/analysisModelRepository');
 const {
   buildAccessOverview, markServicePrincipalAccess, missingServicePrincipalAccess,
-  ACCESS_LEVELS, PRINCIPAL_TYPES, accessLevel, principalTypeLabel,
+  ACCESS_LEVELS, PRINCIPAL_TYPES, FABRIC_ROLES, accessLevel, principalTypeLabel,
+  classifyWorkspacePersonal, isPersonalWorkspace, isRetiredWorkspace,
 } = require('../services/workspaceAccessService');
 const powerbi = require('../services/powerbiService');
+
+// Somebody else's guide to which security groups a Fabric tenant needs and what
+// each one should hold. Linked rather than restated: the roles this page grants
+// are only useful if the groups being granted them were designed first.
+const ROLES_GUIDE_URL = 'https://qubexon-pl.github.io/fabricrolesassigment/';
 
 // Looked up on each call rather than destructured once, so a test can substitute
 // it. Destructuring captures the function at load, which means a stub set
@@ -198,6 +204,247 @@ router.post('/check', async (req, res) => {
       objectIdKnown: !!sp.enterprise_app_object_id,
       ...result,
     });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ── Granting a user or a security group a role ──
+//
+// Different question from the section above, and a different mechanism. Adding
+// the *service principal* to a workspace is an admin-API operation performed on
+// behalf of a signed-in administrator. Adding *anyone else* is an ordinary
+// workspace role assignment, which the service principal can make itself — but
+// only where it is a workspace Admin, because that is what the Fabric role
+// assignment APIs require.
+
+/**
+ * The service principal a request is about, and a Power BI client for it.
+ *
+ * Key Vault-backed principals need the operator's own token to read the secret,
+ * so it is passed through the same way the workspace pages do; without it the
+ * client cannot authenticate and the failure looks like a permissions problem.
+ */
+async function resolveServicePrincipal(requestedId) {
+  const servicePrincipals = await db.getServicePrincipals();
+  if (!servicePrincipals.length) return null;
+  const wanted = Number.parseInt(requestedId, 10);
+  return (Number.isFinite(wanted) && servicePrincipals.find(candidate => Number(candidate.id) === wanted))
+    || servicePrincipals[0];
+}
+
+function clientFor(req, sp) {
+  const keyVaultAuthUrl = '/settings/kv/auth?spId=' + encodeURIComponent(String(sp.id))
+    + '&returnTo=' + encodeURIComponent(req.originalUrl || '/settings/access/roles');
+  return createPowerBIService(sp, {
+    keyVaultDelegatedToken: (req.session && req.session.keyVaultDelegatedToken && req.session.keyVaultDelegatedToken.token) || null,
+    keyVaultAuthUrl,
+  });
+}
+
+router.get('/roles', async (req, res) => {
+  const base = {
+    title: 'Grant Workspace Roles', user: req.user, hideRunSelector: true,
+    accessLevels: ACCESS_LEVELS, fabricRoles: FABRIC_ROLES,
+    rolesGuideUrl: ROLES_GUIDE_URL,
+    workspaceId: req.query.workspaceId || null,
+  };
+  try {
+    const servicePrincipals = await db.getServicePrincipals();
+    res.render('access/roles', { ...base, servicePrincipals, error: null });
+  } catch (err) {
+    res.render('access/roles', { ...base, servicePrincipals: [], error: err.message });
+  }
+});
+
+/**
+ * The workspaces a role can be granted in.
+ *
+ * Reachability is asked live — one call — because a scan reads the admin APIs and
+ * so sees every workspace whether the principal is a member or not. Whether the
+ * principal is *Admin* there is not in that answer, so the last scan is used to
+ * mark the likely ones and the role list itself settles it: listing role
+ * assignments requires workspace Admin, so a workspace that answers is one this
+ * principal can manage.
+ */
+router.get('/roles/candidates', async (req, res) => {
+  try {
+    const sp = await resolveServicePrincipal(req.query.spId);
+    if (!sp) return res.json({ success: false, message: 'No service principal configured.' });
+
+    const pbi = clientFor(req, sp);
+    const reachable = await pbi.getMyWorkspaces();
+
+    // Roles the last scan observed for this principal, used only to sort the ones
+    // it is Admin of to the top. Missing scan, missing object id or an unindexed
+    // run all degrade to "unknown", never to a wrong claim.
+    const scanRole = new Map();
+    const objectId = String(sp.enterprise_app_object_id || '').trim().toLowerCase();
+    if (objectId) {
+      try {
+        const { run } = await resolveRun(req.query.accessRunId);
+        if (run) {
+          const { overview } = await loadAccess(run.id);
+          for (const workspace of overview.workspaces) {
+            const grant = workspace.grants.find(g => String(g.principalId || '').toLowerCase() === objectId);
+            if (grant) scanRole.set(String(workspace.workspaceId).toLowerCase(), grant.accessRight);
+          }
+        }
+      } catch { /* the live list is still useful without it */ }
+    }
+
+    const workspaces = (reachable || [])
+      .filter(workspace => !isPersonalWorkspace(workspace) && !isRetiredWorkspace(workspace))
+      .map(workspace => {
+        const id = workspace.id || workspace.workspaceId;
+        const name = workspace.displayName || workspace.name || '(unnamed)';
+        return {
+          id,
+          name,
+          scanRole: scanRole.get(String(id).toLowerCase()) || null,
+          personal: classifyWorkspacePersonal({ name, type: workspace.type }),
+        };
+      })
+      .sort((a, b) =>
+        (b.scanRole === 'admin' ? 1 : 0) - (a.scanRole === 'admin' ? 1 : 0)
+        || String(a.name).localeCompare(String(b.name)));
+
+    res.json({
+      success: true,
+      servicePrincipal: sp.name,
+      // Said plainly, because "0 admin workspaces" from a stale scan and "we did
+      // not look" are different answers and only one of them is a problem.
+      rolesFromScan: scanRole.size > 0,
+      adminByScan: workspaces.filter(workspace => workspace.scanRole === 'admin').length,
+      workspaces,
+    });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * Who holds which role in one workspace, live.
+ *
+ * Doubles as the permission check: the Fabric API only lists role assignments to a
+ * workspace Admin, so a failure here is the answer to "can this principal manage
+ * roles at all", and is reported as that rather than as a bare 403.
+ */
+router.get('/roles/:workspaceId/assignments', async (req, res) => {
+  try {
+    const sp = await resolveServicePrincipal(req.query.spId);
+    if (!sp) return res.json({ success: false, message: 'No service principal configured.' });
+    const pbi = clientFor(req, sp);
+    const assignments = await pbi.getRoleAssignments(req.params.workspaceId);
+    res.json({ success: true, canManage: true, assignments: assignments.map(shapeAssignment) });
+  } catch (err) {
+    const status = err && err.response ? err.response.status : null;
+    if (status === 401 || status === 403) {
+      return res.json({
+        success: false,
+        canManage: false,
+        message: 'This service principal is not an Admin of that workspace, so it cannot see or change who has access '
+          + 'to it. Grant it the Admin role there first — the section above adds it as Admin.',
+      });
+    }
+    res.json({ success: false, message: err.message });
+  }
+});
+
+function shapeAssignment(assignment) {
+  const principal = (assignment && assignment.principal) || {};
+  return {
+    id: assignment.id,
+    role: assignment.role,
+    principalId: principal.id || null,
+    principalType: principal.type || null,
+    displayName: principal.displayName || null,
+    // The API nests the identifier differently per principal type.
+    detail: (principal.userDetails && principal.userDetails.userPrincipalName)
+      || (principal.groupDetails && principal.groupDetails.email)
+      || (principal.servicePrincipalDetails && principal.servicePrincipalDetails.aadAppId)
+      || null,
+  };
+}
+
+/** Grants one principal one role in one workspace. */
+router.post('/roles/:workspaceId', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const principalId = String(body.principalId || '').trim();
+    const principalType = String(body.principalType || '').trim();
+    const role = String(body.role || '').trim();
+
+    if (!principalId || !principalType || !role) {
+      return res.json({ success: false, message: 'Pick a user or group and a role first.' });
+    }
+    if (!FABRIC_ROLES.some(candidate => candidate.key === role)) {
+      return res.json({ success: false, message: 'Unknown role: ' + role });
+    }
+
+    const sp = await resolveServicePrincipal(body.spId);
+    if (!sp) return res.json({ success: false, message: 'No service principal configured.' });
+
+    const pbi = clientFor(req, sp);
+    await pbi.addRoleAssignment(req.params.workspaceId, principalId, principalType, role);
+    res.json({ success: true, message: role + ' granted.' });
+  } catch (err) {
+    const status = err && err.response ? err.response.status : null;
+    if (status === 409) {
+      return res.json({ success: false, message: 'That principal already has a role in this workspace. Remove it first to change the role.' });
+    }
+    if (status === 401 || status === 403) {
+      return res.json({ success: false, message: 'The service principal is not an Admin of this workspace, so it cannot grant access there.' });
+    }
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/** Removes one role assignment. */
+router.delete('/roles/:workspaceId/:assignmentId', async (req, res) => {
+  try {
+    const sp = await resolveServicePrincipal(req.query.spId);
+    if (!sp) return res.json({ success: false, message: 'No service principal configured.' });
+    const pbi = clientFor(req, sp);
+    await pbi.deleteRoleAssignment(req.params.workspaceId, req.params.assignmentId);
+    res.json({ success: true });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/** Finds a user, security group or service principal in Entra ID. */
+router.get('/roles/entra/search', async (req, res) => {
+  try {
+    const query = String(req.query.q || '').trim();
+    const type = String(req.query.type || 'User').trim();
+    if (query.length < 2) return res.json({ success: true, results: [] });
+
+    const sp = await resolveServicePrincipal(req.query.spId);
+    if (!sp) return res.json({ success: false, message: 'No service principal configured.' });
+    const pbi = clientFor(req, sp);
+
+    let results = [];
+    if (type === 'Group') {
+      results = (await pbi.searchEntraGroups(query)).map(group => ({
+        id: group.id, displayName: group.displayName, type: 'Group',
+        // A distribution list cannot hold a workspace role. Saying which kind of
+        // group this is here saves a failed grant later.
+        detail: group.securityEnabled ? 'Security group' : 'Distribution group — cannot hold a workspace role',
+        usable: !!group.securityEnabled,
+      }));
+    } else if (type === 'ServicePrincipal') {
+      results = (await pbi.searchEntraServicePrincipals(query)).map(principal => ({
+        id: principal.id, displayName: principal.displayName, type: 'ServicePrincipal',
+        detail: principal.appId, usable: true,
+      }));
+    } else {
+      results = (await pbi.searchEntraUsers(query)).map(user => ({
+        id: user.id, displayName: user.displayName, type: 'User',
+        detail: user.userPrincipalName || user.mail, usable: true,
+      }));
+    }
+    res.json({ success: true, results });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
