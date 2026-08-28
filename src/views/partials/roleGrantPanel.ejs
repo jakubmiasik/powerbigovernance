@@ -1,0 +1,302 @@
+<%
+  // The workspace-scoped half of role granting: who already has a role here, and
+  // giving somebody one. Shared by the Grant Workspace Roles page and by the modal
+  // on Grant Access, because they are the same operation reached two ways — and
+  // two copies of this would drift within a release.
+  //
+  // `spSelectId` names the <select> holding the acting service principal. The
+  // panel does not render it: on one page it belongs to the workspace picker, on
+  // the other to the modal.
+  var spSelectId = typeof spSelectId !== 'undefined' ? spSelectId : 'roleSpSelect';
+%>
+
+<!-- ── Who already has a role ── -->
+<div class="card mb-3 d-none" id="assignmentsCard">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-people me-2"></i>Who has a role in <span id="roleGrantWorkspaceName">this workspace</span></span>
+    <span class="small text-muted">Read live from the workspace</span>
+  </div>
+  <div class="card-body py-3" id="assignmentsBody"></div>
+</div>
+
+<!-- ── Grant a role ── -->
+<div class="card mb-3 d-none" id="grantRoleCard">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-person-plus me-2"></i>Grant a role</span>
+    <div class="d-flex gap-2 align-items-center">
+      <span class="small" id="grantRoleResult"></span>
+      <button class="btn btn-sm btn-warning" id="grantRoleBtn" onclick="grantRole()" disabled>
+        <i class="bi bi-person-plus me-1"></i>Grant role
+      </button>
+    </div>
+  </div>
+  <div class="card-body py-3">
+    <div class="row g-2">
+      <div class="col-md-4">
+        <label class="form-label small" for="principalType">Grant to</label>
+        <select class="form-select form-select-sm" id="principalType" onchange="onPrincipalTypeChanged()">
+          <option value="Group">Security group</option>
+          <option value="User">User</option>
+          <option value="ServicePrincipal">Service principal</option>
+        </select>
+      </div>
+      <div class="col-md-8">
+        <label class="form-label small" for="principalSearch">Search Entra ID</label>
+        <div class="input-group input-group-sm">
+          <input type="text" class="form-control" id="principalSearch"
+                 placeholder="Type at least 2 characters of the name..." oninput="onPrincipalSearchInput()">
+          <button class="btn btn-outline-secondary" type="button" onclick="searchPrincipals()">
+            <i class="bi bi-search"></i>
+          </button>
+        </div>
+      </div>
+      <div class="col-12">
+        <!-- A plain list rather than a stack of full-width outlined buttons: these
+             are search results, and a row of boxes reads as a form nobody filled in. -->
+        <div class="list-group list-group-flush border rounded d-none"
+             style="max-height:240px; overflow-y:auto;" id="principalResults"></div>
+      </div>
+      <div class="col-md-5">
+        <label class="form-label small" for="roleSelect">Role</label>
+        <select class="form-select form-select-sm" id="roleSelect">
+          <% fabricRoles.forEach(function(role) { %>
+            <option value="<%= role.key %>" <%= role.key === 'Viewer' ? 'selected' : '' %>><%= role.label %></option>
+          <% }) %>
+        </select>
+        <div class="form-text" id="roleDescription"></div>
+      </div>
+    </div>
+
+    <div class="form-text mt-2">
+      <i class="bi bi-people me-1"></i>Prefer a <strong>security group</strong>. A role held by a named person has to be
+      remembered when that person changes team or leaves; a role held by a group is maintained wherever group
+      membership is already maintained. <a href="/quality/security-groups">Which groups should exist</a> sets out how to
+      design them, and <a href="/workspaces">Workspace Triage</a> reports the workspaces held by people alone as
+      <em>No group-based access</em>.
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Granting one principal one role in one workspace ──
+var ROLE_GRANT_SP_SELECT = '<%= spSelectId %>';
+var fabricRoleDescriptions = <%- JSON.stringify((fabricRoles || []).reduce(function(map, role) { map[role.key] = role.description; return map; }, {})) %>;
+var roleGrantWorkspace = null;
+var chosenPrincipal = null;
+var searchTimer = null;
+
+function esc(value) { var d = document.createElement('div'); d.textContent = value == null ? '' : value; return d.innerHTML; }
+function spId() {
+  var select = document.getElementById(ROLE_GRANT_SP_SELECT);
+  return select ? select.value : '';
+}
+
+/**
+ * Points the panel at one workspace and reads it.
+ *
+ * The single entry point, so the page that picks a workspace from a list and the
+ * modal opened from a row behave identically.
+ */
+function roleGrantOpen(workspaceId, workspaceName, note) {
+  roleGrantWorkspace = workspaceId ? { id: workspaceId, name: workspaceName || workspaceId } : null;
+  document.getElementById('roleGrantWorkspaceName').textContent = workspaceName || 'this workspace';
+
+  var noteEl = document.getElementById('roleGrantNote');
+  if (noteEl) noteEl.innerHTML = note || '';
+
+  if (!roleGrantWorkspace) {
+    document.getElementById('assignmentsCard').classList.add('d-none');
+    document.getElementById('grantRoleCard').classList.add('d-none');
+    return;
+  }
+  loadAssignments(roleGrantWorkspace.id);
+}
+
+function roleGrantReset() {
+  roleGrantWorkspace = null;
+  document.getElementById('assignmentsCard').classList.add('d-none');
+  document.getElementById('grantRoleCard').classList.add('d-none');
+}
+
+async function loadAssignments(workspaceId) {
+  var card = document.getElementById('assignmentsCard');
+  var body = document.getElementById('assignmentsBody');
+  card.classList.remove('d-none');
+  body.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Reading the workspace...';
+
+  try {
+    var resp = await fetch('/settings/access/roles/' + encodeURIComponent(workspaceId)
+      + '/assignments?spId=' + encodeURIComponent(spId()));
+    var data = await resp.json();
+
+    if (!data.success) {
+      // A refusal here is the answer to "can this principal manage roles at all",
+      // so it is shown as that rather than as a failed request.
+      body.innerHTML = '<div class="alert alert-warning py-2 small mb-0">'
+        + '<i class="bi bi-shield-exclamation me-1"></i>' + esc(data.message) + '</div>';
+      document.getElementById('grantRoleCard').classList.add('d-none');
+      return;
+    }
+
+    var rows = data.assignments || [];
+    body.innerHTML = rows.length
+      ? '<div class="table-responsive"><table class="table table-sm mb-0"><thead><tr>'
+        + '<th>Principal</th><th>Type</th><th>Identifier</th><th>Role</th><th></th></tr></thead><tbody>'
+        + rows.map(function(row) {
+            return '<tr><td class="small"><strong>' + esc(row.displayName || '(no name)') + '</strong></td>'
+              + '<td class="small">' + esc(row.principalType || '-') + '</td>'
+              + '<td class="small text-muted">' + esc(row.detail || '-') + '</td>'
+              + '<td class="small"><span class="badge bg-secondary">' + esc(row.role) + '</span></td>'
+              + '<td class="text-end"><button class="btn btn-sm btn-outline-danger p-0 px-1" title="Remove this role"'
+              + ' onclick="removeAssignment(\'' + esc(row.id) + '\', \'' + esc(row.displayName || row.id) + '\')">'
+              + '<i class="bi bi-x-lg"></i></button></td></tr>';
+          }).join('')
+        + '</tbody></table></div>'
+      : '<div class="small text-muted">No role assignments in this workspace.</div>';
+
+    document.getElementById('grantRoleCard').classList.remove('d-none');
+    onPrincipalTypeChanged();
+    updateRoleDescription();
+  } catch (e) {
+    body.innerHTML = '<span class="text-danger">' + esc(e.message) + '</span>';
+  }
+}
+
+function onPrincipalTypeChanged() {
+  // The chosen principal belongs to the type it was found under; switching type
+  // without clearing it would grant to whatever was selected before.
+  chosenPrincipal = null;
+  document.getElementById('principalSearch').value = '';
+  document.getElementById('principalResults').classList.add('d-none');
+  document.getElementById('principalResults').innerHTML = '';
+  document.getElementById('grantRoleBtn').disabled = true;
+  document.getElementById('grantRoleResult').innerHTML = '';
+}
+
+function onPrincipalSearchInput() {
+  // Debounced: Graph is asked once the typing stops, not once per keystroke.
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(searchPrincipals, 350);
+}
+
+async function searchPrincipals() {
+  var query = document.getElementById('principalSearch').value.trim();
+  var results = document.getElementById('principalResults');
+  if (query.length < 2) { results.classList.add('d-none'); return; }
+
+  results.classList.remove('d-none');
+  results.innerHTML = '<div class="list-group-item small">'
+    + '<span class="spinner-border spinner-border-sm me-1"></span>Searching Entra ID...</div>';
+
+  try {
+    var resp = await fetch('/settings/access/roles/entra/search?q=' + encodeURIComponent(query)
+      + '&type=' + encodeURIComponent(document.getElementById('principalType').value)
+      + '&spId=' + encodeURIComponent(spId()));
+    var data = await resp.json();
+    if (!data.success) {
+      results.innerHTML = '<div class="list-group-item small text-danger">' + esc(data.message) + '</div>';
+      return;
+    }
+    if (!(data.results || []).length) {
+      results.innerHTML = '<div class="list-group-item small text-muted">Nothing found. '
+        + 'Search matches the start of the name.</div>';
+      return;
+    }
+
+    results.innerHTML = data.results.map(function(item, index) {
+      return '<button type="button" class="list-group-item list-group-item-action py-2"'
+        + ' onclick="choosePrincipal(' + index + ')">'
+        + '<span class="small"><strong>' + esc(item.displayName) + '</strong></span>'
+        + (item.detail ? '<span class="small text-muted ms-2">' + esc(item.detail) + '</span>' : '')
+        + (item.warning ? '<span class="badge bg-warning text-dark ms-2">' + esc(item.warning) + '</span>' : '')
+        + '</button>';
+    }).join('');
+    window.__principalResults = data.results;
+  } catch (e) {
+    results.innerHTML = '<div class="list-group-item small text-danger">' + esc(e.message) + '</div>';
+  }
+}
+
+function choosePrincipal(index) {
+  chosenPrincipal = (window.__principalResults || [])[index] || null;
+  if (!chosenPrincipal) return;
+  document.getElementById('principalSearch').value = chosenPrincipal.displayName;
+  document.getElementById('principalResults').classList.add('d-none');
+  document.getElementById('grantRoleBtn').disabled = false;
+  document.getElementById('grantRoleResult').innerHTML =
+    '<span class="text-muted">Granting to ' + esc(chosenPrincipal.displayName) + '</span>';
+}
+
+function updateRoleDescription() {
+  var role = document.getElementById('roleSelect').value;
+  document.getElementById('roleDescription').textContent = fabricRoleDescriptions[role] || '';
+}
+
+async function grantRole() {
+  if (!roleGrantWorkspace || !chosenPrincipal) return;
+
+  var button = document.getElementById('grantRoleBtn');
+  var result = document.getElementById('grantRoleResult');
+  var role = document.getElementById('roleSelect').value;
+  button.disabled = true;
+  result.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Granting...';
+
+  try {
+    var resp = await fetch('/settings/access/roles/' + encodeURIComponent(roleGrantWorkspace.id), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        spId: spId(),
+        principalId: chosenPrincipal.id,
+        principalType: chosenPrincipal.type,
+        role: role,
+      }),
+    });
+    var data = await resp.json();
+
+    if (!data.success) {
+      result.innerHTML = '<span class="text-danger"><i class="bi bi-x-circle me-1"></i>' + esc(data.message) + '</span>';
+      button.disabled = false;
+      return;
+    }
+
+    result.innerHTML = '<span class="text-success"><i class="bi bi-check-circle me-1"></i>'
+      + esc(chosenPrincipal.displayName + ' is now ' + role) + '</span>';
+    chosenPrincipal = null;
+    document.getElementById('principalSearch').value = '';
+    // Re-read rather than assume: the table above is the evidence the grant worked.
+    await loadAssignments(roleGrantWorkspace.id);
+  } catch (e) {
+    result.innerHTML = '<span class="text-danger">' + esc(e.message) + '</span>';
+    button.disabled = false;
+  }
+}
+
+function removeAssignment(assignmentId, label) {
+  showConfirmAction({
+    title: 'Remove this role',
+    message: 'Remove ' + label + ' from this workspace? They lose access immediately.',
+    confirmText: 'Remove',
+    confirmClass: 'btn-danger',
+    onConfirm: async function() {
+      if (!roleGrantWorkspace) return;
+      try {
+        var resp = await fetch('/settings/access/roles/' + encodeURIComponent(roleGrantWorkspace.id)
+          + '/' + encodeURIComponent(assignmentId) + '?spId=' + encodeURIComponent(spId()), { method: 'DELETE' });
+        var data = await resp.json();
+        if (!data.success) { showToast(data.message, 'error'); return; }
+        showToast('Role removed.', 'success');
+        await loadAssignments(roleGrantWorkspace.id);
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    },
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  var select = document.getElementById('roleSelect');
+  if (select) select.addEventListener('change', updateRoleDescription);
+  updateRoleDescription();
+});
+</script>

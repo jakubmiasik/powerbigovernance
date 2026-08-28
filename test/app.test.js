@@ -4179,6 +4179,7 @@ test('the Grant Access page renders with and without a scan behind it', async ()
     currentPath: '/settings/access', breadcrumb: [], availableRuns: [], globalRun: null,
     hideRunSelector: true, title: 'Grant Access',
     accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    fabricRoles: workspaceAccess.FABRIC_ROLES,
     accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
     describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
     partialScope: false,
@@ -4577,6 +4578,7 @@ test('the Grant Access page says so when the scan behind it was scoped', async (
     user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings/access',
     breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Grant Access',
     accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    fabricRoles: workspaceAccess.FABRIC_ROLES,
     accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
     describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
     overview: workspaceAccess.buildAccessOverview(ACCESS_FIXTURE), indexed: true, error: null, grantAuth: false,
@@ -5229,6 +5231,7 @@ test('the grant section lists nothing until the tenant has been asked', async ()
     user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings/access',
     breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Grant Access',
     accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    fabricRoles: workspaceAccess.FABRIC_ROLES,
     accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
     describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
     overview: workspaceAccess.buildAccessOverview(ACCESS_FIXTURE), indexed: true, error: null,
@@ -5564,8 +5567,9 @@ test('the role page names the roles, explains the Admin requirement and links th
     }
     // The one thing that makes this page fail in practice, said before it does.
     assert.match(html, /workspace Admin/);
-    // Designing the groups comes before granting them anything.
-    assert.match(html, /qubexon-pl\.github\.io\/fabricrolesassigment/);
+    // Designing the groups comes before granting them anything, and that guidance
+    // is a page in this application rather than a link off it.
+    assert.match(html, /\/quality\/security-groups/);
   } finally {
     dbService.getServicePrincipals = original;
   }
@@ -5703,7 +5707,7 @@ test('granting a role posts the principal and role through, and refuses an unkno
   }
 });
 
-test('a distribution list is found but marked as unusable for a workspace role', async () => {
+test('a mail group is found and offered, with a nudge towards a security group', async () => {
   const original = {
     getServicePrincipals: dbService.getServicePrincipals,
     createPowerBIService: pbi.createPowerBIService,
@@ -5721,8 +5725,11 @@ test('a distribution list is found but marked as unusable for a workspace role',
       const res = await request(server, '/settings/access/roles/entra/search?q=BI&type=Group&spId=1');
       return JSON.parse(res.body);
     });
-    assert.deepEqual(body.results.map(r => r.usable), [true, false]);
-    assert.match(body.results[1].detail, /cannot hold a workspace role/);
+    // Fabric accepts these, so the choice stays open — the mail group is marked
+    // rather than blocked. Claiming it cannot hold a role would be wrong.
+    assert.deepEqual(body.results.map(r => r.usable), [true, true]);
+    assert.equal(body.results[0].warning, null);
+    assert.match(body.results[1].warning, /Prefer a security group/);
   } finally {
     dbService.getServicePrincipals = original.getServicePrincipals;
     pbi.createPowerBIService = original.createPowerBIService;
@@ -5786,6 +5793,7 @@ test('the access page shows workspace status, marks personal ones and offers the
     user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings/access',
     breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Grant Access',
     accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    fabricRoles: workspaceAccess.FABRIC_ROLES,
     accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
     describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
     overview: workspaceAccess.buildAccessOverview({
@@ -5807,7 +5815,116 @@ test('the access page shows workspace status, marks personal ones and offers the
   // The personal one is named as such, and offers no way to grant a role in it.
   assert.match(html, />\s*personal\s*</);
   assert.match(html, /takes no members/);
-  // The one that can take a role links to the page that grants one.
-  assert.match(html, /\/settings\/access\/roles\?workspaceId=w1/);
+  // The one that can take a role carries the button that grants one, beside its
+  // name and opening over the table rather than navigating away from it.
+  assert.match(html, /openRoleGrantModal\('w1', "Finance"\)/);
+  assert.match(html, /id="roleGrantModal"/);
   assert.match(html, /Grant a user or group a role/);
+});
+
+// ── Which security groups should exist ────────────────────────────────────────
+//
+// Granting a role is the easy half. Which groups exist before anyone grants
+// anything is the half that decides whether access stays manageable, and it
+// cannot be retrofitted once the forty individual grants are in place.
+
+const securityGroups = require('../src/services/securityGroupGuideService');
+
+test('the group plan is a group per role per environment, plus one for the applications', () => {
+  const plan = securityGroups.securityGroupPlan({ domain: 'Finance', environments: ['dev', 'prod'] });
+
+  assert.deepEqual(plan.groups.map(group => group.name), [
+    'FAB-FINANCE-DEV-ADMIN', 'FAB-FINANCE-DEV-MEMBER', 'FAB-FINANCE-DEV-CONTRIBUTOR', 'FAB-FINANCE-DEV-VIEWER',
+    'FAB-FINANCE-PROD-ADMIN', 'FAB-FINANCE-PROD-MEMBER', 'FAB-FINANCE-PROD-CONTRIBUTOR', 'FAB-FINANCE-PROD-VIEWER',
+    // An application is one identity whatever environment it reads, so its group
+    // is per domain rather than per environment.
+    'FAB-FINANCE-SP',
+  ]);
+
+  // Every row says what to do with the group, not just what to call it.
+  assert.ok(plan.groups.every(group => group.holds && group.assignTo));
+  assert.match(plan.groups[0].assignTo, /DEV FINANCE/);
+});
+
+test('a domain nobody typed still produces a usable plan', () => {
+  const plan = securityGroups.securityGroupPlan({});
+  assert.equal(plan.domain, 'DOMAIN');
+  assert.deepEqual(plan.environments, ['DEV', 'TEST', 'PROD']);
+  assert.equal(plan.groups.length, 13, 'four roles across three environments, and the application group');
+});
+
+test('group names cannot carry whatever was typed into them', () => {
+  // These names are pasted into a directory. A separator or a space arriving from
+  // the form would produce a name that does not match the pattern it claims to.
+  const plan = securityGroups.securityGroupPlan({
+    domain: 'fin ance/2!', prefix: '  fab  ', environments: ['Pro d'], separator: '_',
+  });
+  assert.equal(plan.groups[0].name, 'FAB_FINANCE2_PROD_ADMIN');
+  assert.equal(securityGroups.plainGroupList(plan).split('\n')[0], 'FAB_FINANCE2_PROD_ADMIN');
+});
+
+test('an environment list of nothing but noise still names the roles', () => {
+  // Otherwise a stray comma in the form empties the plan, which reads as "no
+  // groups are needed".
+  const plan = securityGroups.securityGroupPlan({ domain: 'HR', environments: ['', '  ', '!!'] });
+  assert.deepEqual(plan.groups.map(group => group.name), [
+    'FAB-HR-ADMIN', 'FAB-HR-MEMBER', 'FAB-HR-CONTRIBUTOR', 'FAB-HR-VIEWER', 'FAB-HR-SP',
+  ]);
+});
+
+test('the security group page is part of the application, and generates from the form', async () => {
+  const html = await withServer(server =>
+    request(server, '/quality/security-groups?domain=Finance&environments=DEV,PROD').then(r => r.body));
+
+  assert.match(html, /Which Security Groups Should Exist/);
+  assert.match(html, /FAB-FINANCE-PROD-CONTRIBUTOR/);
+  // The reasoning, not just the names.
+  assert.match(html, /Grant roles to groups, never to people/);
+  assert.match(html, /Service principals allowed to use Fabric APIs/);
+  // And the way back to acting on it.
+  assert.match(html, /\/settings\/access\/roles/);
+  // Nothing here touches the tenant, which the page says rather than implying.
+  assert.match(html, /Nothing on this page reads or changes your tenant/);
+});
+
+test('the role panel is one panel, reached from the page and from the table', async () => {
+  const ejs = require('ejs');
+  const common = {
+    user: { name: 'T' }, currentUser: { name: 'T' }, breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true,
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'sp1' }],
+    fabricRoles: workspaceAccess.FABRIC_ROLES,
+  };
+
+  const page = await ejs.renderFile('src/views/access/roles.ejs', {
+    ...common, currentPath: '/settings/access/roles', title: 'Grant Workspace Roles',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, workspaceId: null, error: null,
+  });
+
+  const table = await ejs.renderFile('src/views/access/index.ejs', {
+    ...common, currentPath: '/settings/access', title: 'Grant Access',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    overview: workspaceAccess.buildAccessOverview(ACCESS_FIXTURE), indexed: true, error: null,
+    grantAuth: false, partialScope: false, runs: [],
+    run: { id: 9, started_at: '2026-08-01T00:00:00Z', scope_kind: 'tenant' },
+  });
+
+  // Both carry the same panel — two copies of it would drift within a release.
+  for (const html of [page, table]) {
+    assert.match(html, /function roleGrantOpen\(/);
+    assert.match(html, /id="assignmentsBody"/);
+    assert.match(html, /list-group-item list-group-item-action/,
+      'search results are a list, not a stack of full-width outlined buttons');
+  }
+
+  // Each names the select holding the acting principal, and they are not the same
+  // one: the page has a picker, the modal has its own.
+  assert.match(page, /ROLE_GRANT_SP_SELECT = 'roleSpSelect'/);
+  assert.match(table, /ROLE_GRANT_SP_SELECT = 'modalRoleSpSelect'/);
+
+  // The grant button sits with the label it belongs to rather than at the foot of
+  // the form.
+  assert.match(page, /Grant a role<\/span>[\s\S]{0,400}id="grantRoleBtn"/);
 });

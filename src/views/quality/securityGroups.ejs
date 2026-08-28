@@ -1,0 +1,194 @@
+<%- include('../partials/header') %>
+
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-people me-2"></i>Which Security Groups Should Exist</h2>
+    <p class="text-muted mb-0">
+      Designing the groups a Fabric tenant grants roles to — before anything is granted to anyone.
+    </p>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    <a href="/settings/access/roles" class="btn btn-sm btn-primary">
+      <i class="bi bi-person-plus me-1"></i>Grant a group a role
+    </a>
+    <a href="/quality" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Quality</a>
+  </div>
+</div>
+
+<div class="alert alert-light border">
+  <i class="bi bi-info-circle me-2"></i>
+  Nothing on this page reads or changes your tenant. It produces a <strong>list of groups to create in Entra ID</strong>,
+  and the reasoning behind it. Once they exist,
+  <a href="/settings/access/roles">Grant Access → Grant a user or group a role</a> assigns them, and
+  <a href="/workspaces">Workspace Triage</a> reports the workspaces still held by individual accounts alone.
+</div>
+
+<!-- ── The rules the rest follows from ── -->
+<div class="row g-3 mb-4">
+  <% principles.forEach(function(principle, index) { %>
+    <div class="col-md-6">
+      <div class="card h-100">
+        <div class="card-body py-3">
+          <h6 class="mb-2">
+            <span class="badge bg-primary me-2"><%= index + 1 %></span><%= principle.title %>
+          </h6>
+          <p class="small text-muted mb-0"><%= principle.body %></p>
+        </div>
+      </div>
+    </div>
+  <% }) %>
+</div>
+
+<!-- ── Generate the groups for a scope ── -->
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-magic me-2"></i>The groups one domain needs</span>
+    <span class="small text-muted">A group per role per environment, named the same way every time</span>
+  </div>
+  <div class="card-body py-3">
+    <form method="get" action="/quality/security-groups" class="row g-2 align-items-end mb-3">
+      <div class="col-6 col-md-2">
+        <label class="form-label small" for="prefixInput">Prefix</label>
+        <input type="text" class="form-control form-control-sm" id="prefixInput" name="prefix"
+               value="<%= plan.prefix %>" maxlength="24">
+      </div>
+      <div class="col-6 col-md-3">
+        <label class="form-label small" for="domainInput">Domain or workspace set</label>
+        <input type="text" class="form-control form-control-sm" id="domainInput" name="domain"
+               value="<%= plan.domain %>" maxlength="24" placeholder="FINANCE">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="environmentsInput">Environments</label>
+        <input type="text" class="form-control form-control-sm" id="environmentsInput" name="environments"
+               value="<%= plan.environments.join(',') %>" placeholder="DEV,TEST,PROD">
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label small" for="separatorInput">Separator</label>
+        <input type="text" class="form-control form-control-sm" id="separatorInput" name="separator"
+               value="<%= plan.separator %>" maxlength="3">
+      </div>
+      <div class="col-6 col-md-2">
+        <button type="submit" class="btn btn-sm btn-primary w-100">
+          <i class="bi bi-arrow-repeat me-1"></i>Generate
+        </button>
+      </div>
+    </form>
+
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Group</th><th>Role</th><th>Who belongs in it</th><th>What to assign it to</th></tr></thead>
+        <tbody>
+          <% plan.groups.forEach(function(group) { %>
+            <tr>
+              <td class="small"><code><%= group.name %></code></td>
+              <td class="small">
+                <% if (group.role) { %><span class="badge bg-secondary"><%= group.role %></span><% } else { %>
+                  <span class="text-muted">—</span>
+                <% } %>
+              </td>
+              <td class="small text-muted"><%= group.holds %></td>
+              <td class="small text-muted"><%= group.assignTo %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="d-flex gap-2 align-items-center flex-wrap mt-3">
+      <button class="btn btn-sm btn-outline-secondary" type="button" onclick="copyGroupNames(this)">
+        <i class="bi bi-clipboard me-1"></i>Copy the names
+      </button>
+      <span class="small text-muted">
+        <%= plan.groups.length %> group(s). Create them in Entra ID as <strong>security</strong> groups, then assign
+        them here.
+      </span>
+    </div>
+    <pre class="d-none" id="groupNames"><%= plan.groups.map(function(g) { return g.name; }).join('\n') %></pre>
+  </div>
+</div>
+
+<!-- ── What each workspace role's group is for ── -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-shield-lock me-2"></i>The four workspace roles, as groups</div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0">
+      <thead><tr><th>Role</th><th>Who belongs in the group</th><th>What it grants</th><th>Guidance</th></tr></thead>
+      <tbody>
+        <% roleGroups.forEach(function(role) { %>
+          <tr>
+            <td class="small"><span class="badge bg-secondary"><%= role.role %></span></td>
+            <td class="small"><%= role.holds %></td>
+            <td class="small text-muted"><%= role.grants %></td>
+            <td class="small text-muted"><%= role.guidance %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── Groups the tenant needs once ── -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-building me-2"></i>Groups the tenant needs once, not per workspace</div>
+  <ul class="list-group list-group-flush">
+    <% tenantGroups.forEach(function(group) { %>
+      <li class="list-group-item py-3">
+        <div class="fw-semibold small"><%= group.name %></div>
+        <div class="small text-muted"><%= group.purpose %></div>
+        <div class="small mt-1"><i class="bi bi-people me-1"></i><%= group.holds %></div>
+      </li>
+    <% }) %>
+  </ul>
+  <div class="card-footer small text-muted">
+    The service principal group is the one this application depends on: without a security group holding it, the tenant
+    setting allowing service principals to use the Fabric APIs cannot be applied to it, and every scan fails at
+    authentication. See the prerequisites on the <a href="/">home page</a>.
+  </div>
+</div>
+
+<!-- ── What goes wrong ── -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-exclamation-triangle me-2"></i>What goes wrong</div>
+  <ul class="list-group list-group-flush">
+    <% antiPatterns.forEach(function(pattern) { %>
+      <li class="list-group-item py-3">
+        <div class="fw-semibold small text-warning-emphasis"><%= pattern.title %></div>
+        <div class="small text-muted"><%= pattern.body %></div>
+      </li>
+    <% }) %>
+  </ul>
+</div>
+
+<div class="small text-muted mb-4">
+  Written for this application, following the approach set out at
+  <a href="<%= sourceUrl %>" target="_blank" rel="noopener"><%= sourceUrl %></a>. The specifics of what a role permits
+  are Microsoft's to define and change; what is here is how to organise around them.
+</div>
+
+<script>
+function copyGroupNames(button) {
+  var text = document.getElementById('groupNames').textContent;
+  // The clipboard API is unavailable over plain HTTP, which is how this runs
+  // locally — the fallback is what makes the button work there.
+  function done() {
+    var original = button.innerHTML;
+    button.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied';
+    setTimeout(function() { button.innerHTML = original; }, 1500);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(fallback);
+  } else {
+    fallback();
+  }
+  function fallback() {
+    var area = document.createElement('textarea');
+    area.value = text;
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand('copy'); done(); } catch (e) { showToast('Could not copy: ' + e.message, 'error'); }
+    document.body.removeChild(area);
+  }
+}
+</script>
+
+<%- include('../partials/footer') %>
