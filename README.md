@@ -16,6 +16,7 @@ A web application to investigate and govern Power BI workspaces, reports, datase
 - **Naming Conventions** — Define how Fabric artifacts should be named, then see which ones do not follow it and what they should be called
 - **Workspace Access** — See who can reach which workspace across the tenant, spot workspaces nobody administers and ones that belong to a person rather than the organisation, grant the service principal access where it is missing, and give a user or security group a role where it is Admin
 - **Workspace Triage** — Rank workspaces by a risk score built from named, weighted checks, with the arithmetic shown rather than asserted
+- **Security Groups** — Design the groups a tenant grants roles to, and generate the group plan for a domain
 - **Data Reconciliation** — Define controls that verify records agree between two business systems, run them, and manage the resulting exceptions through a controlled lifecycle
 - **Master Data Management** — Match records that arrived from many systems, build one golden record per entity, and publish it to a chosen destination with full provenance
 
@@ -328,9 +329,31 @@ It grants to the service principal selected on the page rather than to whichever
 
 Pick the service principal, load the workspaces it can reach — one call — then pick one. **Listing role assignments requires workspace Admin, so the list is the permission check**: a workspace that answers is one this principal can manage, and a 403 is reported as "this service principal is not an Admin of that workspace" rather than as a status code. The last scan is used only to sort the ones it is probably Admin of to the top; with no scan the page says so instead of reporting zero.
 
-Then search Entra ID for a **security group**, a user or another service principal, choose Admin, Member, Contributor or Viewer, and grant. Personal and deleted workspaces are not offered. A distribution list is found but marked unusable — it cannot hold a workspace role, and saying so at the point of choosing saves a failed grant. A role the API does not have is refused here rather than at the far end.
+Then search Entra ID for a **security group**, a user or another service principal, choose Admin, Member, Contributor or Viewer, and grant. Personal and deleted workspaces are not offered. A mail or Microsoft 365 group is found and offered with a *prefer a security group* mark against it — Fabric accepts one, but its membership is maintained for delivering mail rather than for granting access, and the two drift apart. A role the API does not have is refused here rather than at the far end.
 
-The page leads with **security groups**, and links the [Fabric role assignment guide](https://qubexon-pl.github.io/fabricrolesassigment/) beside the form. Granting roles is the easy half; which groups exist is the half that decides whether access stays manageable, and a workspace granting four groups rather than forty people is the difference.
+**The same panel is reachable from the table.** Each workspace row in *By workspace* carries a person-plus button beside its name that opens the panel over the table, on that workspace, rather than navigating away — the question "who should be in this one?" is asked while reading the row, and losing the table to answer it means finding the row again afterwards. The page and the modal render one shared partial, because two copies of a form like this drift within a release.
+
+The page leads with **security groups** and links **Which Security Groups Should Exist** (`/quality/security-groups`), which is a page in this application rather than a link off it. Granting roles is the easy half; which groups exist is the half that decides whether access stays manageable, and a workspace granting four groups rather than forty people is the difference.
+
+### Which security groups should exist
+
+`/quality/security-groups` is the design half of workspace access, and it sits in Quality because it is guidance rather than an operation: **nothing on it reads or changes the tenant**. It produces a list of groups to create in Entra ID, and the reasoning behind the list.
+
+Six principles it follows from — grant roles to groups and never to people; one group per role per scope; environments are separate scopes; service principals get their own groups; broad read access is an app audience rather than a workspace role; and the group name says what it grants.
+
+Then the mechanical part is generated rather than typed. Give it a domain and your environments and it names the groups:
+
+| Group | Role | Who belongs in it |
+|---|---|---|
+| `FAB-FINANCE-PROD-ADMIN` | Admin | The team accountable for the workspace — two to four people, never one |
+| `FAB-FINANCE-PROD-MEMBER` | Member | Those who build and publish here and may share onward |
+| `FAB-FINANCE-PROD-CONTRIBUTOR` | Contributor | Those who build but should not decide who else sees it |
+| `FAB-FINANCE-PROD-VIEWER` | Viewer | A small known readership. For a wide one, publish an app |
+| `FAB-FINANCE-SP` | — | The service principals reading this domain, and nothing else |
+
+Four roles per environment plus one application group, named identically every time — typing twelve names by hand is where the inconsistencies come from. Whatever is typed into the form is sanitised into the name, because these are pasted into a directory and a name carrying a stray space does not match the pattern it claims to. The page also lists the groups a tenant needs **once** rather than per workspace (Fabric administrators, capacity and domain administrators, workspace creators, the service principal group this application itself depends on) and the anti-patterns, each tied to what reports it: granting a person directly is what Workspace Triage reports as *No group-based access*, and a personal workspace as a workaround is a dead end because no role can be assigned in one at all.
+
+The content was written for this application following the approach set out at <https://qubexon-pl.github.io/fabricrolesassigment/>. What a role permits is Microsoft's to define and change; what is here is how to organise around it.
 
 ## Data Reconciliation
 
@@ -342,6 +365,7 @@ Reconciliation and master data sit together under **Quality** in the navigation,
 |---|---|
 | `/quality` | What is configured across both disciplines, and the guides |
 | `/quality/sources` | Register the systems reconciliation and master data read — the only place registration happens |
+| `/quality/security-groups` | Which security groups a Fabric tenant should have, and the group plan for a domain |
 | `/reconciliation` | Oversight: active rules, open exceptions by type, severity, owner and age, a **Rules Overview** that expands each rule into the runs behind it, and recent runs. A dropdown scopes the whole page to what a single run found |
 | `/reconciliation/rules` | Create, version, activate and retire controls; change status or assign an owner across several at once; run one or more of them |
 | `/reconciliation/runs` | Full run history: what was checked, when, under which rule version, and what it produced. Runs can be deleted individually, per rule, or entirely |

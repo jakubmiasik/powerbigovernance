@@ -96,7 +96,7 @@ router.get('/', async (req, res) => {
 
   const base = {
     title: 'Grant Access', user: req.user, hideRunSelector: true,
-    accessLevels: ACCESS_LEVELS, principalTypes: PRINCIPAL_TYPES,
+    accessLevels: ACCESS_LEVELS, principalTypes: PRINCIPAL_TYPES, fabricRoles: FABRIC_ROLES,
     accessLevel, principalTypeLabel, describeScope, scopeFromRow,
     grantAuth: req.query.grantAuth === 'success',
     // Only resumed on the way back from a successful sign-in. A stash left behind
@@ -428,10 +428,12 @@ router.get('/roles/entra/search', async (req, res) => {
     if (type === 'Group') {
       results = (await pbi.searchEntraGroups(query)).map(group => ({
         id: group.id, displayName: group.displayName, type: 'Group',
-        // A distribution list cannot hold a workspace role. Saying which kind of
-        // group this is here saves a failed grant later.
-        detail: group.securityEnabled ? 'Security group' : 'Distribution group — cannot hold a workspace role',
-        usable: !!group.securityEnabled,
+        detail: group.securityEnabled ? 'Security group' : 'Distribution or Microsoft 365 group',
+        // Fabric does accept these, so the choice stays open — but a mail group's
+        // membership is maintained for delivering mail, not for granting access,
+        // and the two drift apart. Marked, not blocked.
+        usable: true,
+        warning: group.securityEnabled ? null : 'Prefer a security group',
       }));
     } else if (type === 'ServicePrincipal') {
       results = (await pbi.searchEntraServicePrincipals(query)).map(principal => ({

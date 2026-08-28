@@ -62,8 +62,11 @@
       </a>
 
       <p class="nav-section-title">Quality</p>
-      <a href="/quality" class="sidebar-link <%= pagePath === '/quality' || pagePath.startsWith('/quality/') ? 'active' : '' %>" title="Quality Configuration">
+      <a href="/quality" class="sidebar-link <%= pagePath === '/quality' || pagePath.startsWith('/quality/sources') ? 'active' : '' %>" title="Quality Configuration">
         <i class="bi bi-patch-check"></i> <span>Quality Configuration</span>
+      </a>
+      <a href="/quality/security-groups" class="sidebar-link <%= pagePath.startsWith('/quality/security-groups') ? 'active' : '' %>" title="Which security groups should exist">
+        <i class="bi bi-people"></i> <span>Security Groups</span>
       </a>
       <a href="/reconciliation" class="sidebar-link <%= pagePath.startsWith('/reconciliation') ? 'active' : '' %>" title="Data Reconciliation">
         <i class="bi bi-clipboard2-check"></i> <span>Reconciliation</span>

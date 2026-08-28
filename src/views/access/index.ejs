@@ -266,11 +266,11 @@
           <thead class="sticky-top"><tr>
             <th style="width:32px;"></th>
             <th>Workspace</th><th>Status</th><th>Capacity</th><th class="text-end">Items</th>
-            <th class="text-end">People &amp; apps</th><th>Roles</th><th style="width:40px;"></th>
+            <th class="text-end">People &amp; apps</th><th>Roles</th>
           </tr></thead>
           <tbody>
             <% if (!o.workspaces.length) { %>
-              <tr><td colspan="8" class="text-muted small py-3">This scan recorded no workspaces.</td></tr>
+              <tr><td colspan="7" class="text-muted small py-3">This scan recorded no workspaces.</td></tr>
             <% } %>
             <% o.workspaces.forEach(function(w, index) { %>
               <tr data-search="<%= (w.name || '').toLowerCase() %>" data-role="" data-type=""
@@ -285,6 +285,17 @@
                 </td>
                 <td class="small">
                   <a href="/workspaces/<%= w.workspaceId %>"><strong><%= w.name || w.workspaceId %></strong></a>
+                  <% if (w.personal && !w.personal.grantable) { %>
+                    <span class="text-muted ms-1" title="A personal workspace takes no members, so no role can be granted in it">
+                      <i class="bi bi-person-slash"></i>
+                    </span>
+                  <% } else { %>
+                    <button type="button" class="btn btn-sm btn-outline-primary p-0 px-1 ms-1"
+                            title="Grant a user or security group a role in this workspace"
+                            onclick="openRoleGrantModal('<%= w.workspaceId %>', <%- JSON.stringify(w.name || w.workspaceId) %>)">
+                      <i class="bi bi-person-plus"></i>
+                    </button>
+                  <% } %>
                   <% if (!w.usersReadable) { %>
                     <span class="badge bg-secondary ms-1" title="The scan could not read this workspace's access list">not readable</span>
                   <% } else if (w.counts.admin === 0) { %>
@@ -314,24 +325,11 @@
                   <% }) %>
                   <% if (w.counts.unknown) { %><span class="badge bg-light text-dark border"><%= w.counts.unknown %> unknown</span><% } %>
                 </td>
-                <td class="text-end">
-                  <% if (w.personal && !w.personal.grantable) { %>
-                    <span class="text-muted" title="A personal workspace takes no members, so no role can be granted in it">
-                      <i class="bi bi-slash-circle"></i>
-                    </span>
-                  <% } else { %>
-                    <a class="btn btn-sm btn-outline-primary p-0 px-1"
-                       href="/settings/access/roles?workspaceId=<%= w.workspaceId %>"
-                       title="Grant a user or security group a role in this workspace">
-                      <i class="bi bi-person-plus"></i>
-                    </a>
-                  <% } %>
-                </td>
               </tr>
               <% if (w.grants.length) { %>
                 <tr class="collapse" id="wsAccess-<%= index %>">
                   <td></td>
-                  <td colspan="7" class="p-0">
+                  <td colspan="6" class="p-0">
                     <table class="table table-sm mb-0" style="background: var(--color-surface-2);">
                       <tbody>
                         <% w.grants.forEach(function(g) { %>
@@ -423,7 +421,77 @@
   </div>
 </div>
 
+<!-- ── Granting a user or a group a role, without leaving the table ── -->
+<div class="modal fade" id="roleGrantModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">
+          <i class="bi bi-person-plus me-2"></i>Grant a role in <span id="roleGrantModalWorkspace">this workspace</span>
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <% if (!(servicePrincipals || []).length) { %>
+          <div class="alert alert-warning mb-0">
+            <i class="bi bi-exclamation-triangle me-2"></i>No service principal configured.
+            <a href="/settings">Add one in Settings</a> first.
+          </div>
+        <% } else { %>
+          <div class="row g-2 align-items-end mb-3">
+            <div class="col-md-6">
+              <label class="form-label small" for="modalRoleSpSelect">Acting as</label>
+              <select class="form-select form-select-sm" id="modalRoleSpSelect" onchange="onModalRoleSpChanged()">
+                <% servicePrincipals.forEach(function(sp) { %>
+                  <option value="<%= sp.id %>"><%= sp.name %> (<%= sp.tenant_id %>)</option>
+                <% }) %>
+              </select>
+            </div>
+            <div class="col-md-6">
+              <div class="form-text mb-0" id="roleGrantNote"></div>
+            </div>
+          </div>
+          <div class="alert alert-light border small">
+            <i class="bi bi-info-circle me-2"></i>The service principal must be a <strong>workspace Admin</strong> here:
+            the Fabric role APIs require it, and the list below is what settles whether it is.
+          </div>
+          <%- include('../partials/roleGrantPanel', { spSelectId: 'modalRoleSpSelect' }) %>
+        <% } %>
+      </div>
+      <div class="modal-footer">
+        <a href="/quality/security-groups" class="btn btn-sm btn-outline-primary me-auto">
+          <i class="bi bi-people me-1"></i>Which groups should exist
+        </a>
+        <a href="/settings/access/roles" class="btn btn-sm btn-outline-secondary">Open the full page</a>
+        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
+/**
+ * Opens the role panel on one workspace.
+ *
+ * A modal rather than a page, because the question it answers — "who should be in
+ * this one?" — is asked while reading the table, and losing the table to answer it
+ * means finding the row again afterwards.
+ */
+function openRoleGrantModal(workspaceId, workspaceName) {
+  var element = document.getElementById('roleGrantModal');
+  document.getElementById('roleGrantModalWorkspace').textContent = workspaceName || 'this workspace';
+  if (typeof roleGrantOpen === 'function') roleGrantOpen(workspaceId, workspaceName);
+  bootstrap.Modal.getOrCreateInstance(element).show();
+}
+
+function onModalRoleSpChanged() {
+  // A different principal has different rights here, so the answer on screen is
+  // no longer about the one selected.
+  if (typeof roleGrantWorkspace !== 'undefined' && roleGrantWorkspace) {
+    roleGrantOpen(roleGrantWorkspace.id, roleGrantWorkspace.name);
+  }
+}
+
 // ── Filtering ──
 // One filter drives all three tables: the same question asked three ways should
 // not need asking three times.

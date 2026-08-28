@@ -8,6 +8,7 @@ const sqlSource = require('../services/sqlSourceService');
 const { isEncryptionConfigured, encryptSecret } = require('../services/secretCryptoService');
 const analysisModel = require('../services/analysisModelRepository');
 const { HELP_TOPICS, PREREQUISITES } = require('../services/qualityGuideService');
+const securityGroups = require('../services/securityGroupGuideService');
 
 const SOURCE_KIND = { FABRIC: 'fabric-sql', EXTERNAL: 'external-sql' };
 
@@ -116,6 +117,40 @@ router.get('/', async (req, res) => {
   }
 });
 
+
+/**
+ * Which security groups a Fabric tenant should have.
+ *
+ * Granting a role is one page; deciding what to grant it to is this one. It sits
+ * in Quality because it is guidance rather than an operation — nothing here reads
+ * or writes the tenant, and the group plan it produces is a list to create in
+ * Entra ID.
+ */
+router.get('/security-groups', (req, res) => {
+  const plan = securityGroups.securityGroupPlan({
+    domain: req.query.domain,
+    prefix: req.query.prefix,
+    separator: req.query.separator,
+    environments: typeof req.query.environments === 'string'
+      ? req.query.environments.split(',').map(part => part.trim()).filter(Boolean)
+      : null,
+  });
+
+  view(res, 'quality/securityGroups', {
+    title: 'Security Groups', user: req.user,
+    principles: securityGroups.PRINCIPLES,
+    roleGroups: securityGroups.ROLE_GROUPS,
+    tenantGroups: securityGroups.TENANT_GROUPS,
+    antiPatterns: securityGroups.ANTI_PATTERNS,
+    defaults: {
+      prefix: securityGroups.DEFAULT_PREFIX,
+      separator: securityGroups.DEFAULT_SEPARATOR,
+      environments: securityGroups.DEFAULT_ENVIRONMENTS,
+    },
+    plan,
+    sourceUrl: 'https://qubexon-pl.github.io/fabricrolesassigment/',
+  });
+});
 
 router.get('/sources', async (req, res) => {
   const base = {
