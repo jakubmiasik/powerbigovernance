@@ -9,6 +9,12 @@ const { isEncryptionConfigured, encryptSecret } = require('../services/secretCry
 const analysisModel = require('../services/analysisModelRepository');
 const { HELP_TOPICS, PREREQUISITES } = require('../services/qualityGuideService');
 const securityGroups = require('../services/securityGroupGuideService');
+const sgMapping = require('../services/securityGroupMappingService');
+const sgRepo = require('../services/securityGroupRepository');
+const { ACCESS_LEVELS } = require('../services/workspaceAccessService');
+// Looked up on each call rather than destructured once, so a test can substitute
+// it — destructuring captures the function at load and the stub is ignored.
+const powerbi = require('../services/powerbiService');
 
 const SOURCE_KIND = { FABRIC: 'fabric-sql', EXTERNAL: 'external-sql' };
 
@@ -119,14 +125,16 @@ router.get('/', async (req, res) => {
 
 
 /**
- * Which security groups a Fabric tenant should have.
+ * Which security groups a Fabric tenant should have, who is in them, and whether
+ * the tenant agrees.
  *
- * Granting a role is one page; deciding what to grant it to is this one. It sits
- * in Quality because it is guidance rather than an operation — nothing here reads
- * or writes the tenant, and the group plan it produces is a list to create in
- * Entra ID.
+ * Two halves. The design half is guidance — nothing on it reads or writes the
+ * tenant, and the group plan it produces is a list to create in Entra ID. The
+ * mapping half is a record: people, the groups their stream and role put them in,
+ * the directory group each one really is, the workspaces it should hold a role in,
+ * and what the workspace actually says.
  */
-router.get('/security-groups', (req, res) => {
+router.get('/security-groups', async (req, res) => {
   const plan = securityGroups.securityGroupPlan({
     domain: req.query.domain,
     prefix: req.query.prefix,
@@ -136,7 +144,7 @@ router.get('/security-groups', (req, res) => {
       : null,
   });
 
-  view(res, 'quality/securityGroups', {
+  const base = {
     title: 'Security Groups', user: req.user,
     principles: securityGroups.PRINCIPLES,
     roleGroups: securityGroups.ROLE_GROUPS,
@@ -149,7 +157,320 @@ router.get('/security-groups', (req, res) => {
     },
     plan,
     sourceUrl: 'https://qubexon-pl.github.io/fabricrolesassigment/',
+    projectRoles: sgMapping.PROJECT_ROLES,
+    environments: sgMapping.ENVIRONMENTS,
+    fabricRoles: ACCESS_LEVELS.map(level => level.label),
+    rules: sgMapping.DEFAULT_RULES,
+    tab: req.query.tab === 'design' ? 'design' : 'mapping',
+  };
+
+  try {
+    const [{ assignments, groups }, servicePrincipals] = await Promise.all([
+      sgRepo.loadMapping(),
+      db.getServicePrincipals().catch(() => []),
+    ]);
+    view(res, 'quality/securityGroups', {
+      ...base,
+      assignments: decorateAssignments(assignments),
+      groups: decorateGroups(groups, assignments),
+      servicePrincipals,
+      error: null,
+    });
+  } catch (err) {
+    // The design half needs no database at all, so a database that is asleep or
+    // unmigrated must not take the whole page down with it.
+    view(res, 'quality/securityGroups', {
+      ...base, assignments: [], groups: [], servicePrincipals: [], error: err.message,
+    });
+  }
+});
+
+/**
+ * Each stored assignment with what the rules make of it: the groups it puts the
+ * person in, the role each of those should hold, and why.
+ *
+ * Derived on the way out rather than stored, so a change to the rules changes
+ * every row at once instead of leaving old rows contradicting the new rule.
+ */
+function decorateAssignments(assignments) {
+  return (assignments || []).map(assignment => {
+    const groups = sgMapping.groupsForAssignment(assignment, sgMapping.DEFAULT_RULES);
+    return {
+      ...assignment,
+      environments: sgMapping.normalizeEnvironments(assignment.environments),
+      groups: groups.map(group => group.name),
+      fabricRoles: groups.map(group => group.fabricRole.label + ' (' + group.environment + ')'),
+      justification: sgMapping.personJustification(assignment, sgMapping.DEFAULT_RULES),
+      groupJustification: groups.length
+        ? sgMapping.groupJustification(groups[0], sgMapping.DEFAULT_RULES)
+        : null,
+    };
   });
+}
+
+/**
+ * Joins the stored groups to the people the assignments put in them, and to the
+ * name and Fabric role the rules derive.
+ *
+ * Membership is computed here rather than stored: a person's groups follow from
+ * their stream, role and environments, so a stored copy would disagree with the
+ * assignment the moment either changed.
+ */
+function decorateGroups(groups, assignments) {
+  const computed = sgMapping.buildMapping(assignments || [], sgMapping.DEFAULT_RULES);
+  const byIdentity = new Map(computed.groups.map(group =>
+    [[group.stream, group.projectRole, group.environment].join('|'), group]));
+
+  return (groups || []).map(group => {
+    const derived = byIdentity.get([group.stream, group.projectRole, group.environment].join('|'));
+    return {
+      ...group,
+      suggestedName: sgMapping.groupName(group.stream, group.projectRole, group.environment, sgMapping.DEFAULT_RULES),
+      fabricRole: sgMapping.fabricRoleFor(group.stream, group.projectRole, group.environment, sgMapping.DEFAULT_RULES),
+      members: derived ? derived.members : [],
+      justification: sgMapping.groupJustification(group, sgMapping.DEFAULT_RULES),
+    };
+  });
+}
+
+/** Adds or updates one person's involvement in a stream. */
+router.post('/security-groups/assignments', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const result = await sgRepo.saveAssignment({
+      stream: body.stream,
+      projectRole: body.projectRole,
+      name: body.name,
+      email: body.email,
+      environments: Array.isArray(body.environments) ? body.environments : [],
+      note: body.note,
+    }, actorOf(req));
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+router.post('/security-groups/assignments/:id/delete', async (req, res) => {
+  try {
+    const result = await sgRepo.deleteAssignment(req.params.id);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * Imports a mapping CSV.
+ *
+ * The file is read in the browser and posted as text, so no upload handling is
+ * needed for what is a few kilobytes. Rows are saved one at a time and the ones
+ * that fail are named: an import that silently drops eleven of forty rows produces
+ * an access model that is wrong in a way nobody looks for.
+ */
+router.post('/security-groups/import', async (req, res) => {
+  try {
+    const parsed = sgMapping.parseMappingCsv((req.body || {}).csv || '');
+    if (parsed.error) return res.json({ success: false, message: parsed.error });
+
+    const actor = actorOf(req);
+    const failed = [];
+    let imported = 0;
+    for (const assignment of parsed.assignments) {
+      try {
+        await sgRepo.saveAssignment(assignment, actor);
+        imported += 1;
+      } catch (rowErr) {
+        failed.push({ name: assignment.name, reason: rowErr.message });
+      }
+    }
+
+    res.json({ success: true, imported, failed, skipped: parsed.skipped });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+router.get('/security-groups/export.csv', async (req, res) => {
+  try {
+    const assignments = await sgRepo.listAssignments();
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="fabric-security-mapping.csv"');
+    res.send(sgMapping.toMappingCsv(assignments, sgMapping.DEFAULT_RULES));
+  } catch (err) {
+    res.status(500).send('Could not export the mapping: ' + err.message);
+  }
+});
+
+/** Links a suggested group to the directory group that actually exists. */
+router.post('/security-groups/groups/:id/link', async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body.id) return res.json({ success: false, message: 'Pick a group from the directory first.' });
+    await sgRepo.linkEntraGroup(req.params.id, {
+      id: body.id, displayName: body.displayName, type: body.groupType || body.type,
+    }, actorOf(req));
+    res.json({ success: true });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+router.post('/security-groups/groups/:id/unlink', async (req, res) => {
+  try {
+    await sgRepo.unlinkEntraGroup(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/** Attaches a group to the workspaces it should hold a role in. */
+router.post('/security-groups/groups/:id/workspaces', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const workspaces = Array.isArray(body.workspaces) ? body.workspaces : [];
+    if (!workspaces.length) return res.json({ success: false, message: 'Select at least one workspace.' });
+
+    const actor = actorOf(req);
+    let attached = 0;
+    for (const workspace of workspaces) {
+      await sgRepo.attachWorkspace(req.params.id, {
+        id: workspace.id, name: workspace.name, intendedRole: body.intendedRole || workspace.intendedRole,
+      }, actor);
+      attached += 1;
+    }
+    res.json({ success: true, attached });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+router.post('/security-groups/attachments/:id/detach', async (req, res) => {
+  try {
+    await sgRepo.detachWorkspace(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/** The workspaces a group can be attached to, from the last completed scan. */
+router.get('/security-groups/workspaces', async (req, res) => {
+  try {
+    const runs = await db.getAnalysisRuns();
+    const run = (runs || []).find(candidate => candidate.status === 'completed');
+    if (!run) return res.json({ success: true, runId: null, workspaces: [] });
+
+    let rows = await analysisModel.listRunWorkspaces(run.id).catch(() => []);
+    if (!rows.length) {
+      // A run from before indexing existed still has its document, and attaching a
+      // workspace is planning — it should not need a re-scan.
+      const full = await db.getAnalysisRunById(run.id);
+      let parsed = null;
+      try { parsed = full && full.results_json ? JSON.parse(full.results_json) : null; } catch { parsed = null; }
+      rows = ((parsed && parsed.workspaces) || []).map(workspace => ({
+        workspace_id: workspace.id, name: workspace.name, state: workspace.state,
+      }));
+    }
+
+    res.json({
+      success: true,
+      runId: run.id,
+      workspaces: rows
+        .map(row => ({ id: row.workspace_id || row.id, name: row.name || '(unnamed)', state: row.state || null }))
+        .filter(workspace => workspace.id)
+        .sort((a, b) => String(a.name).localeCompare(String(b.name))),
+    });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * Asks each attached workspace whether the linked group is really in it.
+ *
+ * A mapping nobody checked against the tenant is a document, not a control. One
+ * call per workspace rather than one per attachment — a group is not the unit the
+ * API answers about — and the answers are kept apart: present, present with the
+ * wrong role, absent, never linked, or unreadable. The last two are not failures
+ * of the tenant and are not counted as such.
+ */
+router.post('/security-groups/verify', async (req, res) => {
+  try {
+    const groups = await sgRepo.listGroups();
+    const targets = [];
+    for (const group of groups) {
+      for (const attachment of group.workspaces) {
+        targets.push({ group, attachment });
+      }
+    }
+    if (!targets.length) {
+      return res.json({ success: true, results: [], summary: sgMapping.summarizeChecks([]), checkedAt: new Date().toISOString() });
+    }
+
+    const servicePrincipals = await db.getServicePrincipals();
+    if (!servicePrincipals.length) return res.json({ success: false, message: 'No service principal configured.' });
+    const wanted = Number.parseInt((req.body || {}).spId, 10);
+    const sp = (Number.isFinite(wanted) && servicePrincipals.find(candidate => Number(candidate.id) === wanted))
+      || servicePrincipals[0];
+
+    const pbi = powerbi.createPowerBIService(sp, {
+      keyVaultDelegatedToken: (req.session && req.session.keyVaultDelegatedToken && req.session.keyVaultDelegatedToken.token) || null,
+    });
+
+    // One read per workspace, cached across the groups attached to it. Reading the
+    // same workspace once per group turns a plan of forty rows into forty calls.
+    const roleCache = new Map();
+    async function rolesFor(workspaceId) {
+      if (roleCache.has(workspaceId)) return roleCache.get(workspaceId);
+      let value;
+      try {
+        value = await pbi.getRoleAssignments(workspaceId);
+      } catch (err) {
+        // Null, not an empty list: "could not read" and "nobody is in it" are
+        // opposite claims and only one of them is a finding.
+        value = null;
+        console.warn('[SecurityGroups] Could not read roles for', workspaceId, err.message);
+      }
+      roleCache.set(workspaceId, value);
+      return value;
+    }
+
+    const results = [];
+    for (const { group, attachment } of targets) {
+      const comparison = group.entraGroupId
+        ? sgMapping.compareAssignment(
+          { entraGroupId: group.entraGroupId, intendedRole: attachment.intendedRole },
+          await rolesFor(attachment.workspaceId))
+        : sgMapping.compareAssignment({ entraGroupId: null }, null);
+
+      results.push({
+        attachmentId: attachment.id,
+        groupId: group.id,
+        groupName: sgMapping.groupName(group.stream, group.projectRole, group.environment, sgMapping.DEFAULT_RULES),
+        entraGroupName: group.entraGroupName || null,
+        workspaceId: attachment.workspaceId,
+        workspaceName: attachment.workspaceName,
+        intendedRole: attachment.intendedRole,
+        ...comparison,
+      });
+    }
+
+    await sgRepo.recordChecks(results, actorOf(req)).catch(err =>
+      console.warn('[SecurityGroups] Could not record the check:', err.message));
+
+    res.json({
+      success: true,
+      checkedAt: new Date().toISOString(),
+      servicePrincipal: sp.name,
+      workspacesRead: roleCache.size,
+      results,
+      summary: sgMapping.summarizeChecks(results),
+    });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
 });
 
 router.get('/sources', async (req, res) => {

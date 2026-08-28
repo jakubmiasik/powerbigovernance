@@ -6,6 +6,7 @@ const { getConfig } = require('../config/settings');
 const { RECONCILIATION_MIGRATIONS } = require('./reconciliationSchema');
 const { MDM_MIGRATIONS } = require('./mdmSchema');
 const { ANALYSIS_MODEL_MIGRATIONS } = require('./analysisModelSchema');
+const { SECURITY_GROUP_MIGRATIONS } = require('./securityGroupSchema');
 const { encryptSecret, isEncryptionConfigured } = require('./secretCryptoService');
 
 const cfg = getConfig();
@@ -1396,6 +1397,10 @@ async function runMigrations() {
     }
     // Relational view of an analysis run, plus indexes for the newer predicates
     for (const migration of ANALYSIS_MODEL_MIGRATIONS) {
+      await runStatement(conn, migration.label, migration.sql);
+    }
+    // People, security groups and the workspaces they are attached to
+    for (const migration of SECURITY_GROUP_MIGRATIONS) {
       await runStatement(conn, migration.label, migration.sql);
     }
 
