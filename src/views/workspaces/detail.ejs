@@ -791,7 +791,7 @@ document.querySelectorAll('.item-type-badge').forEach(function(badge) {
 
 <!-- Role Management JS -->
 <script>
-var '<%= workspace.id %>' = '<%= workspace.id %>';
+var fabricWorkspaceId = '<%= workspace.id %>';
 var currentRoles = [];
 
 function roleBadgeColor(role) {
@@ -819,7 +819,7 @@ async function loadFabricRoles() {
   document.getElementById('fabricRolesTable').classList.add('d-none');
 
   try {
-    var resp = await fetch('/workspaces/' + '<%= workspace.id %>' + '/roles');
+    var resp = await fetch('/workspaces/' + fabricWorkspaceId + '/roles');
     var data = await resp.json();
     document.getElementById('fabricRolesLoading').classList.add('d-none');
     if (!data.success) {
@@ -902,7 +902,7 @@ async function searchEntra(query) {
   resultsEl.innerHTML = '<div class="list-group-item text-center py-2"><div class="spinner-border spinner-border-sm text-primary"></div></div>';
 
   try {
-    var resp = await fetch('/workspaces/' + '<%= workspace.id %>' + '/entra/search?q=' + encodeURIComponent(query) + '&type=' + type);
+    var resp = await fetch('/workspaces/' + fabricWorkspaceId + '/entra/search?q=' + encodeURIComponent(query) + '&type=' + type);
     var data = await resp.json();
     if (!data.success) {
       resultsEl.innerHTML = '';
@@ -974,7 +974,7 @@ async function submitAddRole() {
   showRoleStatus('Adding role assignment...');
 
   try {
-    var resp = await fetch('/workspaces/' + '<%= workspace.id %>' + '/roles', {
+    var resp = await fetch('/workspaces/' + fabricWorkspaceId + '/roles', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ principalId, principalType, role }),
@@ -1003,7 +1003,7 @@ async function submitUpdateRole() {
   showRoleStatus('Updating role...');
 
   try {
-    var resp = await fetch('/workspaces/' + '<%= workspace.id %>' + '/roles/' + id, {
+    var resp = await fetch('/workspaces/' + fabricWorkspaceId + '/roles/' + id, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ role }),
@@ -1033,7 +1033,7 @@ async function executeDeleteRole() {
   showRoleStatus('Removing role assignment for "' + pendingDeleteName + '"...');
 
   try {
-    var resp = await fetch('/workspaces/' + '<%= workspace.id %>' + '/roles/' + pendingDeleteId, { method: 'DELETE' });
+    var resp = await fetch('/workspaces/' + fabricWorkspaceId + '/roles/' + pendingDeleteId, { method: 'DELETE' });
     var data = await resp.json();
     if (!data.success) throw new Error(data.message);
     showRoleStatusResult(true, 'Role assignment removed');
@@ -1059,7 +1059,7 @@ async function calculateStorage() {
   document.getElementById('calcStorageBtn').disabled = true;
 
   try {
-    var resp = await fetch('/workspaces/' + '<%= workspace.id %>' + '/storage');
+    var resp = await fetch('/workspaces/' + fabricWorkspaceId + '/storage');
     var data = await resp.json();
     document.getElementById('storageLoading').classList.add('d-none');
     document.getElementById('calcStorageBtn').disabled = false;
