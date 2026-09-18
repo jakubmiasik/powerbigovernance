@@ -1167,6 +1167,98 @@ test('governance tenant settings read the snapshot stored with the selected run'
   }
 });
 
+test('User 360 entries carry the ids needed to link to their source', () => {
+  // Without ids the User 360 lists are dead text: there is nothing to build a
+  // workspace or item URL from.
+  const users = runMetrics.buildUser360([{
+    id: 'ws-1', name: 'Sales',
+    users: [{ name: 'Ann', email: 'ann@contoso.com', role: 'Admin' }],
+    items: [{ id: 'item-1', name: 'Revenue', type: 'Report', creator: { name: 'Ann', upn: 'ann@contoso.com' } }],
+  }]);
+
+  const ann = users.find(u => u.upn === 'ann@contoso.com');
+  assert.ok(ann, 'expected Ann in User 360');
+  assert.deepStrictEqual(ann.items[0], {
+    id: 'item-1', name: 'Revenue', type: 'Report', workspace: 'Sales', workspaceId: 'ws-1',
+  });
+  assert.strictEqual(ann.workspaces[0].id, 'ws-1');
+});
+
+test('creator filtering matches on UPN or display name and both creator shapes', () => {
+  const items = [
+    { name: 'Saved', creator: { name: 'Ann', upn: 'ann@contoso.com' } },
+    { name: 'Live', creatorPrincipal: { displayName: 'Bob', userDetails: { userPrincipalName: 'bob@contoso.com' } } },
+    { name: 'LegacyString', creator: 'Cara' },
+    { name: 'Orphan' },
+  ];
+
+  assert.deepStrictEqual(runMetrics.filterItemsByCreator(items, 'ann@contoso.com').map(i => i.name), ['Saved']);
+  // Items captured without a UPN must still be reachable by display name.
+  assert.deepStrictEqual(runMetrics.filterItemsByCreator(items, 'Ann').map(i => i.name), ['Saved']);
+  assert.deepStrictEqual(runMetrics.filterItemsByCreator(items, 'bob@contoso.com').map(i => i.name), ['Live']);
+  assert.deepStrictEqual(runMetrics.filterItemsByCreator(items, 'Cara').map(i => i.name), ['LegacyString']);
+  assert.deepStrictEqual(runMetrics.filterItemsByCreator(items, 'nobody@contoso.com'), []);
+  // No filter must never hide anything, including items with no creator at all.
+  assert.strictEqual(runMetrics.filterItemsByCreator(items, null).length, 4);
+});
+
+test('the workspace page narrows to one creator when asked and shows everything otherwise', async () => {
+  const db = require('../src/services/databaseService');
+  const originalGet = db.getAnalysisRunById;
+  db.getAnalysisRunById = async () => ({
+    id: 3,
+    started_at: '2024-05-01T10:00:00.000Z',
+    results_json: JSON.stringify({
+      workspaces: [{
+        id: 'ws-1', name: 'Sales', users: [],
+        items: [
+          { id: 'item-1', name: 'AnnReport', type: 'Report', creator: { name: 'Ann', upn: 'ann@contoso.com' } },
+          { id: 'item-2', name: 'BobReport', type: 'Report', creator: { name: 'Bob', upn: 'bob@contoso.com' } },
+        ],
+      }],
+    }),
+  });
+
+  delete require.cache[require.resolve('../src/routes/workspaces')];
+  const express = require('express');
+  const testApp = express();
+  testApp.use((req, res, next) => {
+    res.locals.globalRun = { id: 3, sp_id: 1 };
+    // Normally set by the app's auth middleware; the header partial needs it.
+    res.locals.currentUser = null;
+    res.locals.pagePath = req.path;
+    next();
+  });
+  testApp.set('view engine', 'ejs');
+  testApp.set('views', require('node:path').join(__dirname, '..', 'src', 'views'));
+  testApp.use('/workspaces', require('../src/routes/workspaces'));
+  const server = testApp.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+
+  const get = (path) => new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port: server.address().port, path, headers: { host: '127.0.0.1' } }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve(body));
+    }).on('error', reject);
+  });
+
+  try {
+    const filtered = await get('/workspaces/ws-1?creator=' + encodeURIComponent('ann@contoso.com'));
+    assert.ok(filtered.includes('AnnReport'), 'the requested creator\'s item should be listed');
+    assert.ok(!filtered.includes('BobReport'), 'another creator\'s item must be filtered out');
+    assert.ok(filtered.includes('Showing only items created by'), 'the filter must be visible and clearable');
+
+    const unfiltered = await get('/workspaces/ws-1');
+    assert.ok(unfiltered.includes('AnnReport') && unfiltered.includes('BobReport'));
+    assert.ok(!unfiltered.includes('Showing only items created by'));
+  } finally {
+    server.close();
+    db.getAnalysisRunById = originalGet;
+    delete require.cache[require.resolve('../src/routes/workspaces')];
+  }
+});
+
 test('the workspace detail view renders inline scripts that actually parse', async () => {
   // A broken declaration in one inline script block kills every function defined
   // in it, so the Security tab's "Refresh from Fabric API" button silently does
