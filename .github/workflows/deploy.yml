@@ -15,8 +15,30 @@ env:
   NODE_VERSION: '20.x'
 
 jobs:
+  # Nothing validated the code before it reached App Service, so a broken view or
+  # route could only be discovered by using the deployed site. This runs in its own
+  # job so node_modules never ends up in the deployed package.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run checks
+        run: npm run check
+
   build-and-deploy:
     runs-on: ubuntu-latest
+    needs: check
 
     steps:
       - name: Checkout code
@@ -29,8 +51,44 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # OneDeploy intermittently answers a bare 400 when the site is busy, for
+      # example while a previous deployment is still settling. That failed the
+      # whole pipeline even though an unchanged re-run succeeded, so retry once
+      # before giving up.
       - name: Deploy to Azure App Service
+        id: deploy
+        continue-on-error: true
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           package: .
+
+      - name: Wait before retrying deployment
+        if: steps.deploy.outcome == 'failure'
+        run: sleep 60
+
+      - name: Retry deployment
+        if: steps.deploy.outcome == 'failure'
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          package: .
+
+      # A successful upload does not mean the site came back up, so confirm the
+      # running app reports itself healthy before the job is allowed to pass.
+      - name: Verify deployment health
+        run: |
+          for attempt in $(seq 1 10); do
+            status=$(curl -s -o /tmp/health.json -w '%{http_code}' \
+              "https://${AZURE_WEBAPP_NAME}.azurewebsites.net/health" || true)
+            if [ "$status" = "200" ]; then
+              echo "Health check passed:"
+              cat /tmp/health.json
+              exit 0
+            fi
+            echo "Attempt $attempt: health check returned ${status:-no response}; retrying in 15s"
+            sleep 15
+          done
+          echo "The app did not report healthy after deployment."
+          cat /tmp/health.json 2>/dev/null || true
+          exit 1
