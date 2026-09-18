@@ -1196,14 +1196,24 @@ test('User 360 opens artifact details in place instead of navigating away', asyn
     users: [{
       name: 'Ann', upn: 'ann@contoso.com',
       createdItems: [
-        { id: 'item-1', name: 'Revenue', type: 'Report', workspace: 'Sales', workspaceId: 'ws-1' },
+        { id: 'item-1', name: 'Revenue "2026" Report', type: 'Report', workspace: 'Sales', workspaceId: 'ws-1' },
         { name: 'No Id', type: 'Report', workspace: 'Sales', workspaceId: 'ws-1' },
       ],
       workspaces: [{ id: 'ws-1', workspace: 'Sales', role: 'Admin' }],
     }],
   });
 
-  assert.match(html, /showItemDetails\('ws-1', 'item-1', "Revenue", "Report"\)/);
+  // Binding must go through data attributes: an artifact name containing a quote
+  // would end an inline onclick early and silently kill the click.
+  assert.match(html, /class="[^"]*js-item-details"[\s\S]*?data-workspace-id="ws-1"/);
+  assert.match(html, /data-item-id="item-1"/);
+  assert.match(html, /data-item-name="Revenue &#34;2026&#34; Report"/);
+  assert.match(html, /data-item-type="Report"/);
+  assert.ok(
+    !/onclick="showItemDetails/.test(html),
+    'the handler must not be inlined into an attribute',
+  );
+  assert.match(html, /\.js-item-details/, 'a delegated click handler must be wired up');
   assert.ok(html.includes('id="itemDetailsModal"'), 'the shared details modal must be on the page');
   assert.ok(
     !/href="\/workspaces\/ws-1[^"]*item=/.test(html),

@@ -129,9 +129,12 @@
                                   <div>
                                     <% if (canShowItemDetails) { %>
                                       <button type="button"
-                                              class="btn btn-link p-0 border-0 align-baseline small fw-bold text-decoration-none"
+                                              class="btn btn-link p-0 border-0 align-baseline small fw-bold text-decoration-none js-item-details"
                                               title="Show item details"
-                                              onclick="showItemDetails('<%= item.workspaceId %>', '<%= item.id %>', <%- JSON.stringify(item.name || 'Unnamed') %>, <%- JSON.stringify(item.type || '') %>)">
+                                              data-workspace-id="<%= item.workspaceId %>"
+                                              data-item-id="<%= item.id %>"
+                                              data-item-name="<%= item.name || 'Unnamed' %>"
+                                              data-item-type="<%= item.type || '' %>">
                                         <%= item.name || 'Unnamed' %>
                                       </button>
                                     <% } else { %>
@@ -195,6 +198,20 @@
 <%- include('../partials/item-details') %>
 
 <script>
+// Names and types are carried as data attributes and bound here: inlining them
+// into an onclick breaks on any artifact name containing a quote.
+document.addEventListener('click', function(event) {
+  var btn = event.target.closest('.js-item-details');
+  if (!btn) return;
+  event.preventDefault();
+  showItemDetails(
+    btn.getAttribute('data-workspace-id'),
+    btn.getAttribute('data-item-id'),
+    btn.getAttribute('data-item-name'),
+    btn.getAttribute('data-item-type')
+  );
+});
+
 function filterUserTab(input, tabId) {
   var filter = (input.value || '').toLowerCase();
   document.querySelectorAll('#' + tabId + '-table tbody .user-summary-row').forEach(function(row) {
