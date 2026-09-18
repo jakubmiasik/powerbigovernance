@@ -1184,6 +1184,37 @@ test('User 360 entries carry the ids needed to link to their source', () => {
   assert.strictEqual(ann.workspaces[0].id, 'ws-1');
 });
 
+test('User 360 opens artifact details in place instead of navigating away', async () => {
+  const ejs = require('ejs');
+  // Clicking an artifact should answer "what is this item?" without losing the
+  // user's place in the User 360 list.
+  const html = await ejs.renderFile('src/views/governance/users.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T', email: 't@example.com' },
+    currentPath: '/governance/users', pagePath: '/governance/users', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'User 360',
+    run: { id: 4 }, totalUsers: 1,
+    users: [{
+      name: 'Ann', upn: 'ann@contoso.com',
+      createdItems: [
+        { id: 'item-1', name: 'Revenue', type: 'Report', workspace: 'Sales', workspaceId: 'ws-1' },
+        { name: 'No Id', type: 'Report', workspace: 'Sales', workspaceId: 'ws-1' },
+      ],
+      workspaces: [{ id: 'ws-1', workspace: 'Sales', role: 'Admin' }],
+    }],
+  });
+
+  assert.match(html, /showItemDetails\('ws-1', 'item-1', "Revenue", "Report"\)/);
+  assert.ok(html.includes('id="itemDetailsModal"'), 'the shared details modal must be on the page');
+  assert.ok(
+    !/href="\/workspaces\/ws-1[^"]*item=/.test(html),
+    'the artifact name must not navigate to the workspace page',
+  );
+  // The workspace name is still a link; only the artifact changed.
+  assert.match(html, /href="\/workspaces\/ws-1\?creator=/);
+  // An item without an id has nothing to fetch, so it stays plain text.
+  assert.match(html, /<strong class="small">No Id<\/strong>/);
+});
+
 test('creator filtering matches on UPN or display name and both creator shapes', () => {
   const items = [
     { name: 'Saved', creator: { name: 'Ann', upn: 'ann@contoso.com' } },

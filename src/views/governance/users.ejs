@@ -120,30 +120,20 @@
                             <% userItems.forEach(function(item) { %>
                               <%
                                 var creatorKey = user.upn || user.name || '';
-                                var itemHref = null;
-                                if (item.workspaceId) {
-                                  var itemType = (item.type || '').toLowerCase();
-                                  if (itemType === 'dataset' || itemType === 'semanticmodel') {
-                                    itemHref = '/workspaces/' + item.workspaceId + '/datasets/' + item.id;
-                                  } else if (itemType === 'dashboard') {
-                                    itemHref = '/workspaces/' + item.workspaceId + '/dashboards/' + item.id;
-                                  } else {
-                                    itemHref = '/workspaces/' + item.workspaceId
-                                      + '?creator=' + encodeURIComponent(creatorKey)
-                                      + (item.id ? '&item=' + encodeURIComponent(item.id) : '');
-                                  }
-                                  if (!item.id && (itemType === 'dataset' || itemType === 'semanticmodel' || itemType === 'dashboard')) {
-                                    itemHref = '/workspaces/' + item.workspaceId + '?creator=' + encodeURIComponent(creatorKey);
-                                  }
-                                }
+                                // The item name opens the shared details modal in place; only the
+                                // workspace name navigates away.
+                                var canShowItemDetails = !!(item.workspaceId && item.id);
                               %>
                               <div class="list-group-item py-1">
                                 <div class="d-flex justify-content-between flex-wrap gap-1">
                                   <div>
-                                    <% if (itemHref) { %>
-                                      <a href="<%= itemHref %>" class="small fw-bold text-decoration-none" title="Open item details">
+                                    <% if (canShowItemDetails) { %>
+                                      <button type="button"
+                                              class="btn btn-link p-0 border-0 align-baseline small fw-bold text-decoration-none"
+                                              title="Show item details"
+                                              onclick="showItemDetails('<%= item.workspaceId %>', '<%= item.id %>', <%- JSON.stringify(item.name || 'Unnamed') %>, <%- JSON.stringify(item.type || '') %>)">
                                         <%= item.name || 'Unnamed' %>
-                                      </a>
+                                      </button>
                                     <% } else { %>
                                       <strong class="small"><%= item.name || 'Unnamed' %></strong>
                                     <% } %>
@@ -201,6 +191,8 @@
     </div>
   <% }) %>
 </div>
+
+<%- include('../partials/item-details') %>
 
 <script>
 function filterUserTab(input, tabId) {
