@@ -41,7 +41,7 @@ function buildUser360(workspaces) {
 
   function ensureUser(key, name, upn) {
     if (!userMap.has(key)) {
-      userMap.set(key, { name: name || upn || 'Unknown', upn: upn || '', items: [], workspaces: [], workspaceKeys: new Set() });
+      userMap.set(key, { key, name: name || upn || 'Unknown', upn: upn || '', items: [], workspaces: [], workspaceKeys: new Set() });
     }
     return userMap.get(key);
   }
@@ -54,7 +54,9 @@ function buildUser360(workspaces) {
       const workspaceKey = workspaceName + '::' + (workspaceUser.role || '');
       if (!user.workspaceKeys.has(workspaceKey)) {
         user.workspaceKeys.add(workspaceKey);
-        user.workspaces.push({ name: workspaceName, role: workspaceUser.role || 'Unknown' });
+        // The workspace id lets the UI link straight through to the workspace,
+        // filtered to what this user owns there.
+        user.workspaces.push({ id: workspace.id || null, name: workspaceName, role: workspaceUser.role || 'Unknown' });
       }
     }
 
@@ -64,13 +66,39 @@ function buildUser360(workspaces) {
       if (!creatorName && !creatorUpn) continue;
       const userKey = (creatorUpn || creatorName).toLowerCase();
       const user = ensureUser(userKey, creatorName, creatorUpn);
-      user.items.push({ name: item.name || 'Unnamed', type: item.type || '-', workspace: workspaceName });
+      user.items.push({
+        id: item.id || null,
+        name: item.name || 'Unnamed',
+        type: item.type || '-',
+        workspace: workspaceName,
+        workspaceId: workspace.id || null,
+      });
     }
   }
 
   return Array.from(userMap.values())
     .map(user => { delete user.workspaceKeys; return user; })
     .sort((a, b) => (a.name || a.upn || '').localeCompare(b.name || b.upn || ''));
+}
+
+// A creator matches when the request names either their UPN or their display name,
+// so a User 360 link works even for items whose creator has no UPN recorded.
+function itemMatchesCreator(item, creatorKey) {
+  const wanted = (creatorKey || '').trim().toLowerCase();
+  if (!wanted) return true;
+  const creator = item.creator || {};
+  const upn = typeof creator === 'string' ? '' : (creator.upn || '');
+  const name = typeof creator === 'string' ? creator : (creator.name || '');
+  const principal = item.creatorPrincipal || {};
+  const principalUpn = principal.userDetails?.userPrincipalName || '';
+  const principalName = principal.displayName || '';
+  return [upn, name, principalUpn, principalName]
+    .some(value => (value || '').trim().toLowerCase() === wanted);
+}
+
+function filterItemsByCreator(items, creatorKey) {
+  if (!creatorKey) return items || [];
+  return (items || []).filter(item => itemMatchesCreator(item, creatorKey));
 }
 
 function toCount(value) {
@@ -488,6 +516,8 @@ function diffRunDetails(fromResults, toResults, { itemSampleLimit = 500 } = {}) 
 module.exports = {
   METRIC_DEFS,
   buildUser360,
+  itemMatchesCreator,
+  filterItemsByCreator,
   summarizeTenantSettings,
   computeRunTotals,
   diffTotals,

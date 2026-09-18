@@ -118,11 +118,44 @@
                         <% if (userItems.length) { %>
                           <div class="list-group list-group-flush border rounded" style="max-height: 300px; overflow-y: auto;">
                             <% userItems.forEach(function(item) { %>
+                              <%
+                                var creatorKey = user.upn || user.name || '';
+                                var itemHref = null;
+                                if (item.workspaceId) {
+                                  var itemType = (item.type || '').toLowerCase();
+                                  if (itemType === 'dataset' || itemType === 'semanticmodel') {
+                                    itemHref = '/workspaces/' + item.workspaceId + '/datasets/' + item.id;
+                                  } else if (itemType === 'dashboard') {
+                                    itemHref = '/workspaces/' + item.workspaceId + '/dashboards/' + item.id;
+                                  } else {
+                                    itemHref = '/workspaces/' + item.workspaceId
+                                      + '?creator=' + encodeURIComponent(creatorKey)
+                                      + (item.id ? '&item=' + encodeURIComponent(item.id) : '');
+                                  }
+                                  if (!item.id && (itemType === 'dataset' || itemType === 'semanticmodel' || itemType === 'dashboard')) {
+                                    itemHref = '/workspaces/' + item.workspaceId + '?creator=' + encodeURIComponent(creatorKey);
+                                  }
+                                }
+                              %>
                               <div class="list-group-item py-1">
                                 <div class="d-flex justify-content-between flex-wrap gap-1">
                                   <div>
-                                    <strong class="small"><%= item.name || 'Unnamed' %></strong>
-                                    <span class="text-muted small ms-1"><%= item.workspace || '' %></span>
+                                    <% if (itemHref) { %>
+                                      <a href="<%= itemHref %>" class="small fw-bold text-decoration-none" title="Open item details">
+                                        <%= item.name || 'Unnamed' %>
+                                      </a>
+                                    <% } else { %>
+                                      <strong class="small"><%= item.name || 'Unnamed' %></strong>
+                                    <% } %>
+                                    <% if (item.workspaceId) { %>
+                                      <a class="text-muted small ms-1 text-decoration-none"
+                                         href="/workspaces/<%= item.workspaceId %>?creator=<%= encodeURIComponent(creatorKey) %>"
+                                         title="Open this workspace filtered to this user's items">
+                                        <%= item.workspace || '' %>
+                                      </a>
+                                    <% } else { %>
+                                      <span class="text-muted small ms-1"><%= item.workspace || '' %></span>
+                                    <% } %>
                                   </div>
                                   <span class="badge bg-secondary"><%= item.type || '-' %></span>
                                 </div>
@@ -138,8 +171,17 @@
                         <% if (userWs.length) { %>
                           <div class="list-group list-group-flush border rounded" style="max-height: 300px; overflow-y: auto;">
                             <% userWs.forEach(function(wa) { %>
+                              <% var waId = wa.id || wa.workspaceId || null; var waName = wa.workspace || wa.name || '-'; %>
                               <div class="list-group-item d-flex justify-content-between align-items-center py-1 gap-2">
-                                <span class="small"><%= wa.workspace || wa.name || '-' %></span>
+                                <% if (waId) { %>
+                                  <a class="small text-decoration-none"
+                                     href="/workspaces/<%= waId %>?creator=<%= encodeURIComponent(user.upn || user.name || '') %>"
+                                     title="Open this workspace filtered to this user's items">
+                                    <%= waName %>
+                                  </a>
+                                <% } else { %>
+                                  <span class="small"><%= waName %></span>
+                                <% } %>
                                 <span class="badge bg-<%= wa.role === 'Admin' ? 'danger' : wa.role === 'Member' ? 'primary' : wa.role === 'Contributor' ? 'success' : 'secondary' %>"><%= wa.role || '?' %></span>
                               </div>
                             <% }) %>

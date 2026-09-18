@@ -73,6 +73,9 @@
   ].filter(function(card) { return card.always || card.count > 0; });
   var hasFabricItems = dataflows.length + lakehouses.length + notebooks.length + pipelines.length + warehouses.length + others.length > 0;
   var workspaceName = workspace.name || 'Workspace Details';
+  var activeCreatorFilter = typeof creatorFilter !== 'undefined' ? creatorFilter : null;
+  var focusedItemId = typeof focusItemId !== 'undefined' ? focusItemId : null;
+  var itemsBeforeFilter = typeof totalItemCount !== 'undefined' ? totalItemCount : items.length;
 %>
 <nav aria-label="breadcrumb" class="mb-3">
   <ol class="breadcrumb">
@@ -113,6 +116,25 @@
   </div>
   <a href="/workspaces" class="btn btn-outline-secondary" onclick="goBackOr('/workspaces'); return false;"><i class="bi bi-arrow-left me-1"></i>Back</a>
 </div>
+
+<% if (activeCreatorFilter) { %>
+  <div class="alert alert-info d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+      <i class="bi bi-funnel-fill me-2"></i>
+      Showing only items created by <strong><%= activeCreatorFilter %></strong> —
+      <%= items.length %> of <%= itemsBeforeFilter %> item<%= itemsBeforeFilter === 1 ? '' : 's' %> in this workspace.
+      <% if (!items.length) { %>
+        <div class="small mt-1">
+          No items here record that user as their creator. Creator information is only
+          available for items captured with creator metadata.
+        </div>
+      <% } %>
+    </div>
+    <a href="/workspaces/<%= workspace.id %>" class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-x-lg me-1"></i>Show all items
+    </a>
+  </div>
+<% } %>
 
 <div class="row g-3 mb-4">
   <% summaryCards.forEach(function(card) { %>
@@ -1261,4 +1283,27 @@ function copyNameSuggestion(button, name) {
 </script>
 
 <%- include('../partials/item-details') %>
+<% if (focusedItemId) { %>
+<script>
+// Arriving from a User 360 item link: open that item's details straight away so
+// the click lands on the thing that was clicked, not just its workspace.
+(function openFocusedItem() {
+  var focusId = '<%= focusedItemId %>';
+  function open() {
+    var buttons = document.querySelectorAll('[onclick*="showItemDetails"]');
+    for (var i = 0; i < buttons.length; i++) {
+      if ((buttons[i].getAttribute('onclick') || '').indexOf(focusId) !== -1) {
+        buttons[i].click();
+        return;
+      }
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', open);
+  } else {
+    open();
+  }
+})();
+</script>
+<% } %>
 <%- include('../partials/footer') %>

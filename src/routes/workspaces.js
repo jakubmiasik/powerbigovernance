@@ -10,6 +10,7 @@ const { deleteWorkspaces } = require('../services/workspaceDeletionService');
 const { getDelegatedAuthUrl } = require('../services/authService');
 const { explainError } = require('../services/httpErrorService');
 const { buildWorkspaceAssignments, lookupAssignment } = require('../services/deploymentPipelineService');
+const { filterItemsByCreator } = require('../services/runMetricsService');
 const axios = require('axios');
 
 // Attach a plain-language explanation to an error response so the UI can tell the
@@ -279,6 +280,10 @@ router.get('/grant-auth', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const workspaceId = req.params.id;
+    // Arriving from User 360: show only what this user created here, and open the
+    // named item straight away, so the link answers the question that was clicked.
+    const creatorFilter = (req.query.creator || '').trim() || null;
+    const focusItemId = (req.query.item || '').trim() || null;
 
     // Use saved analysis data — from the run named in ?runId= when there is one
     const { run: sourceRun, explicit } = await resolveRun(req, res);
@@ -286,7 +291,9 @@ router.get('/:id', async (req, res) => {
     if (savedWorkspaces) {
       const savedWs = savedWorkspaces.find(w => w.id === workspaceId);
       if (savedWs) {
-        const categorized = categorizeItems(savedWs.items || []);
+        const allItems = savedWs.items || [];
+        const visibleItems = filterItemsByCreator(allItems, creatorFilter);
+        const categorized = categorizeItems(visibleItems);
         const convention = await loadNamingConvention();
         // Only computed for a saved run: the live fallback below has the item list
         // but not the run's context, and a half-checked workspace is worse than an
@@ -294,13 +301,16 @@ router.get('/:id', async (req, res) => {
         const naming = convention.enabled ? checkWorkspace(savedWs, convention) : null;
         return res.render('workspaces/detail', {
           title: savedWs.name || 'Workspace', user: req.user,
-          workspace: savedWs, items: savedWs.items || [], ...categorized,
+          workspace: savedWs, items: visibleItems, ...categorized,
           users: savedWs.users || [],
           sourceRun,
           lockRunSelector: explicit,
           lockedRun: explicit ? sourceRun : null,
           naming,
           namingPattern: naming ? describeConvention(convention) : null,
+          creatorFilter,
+          focusItemId,
+          totalItemCount: allItems.length,
         });
       }
     }
@@ -312,7 +322,8 @@ router.get('/:id', async (req, res) => {
       pbi.getItemsByWorkspace(workspaceId),
       pbi.getWorkspaceUsers(workspaceId),
     ]);
-    const categorized = categorizeItems(items);
+    const visibleItems = filterItemsByCreator(items, creatorFilter);
+    const categorized = categorizeItems(visibleItems);
     const wsName = workspace.displayName || workspace.name || 'Workspace';
 
     // Best effort: without a saved run there is no cached pipeline map, so ask the
@@ -325,8 +336,10 @@ router.get('/:id', async (req, res) => {
 
     res.render('workspaces/detail', {
       title: wsName, user: req.user,
-      workspace: { ...workspace, name: wsName, deploymentPipeline }, items, ...categorized, users,
+      workspace: { ...workspace, name: wsName, deploymentPipeline },
+      items: visibleItems, ...categorized, users,
       naming: null, namingPattern: null,
+      creatorFilter, focusItemId, totalItemCount: items.length,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });
