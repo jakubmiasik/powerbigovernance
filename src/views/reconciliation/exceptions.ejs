@@ -66,6 +66,29 @@
         </select>
       </div>
       <div class="col-auto">
+        <label class="form-label small" for="businessAreaFilter">Business area</label>
+        <select class="form-select form-select-sm" id="businessAreaFilter" name="businessArea">
+          <option value="">Any</option>
+          <%
+            // Offered from the rules themselves so the list always matches what is
+            // actually in use, including the placeholder the coverage panel links to.
+            var areaOptions = [];
+            (rules || []).forEach(function(rule) {
+              var area = (rule.business_area || '').trim();
+              var label = area || '(unassigned)';
+              if (areaOptions.indexOf(label) === -1) areaOptions.push(label);
+            });
+            areaOptions.sort(function(a, b) { return a.localeCompare(b); });
+            if (filters.businessArea && areaOptions.indexOf(filters.businessArea) === -1) {
+              areaOptions.push(filters.businessArea);
+            }
+          %>
+          <% areaOptions.forEach(function(area) { %>
+            <option value="<%= area %>" <%= filters.businessArea === area ? 'selected' : '' %>><%= area %></option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-auto">
         <div class="form-check">
           <input class="form-check-input" type="checkbox" id="allFilter" name="all" value="1" <%= filters.all ? 'checked' : '' %>>
           <label class="form-check-label small" for="allFilter">Include closed</label>
@@ -207,6 +230,7 @@ var FILTER_QUERY = <%- JSON.stringify({
   outcome: filters.outcome || '',
   ruleId: filters.ruleId || '',
   ruleGroup: filters.ruleGroup || '',
+  businessArea: filters.businessArea || '',
   all: filters.all ? '1' : ''
 }) %>;
 
@@ -228,7 +252,7 @@ function toggleAllExceptions(checked) {
 // The bar is shown once there is something to act on: rows ticked, or a filter
 // narrow enough for the whole-set option to be meaningful.
 function hasNarrowingFilter() {
-  return ['status', 'severity', 'outcome', 'ruleId', 'ruleGroup'].some(function(key) { return FILTER_QUERY[key]; });
+  return ['status', 'severity', 'outcome', 'ruleId', 'ruleGroup', 'businessArea'].some(function(key) { return FILTER_QUERY[key]; });
 }
 
 function updateBulkBar() {
