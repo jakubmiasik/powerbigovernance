@@ -11,6 +11,14 @@ const {
 
 const { TYPES } = _sql;
 
+// Rules and exceptions may carry no business area. Reporting them under an explicit
+// placeholder keeps them countable and clickable instead of quietly dropping them.
+const UNASSIGNED_BUSINESS_AREA = '(unassigned)';
+// Repeated in several aggregates, so the placeholder and the trimming stay
+// identical everywhere a business area is grouped or filtered.
+const BUSINESS_AREA_EXPR = (alias = '') =>
+  `ISNULL(NULLIF(LTRIM(RTRIM(${alias}business_area)), ''), '${UNASSIGNED_BUSINESS_AREA}')`;
+
 // Looked up on each call rather than destructured once, so a test can substitute
 // the SQL primitives. That matters here: a tedious connection carries one request
 // at a time, and issuing two together fails in a way that is easy to swallow and
@@ -800,6 +808,16 @@ function exceptionFilterClause(filters = {}) {
   if (filters.outcome) { clauses.push('outcome=@outcome'); params.push(str('outcome', filters.outcome)); }
   if (filters.ruleId) { clauses.push('rule_id=@rule'); params.push(int('rule', filters.ruleId)); }
   if (filters.ruleGroup) { clauses.push('rule_group=@group'); params.push(str('group', filters.ruleGroup)); }
+  if (filters.businessArea) {
+    // The coverage panel reports rules with no business area under a placeholder,
+    // so that line has to filter for the absence rather than for the literal text.
+    if (filters.businessArea === UNASSIGNED_BUSINESS_AREA) {
+      clauses.push("(business_area IS NULL OR LTRIM(RTRIM(business_area))='')");
+    } else {
+      clauses.push('business_area=@area');
+      params.push(str('area', filters.businessArea));
+    }
+  }
   if (filters.owner) { clauses.push('owner=@owner'); params.push(str('owner', filters.owner)); }
   if (filters.runId) {
     // What this run actually found, from the findings it recorded — not
@@ -1504,6 +1522,36 @@ async function getDashboardData({ runId = null } = {}) {
         SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active
       FROM recon_rules GROUP BY rule_group`);
 
+    // The same coverage split one level further, by the business area each rule
+    // belongs to. A group that looks well covered in total can still leave a whole
+    // business area unchecked, which the group-level count alone hides.
+    const rulesByGroupArea = await safe('rules by group and business area', `
+      SELECT ISNULL(rule_group, 'ungrouped') AS rule_group,
+        ${BUSINESS_AREA_EXPR()} AS business_area,
+        COUNT(*) AS total,
+        SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active
+      FROM recon_rules
+      GROUP BY rule_group, ${BUSINESS_AREA_EXPR()}`);
+
+    // Exceptions split the same way, so each business-area line can show what it is
+    // actually finding rather than only how many rules point at it.
+    const byGroupArea = scoped
+      ? await safe('run findings by group and business area', `
+          SELECT ISNULL(e.rule_group, 'ungrouped') AS rule_group,
+            ${BUSINESS_AREA_EXPR('e.')} AS business_area,
+            COUNT(*) AS total,
+            SUM(CASE WHEN e.severity='high' THEN 1 ELSE 0 END) AS high
+          FROM recon_run_findings f JOIN recon_exceptions e ON e.id = f.exception_id
+          WHERE f.run_id=@run
+          GROUP BY e.rule_group, ${BUSINESS_AREA_EXPR('e.')}`, runParam())
+      : await safe('open exceptions by group and business area', `
+          SELECT ISNULL(rule_group, 'ungrouped') AS rule_group,
+            ${BUSINESS_AREA_EXPR()} AS business_area,
+            COUNT(*) AS total,
+            SUM(CASE WHEN severity='high' THEN 1 ELSE 0 END) AS high
+          FROM recon_exceptions WHERE status NOT IN ('resolved','accepted')
+          GROUP BY rule_group, ${BUSINESS_AREA_EXPR()}`);
+
     const recentRuns = await safe('recent runs', 'SELECT TOP 15 * FROM recon_runs ORDER BY started_at DESC');
 
     // Ageing buckets make "how long has this been ignored" visible at a glance.
@@ -1521,7 +1569,7 @@ async function getDashboardData({ runId = null } = {}) {
 
     return {
       rules, exceptionsByStatus, exceptionsByOutcome, exceptionsBySeverity,
-      byRule, byGroup, rulesByGroup,
+      byRule, byGroup, rulesByGroup, byGroupArea, rulesByGroupArea,
       recentRuns, byOwner, ageing: ageing[0] || { week1: 0, month1: 0, older: 0 },
       scopedRun: run,
       scoped,
@@ -1531,6 +1579,7 @@ async function getDashboardData({ runId = null } = {}) {
 }
 
 module.exports = {
+  UNASSIGNED_BUSINESS_AREA,
   listSources, getSourceById, saveSource, saveSourceSchema, deleteSource,
   listRules, getRuleById, createRule, updateRule, setRuleStatus, deleteRule, getRuleVersions,
   setRuleStatusAndOwner, batchUpdateRules, listOwners,

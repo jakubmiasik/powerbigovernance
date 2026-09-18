@@ -205,6 +205,33 @@
   var groupKeys = (ruleGroupDefs || []).map(function(g) { return g.key; }).filter(function(key) {
     return groupExceptions[key] || groupRules[key];
   });
+
+  // The same counts split by business area, so a group that looks well covered in
+  // total cannot hide a business area with no rules pointed at it. Rules and
+  // exceptions are merged per area for the same reason they are merged per group.
+  var areasByGroup = {};
+  function areaRow(group, area) {
+    if (!areasByGroup[group]) areasByGroup[group] = {};
+    if (!areasByGroup[group][area]) {
+      areasByGroup[group][area] = { area: area, rules: 0, active: 0, exceptions: 0, high: 0 };
+    }
+    return areasByGroup[group][area];
+  }
+  (d.rulesByGroupArea || []).forEach(function(row) {
+    var entry = areaRow(row.rule_group, row.business_area);
+    entry.rules = Number(row.total) || 0;
+    entry.active = Number(row.active) || 0;
+  });
+  (d.byGroupArea || []).forEach(function(row) {
+    var entry = areaRow(row.rule_group, row.business_area);
+    entry.exceptions = Number(row.total) || 0;
+    entry.high = Number(row.high) || 0;
+  });
+  function areasFor(group) {
+    var byArea = areasByGroup[group] || {};
+    return Object.keys(byArea).sort(function(a, b) { return a.localeCompare(b); })
+      .map(function(key) { return byArea[key]; });
+  }
 %>
 <div class="card mb-4">
   <div class="card-header">
@@ -213,7 +240,7 @@
   <div class="table-responsive">
     <table class="table table-sm mb-0">
       <thead><tr>
-        <th>Group</th><th>What it checks</th>
+        <th>Group</th><th>Business area</th>
         <th class="text-end">Rules</th><th class="text-end">Active</th>
         <th class="text-end"><%= scoped ? 'Found' : 'Open' %></th><th class="text-end">High</th><th></th>
       </tr></thead>
@@ -224,11 +251,17 @@
         <% (ruleGroupDefs || []).forEach(function(g) { %>
           <% if (!groupExceptions[g.key] && !groupRules[g.key]) return; %>
           <% var ex = groupExceptions[g.key] || { total: 0, high: 0 }; var ru = groupRules[g.key] || { total: 0, active: 0 }; %>
-          <tr>
-            <td><strong><%= g.label %></strong></td>
-            <td class="small text-muted"><%= g.description %></td>
-            <td class="text-end small"><%= ru.total %></td>
-            <td class="text-end small"><%= ru.active %></td>
+          <% var areas = areasFor(g.key); %>
+          <tr class="table-light">
+            <td>
+              <strong><%= g.label %></strong>
+              <div class="small text-muted"><%= g.description %></div>
+            </td>
+            <td class="small text-muted">
+              All areas<% if (areas.length) { %> (<%= areas.length %>)<% } %>
+            </td>
+            <td class="text-end small"><strong><%= ru.total %></strong></td>
+            <td class="text-end small"><strong><%= ru.active %></strong></td>
             <td class="text-end">
               <% if (Number(ex.total)) { %><span class="badge bg-danger"><%= ex.total %></span>
               <% } else { %><span class="badge bg-success">0</span><% } %>
@@ -243,6 +276,30 @@
               <% } %>
             </td>
           </tr>
+          <% areas.forEach(function(a) { %>
+            <tr>
+              <td></td>
+              <td class="small ps-4">
+                <i class="bi bi-arrow-return-right text-muted me-1"></i><%= a.area %>
+              </td>
+              <td class="text-end small"><%= a.rules %></td>
+              <td class="text-end small"><%= a.active %></td>
+              <td class="text-end">
+                <% if (a.exceptions) { %><span class="badge bg-danger"><%= a.exceptions %></span>
+                <% } else { %><span class="badge bg-success">0</span><% } %>
+              </td>
+              <td class="text-end small"><%= a.high %></td>
+              <td class="text-end">
+                <% if (a.exceptions) { %>
+                  <a class="btn btn-sm btn-outline-secondary p-0 px-1"
+                     href="/reconciliation/exceptions?ruleGroup=<%= g.key %>&businessArea=<%= encodeURIComponent(a.area) %>"
+                     title="Show these exceptions">
+                    <i class="bi bi-list-ul"></i>
+                  </a>
+                <% } %>
+              </td>
+            </tr>
+          <% }) %>
         <% }) %>
       </tbody>
     </table>

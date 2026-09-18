@@ -1259,6 +1259,103 @@ test('the workspace page narrows to one creator when asked and shows everything 
   }
 });
 
+// ── Coverage by group and business area ──
+test('the dashboard counts rules and findings by group and business area', async () => {
+  // The group total alone can hide a business area with no rules pointed at it,
+  // which is the gap this panel exists to make visible.
+  const { executed } = await withFakeSql(() => [], () => reconRepo.getDashboardData({}));
+  const statements = executed.map(e => e.sql);
+
+  const rulesByArea = statements.find(sql =>
+    /FROM recon_rules/.test(sql) && /GROUP BY rule_group, /.test(sql));
+  assert.ok(rulesByArea, 'expected a rules-by-group-and-area aggregate');
+  assert.match(rulesByArea, /business_area/);
+  assert.match(rulesByArea, /'\(unassigned\)'/);
+  assert.match(rulesByArea, /SUM\(CASE WHEN status='active'/);
+
+  const exceptionsByArea = statements.find(sql =>
+    /FROM recon_exceptions/.test(sql) && /GROUP BY rule_group, /.test(sql));
+  assert.ok(exceptionsByArea, 'expected an exceptions-by-group-and-area aggregate');
+  assert.match(exceptionsByArea, /business_area/);
+  assert.match(exceptionsByArea, /SUM\(CASE WHEN severity='high'/);
+});
+
+test('a business area filter narrows exceptions, and the unassigned line filters for absence', async () => {
+  // The coverage panel reports rules with no business area under a placeholder, so
+  // clicking that line must look for the absence, not for the literal text.
+  const named = await withFakeSql(() => [], () =>
+    reconRepo.listExceptions({ businessArea: 'Finance', openOnly: true }));
+  assert.match(named.executed[0].sql, /business_area=@area/);
+  assert.ok(named.executed[0].params.some(p => p.value === 'Finance'));
+
+  const unassigned = await withFakeSql(() => [], () =>
+    reconRepo.listExceptions({ businessArea: reconRepo.UNASSIGNED_BUSINESS_AREA, openOnly: true }));
+  assert.match(unassigned.executed[0].sql, /business_area IS NULL OR LTRIM\(RTRIM\(business_area\)\)=''/);
+  assert.ok(!unassigned.executed[0].params.some(p => p.value === reconRepo.UNASSIGNED_BUSINESS_AREA),
+    'the placeholder must never be matched as a literal business area');
+
+  // Listing, counting and bulk action must agree, or a bulk change applied to "the
+  // whole filter" would hit more rows than the page was showing.
+  const filters = { businessArea: 'Finance', ruleGroup: 'start_to_start', openOnly: true };
+  const listed = await withFakeSql(() => [], () => reconRepo.listExceptions(filters));
+  const acted = await withFakeSql(() => [], () => reconRepo.listExceptionsForAction(filters));
+  const clauseOf = sql => sql
+    .slice(sql.indexOf(' WHERE '), sql.indexOf(' ORDER BY ') === -1 ? undefined : sql.indexOf(' ORDER BY '))
+    .replace(/ AND id > @after$/, '');
+  assert.equal(clauseOf(listed.executed[0].sql), clauseOf(acted.executed[0].sql));
+});
+
+test('the coverage panel shows each business area under its group and the areas add up', async () => {
+  const ejs = require('ejs');
+  const fs = require('node:fs');
+  const { RULE_GROUP_DEFS, ruleGroupLabel } = require('../src/services/reconciliationService');
+  const { RECONCILIATION_HELP } = require('../src/services/qualityGuideService');
+  const file = 'src/views/reconciliation/dashboard.ejs';
+  const group = RULE_GROUP_DEFS[0].key;
+
+  const html = ejs.render(fs.readFileSync(file, 'utf8'), {
+    title: 'R', user: null, currentUser: null,
+    selectedRunId: null, ruleStatus: null, ruleGroup: null,
+    outcomeDefs: [], statusDefs: [], helpTopic: RECONCILIATION_HELP,
+    ruleGroupDefs: RULE_GROUP_DEFS, ruleGroupLabel,
+    runs: [], rulesOverview: [], orphanedExceptions: 0, error: null,
+    data: {
+      rules: [], exceptionsByStatus: [], exceptionsByOutcome: [], exceptionsBySeverity: [],
+      byRule: [], byOwner: [], recentRuns: [], problems: [],
+      ageing: { week1: 0, month1: 0, older: 0 }, scoped: false, scopedRun: null,
+      byGroup: [{ rule_group: group, total: 7, high: 2 }],
+      rulesByGroup: [{ rule_group: group, total: 5, active: 4 }],
+      rulesByGroupArea: [
+        { rule_group: group, business_area: 'Finance', total: 3, active: 3 },
+        { rule_group: group, business_area: '(unassigned)', total: 2, active: 1 },
+      ],
+      byGroupArea: [
+        { rule_group: group, business_area: 'Finance', total: 5, high: 2 },
+        { rule_group: group, business_area: '(unassigned)', total: 2, high: 0 },
+      ],
+    },
+  }, { filename: file });
+
+  const start = html.indexOf('Coverage by Group of Rules');
+  const table = html.slice(start, html.indexOf('</table>', start));
+
+  assert.match(table, /Business area/, 'the panel must expose the business area dimension');
+  assert.match(table, /Finance/);
+  assert.match(table, /\(unassigned\)/, 'rules with no business area must stay countable');
+  // Each area line drills through carrying both dimensions, not just the group.
+  assert.match(table, new RegExp('ruleGroup=' + group + '&businessArea=Finance'));
+
+  // The area lines must reconcile with the group line above them, otherwise the
+  // split invites exactly the wrong conclusion about coverage.
+  const cells = [...table.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map(row =>
+    [...row[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/g)]
+      .map(c => c[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()));
+  const areaRows = cells.filter(r => r.length === 7 && /Finance|\(unassigned\)/.test(r[1]));
+  assert.equal(areaRows.length, 2);
+  assert.equal(areaRows.reduce((sum, r) => sum + Number(r[2]), 0), 5, 'area rule counts must equal the group total');
+  assert.equal(areaRows.reduce((sum, r) => sum + Number(r[4]), 0), 7, 'area finding counts must equal the group total');
+});
+
 test('the workspace detail view renders inline scripts that actually parse', async () => {
   // A broken declaration in one inline script block kills every function defined
   // in it, so the Security tab's "Refresh from Fabric API" button silently does

@@ -711,6 +711,7 @@ function readExceptionFilters(query) {
     outcome: query.outcome || null,
     ruleId: query.ruleId ? Number.parseInt(query.ruleId, 10) : null,
     ruleGroup: RULE_GROUP_BY_KEY.has(query.ruleGroup) ? query.ruleGroup : null,
+    businessArea: (query.businessArea || '').trim() || null,
     runId: query.runId ? Number.parseInt(query.runId, 10) : null,
     openOnly: query.status ? false : !all,
   };
