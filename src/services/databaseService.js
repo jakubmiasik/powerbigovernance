@@ -3,6 +3,10 @@ const { DefaultAzureCredential } = require('@azure/identity');
 const { convertScheduleToUtc, normalizeTimezone } = require('./scheduleTimeService');
 const { METRIC_DEFS } = require('./runMetricsService');
 const { getConfig } = require('../config/settings');
+const { RECONCILIATION_MIGRATIONS } = require('./reconciliationSchema');
+const { MDM_MIGRATIONS } = require('./mdmSchema');
+const { ANALYSIS_MODEL_MIGRATIONS } = require('./analysisModelSchema');
+const { SECURITY_GROUP_MIGRATIONS } = require('./securityGroupSchema');
 const { encryptSecret, isEncryptionConfigured } = require('./secretCryptoService');
 
 const cfg = getConfig();
@@ -231,10 +235,11 @@ async function deleteServicePrincipal(id) {
 }
 
 // Analysis runs
-async function createAnalysisRun({ spId, spName, tenantId, runBy }) {
+async function createAnalysisRun({ spId, spName, tenantId, runBy, scopeKind, scopeWorkspaces, scheduleId }) {
   const conn = await getConnection();
   try {
     const parsedSpId = Number.parseInt(spId, 10);
+    const parsedScheduleId = Number.parseInt(scheduleId, 10);
     // sp_id is NOT NULL in older deployments, so always write it when we know it.
     const rows = await execWithColumnFallback(conn, {
       required: [
@@ -245,6 +250,12 @@ async function createAnalysisRun({ spId, spName, tenantId, runBy }) {
       optional: [
         { column: 'sp_id', param: { name: 'spId', type: TYPES.Int, value: Number.isFinite(parsedSpId) ? parsedSpId : null } },
         { column: 'status', param: { name: 'status', type: TYPES.NVarChar, value: 'running' } },
+        // What this run covers, recorded before it starts. A reader must be able to
+        // tell a scan of three workspaces from a scan of the tenant even if the run
+        // never finishes.
+        { column: 'scope_kind', param: { name: 'scopeKind', type: TYPES.NVarChar, value: scopeKind || 'tenant' } },
+        { column: 'scope_workspaces', param: { name: 'scopeWs', type: TYPES.NVarChar, value: scopeWorkspaces || null } },
+        { column: 'schedule_id', param: { name: 'schedId', type: TYPES.Int, value: Number.isFinite(parsedScheduleId) ? parsedScheduleId : null } },
       ],
       build: specs => buildInsert('analysis_runs', specs, { output: 'INSERTED.id' }),
     });
@@ -277,10 +288,60 @@ async function updateAnalysisRun(id, data) {
   }
 }
 
+// Every column a caller needs from a run *except* results_json, which is the scan
+// document and potentially megabytes.
+//
+// The scope columns belong here and were missed when scoping was added: this query
+// names its columns, so a run's scope simply never arrived. Every reader then saw
+// `undefined` and fell back to "whole tenant" — which is not a display bug alone,
+// because `pickTenantWideRun` and the schedule overlap check read the same rows.
+const RUN_META_COLUMNS = `id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports,
+  total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by,
+  scope_kind, scope_workspaces, schedule_id`;
+
+// The same list without the columns a pre-scoping deployment has not migrated yet.
+// Naming columns means a missing one fails the whole read rather than arriving as
+// null, so an instance that has not run the migration falls back to this.
+const RUN_META_COLUMNS_LEGACY = `id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports,
+  total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by`;
+
+/**
+ * Reads runs, tolerating a database that predates the scope columns.
+ *
+ * `execWithColumnFallback` covers writes; a SELECT needs the same tolerance, and
+ * the alternative — `SELECT *` — would drag results_json into every run list.
+ */
+async function selectRuns(conn, clause, params = []) {
+  try {
+    return await execSql(conn, 'SELECT ' + RUN_META_COLUMNS + ' FROM analysis_runs ' + clause, params);
+  } catch (err) {
+    if (!/invalid column name/i.test(err.message || '')) throw err;
+    console.warn('[DB] Reading runs without the scope columns; run migrations to record scan coverage.');
+    return execSql(conn, 'SELECT ' + RUN_META_COLUMNS_LEGACY + ' FROM analysis_runs ' + clause, params);
+  }
+}
+
 async function getAnalysisRuns() {
   const conn = await getConnection();
   try {
-    return await execSql(conn, 'SELECT id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports, total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by FROM analysis_runs ORDER BY started_at DESC');
+    return await selectRuns(conn, 'ORDER BY started_at DESC');
+  } finally {
+    conn.close();
+  }
+}
+
+/**
+ * A run without its result document.
+ *
+ * `getAnalysisRunById` does `SELECT *`, which pulls the whole scan — potentially
+ * megabytes — even for a caller that only wanted the status or the service
+ * principal. This is for those callers.
+ */
+async function getAnalysisRunMeta(id) {
+  const conn = await getConnection();
+  try {
+    const rows = await selectRuns(conn, 'WHERE id=@id', [{ name: 'id', type: TYPES.Int, value: id }]);
+    return rows[0] || null;
   } finally {
     conn.close();
   }
@@ -301,16 +362,138 @@ async function getAnalysisRunById(id) {
 async function deleteAnalysisRun(id) {
   const conn = await getConnection();
   try {
-    try {
-      await execSql(conn, 'DELETE FROM analysis_run_totals WHERE run_id=@id', [
-        { name: 'id', type: TYPES.Int, value: id },
-      ]);
-    } catch (err) {
-      if (!(err.message || '').includes('Invalid object name')) throw err;
+    for (const table of [
+      'analysis_run_totals', 'analysis_run_progress', 'analysis_workspace_users',
+      'analysis_items', 'analysis_workspaces', 'analysis_run_model_state',
+    ]) {
+      try {
+        await execSql(conn, `DELETE FROM ${table} WHERE run_id=@id`, [
+          { name: 'id', type: TYPES.Int, value: id },
+        ]);
+      } catch (err) {
+        if (!(err.message || '').includes('Invalid object name')) throw err;
+      }
     }
     await execSql(conn, 'DELETE FROM analysis_runs WHERE id=@id', [
       { name: 'id', type: TYPES.Int, value: id },
     ]);
+  } finally {
+    conn.close();
+  }
+}
+
+// ── Run progress ──
+// A run outlives the browser tab that started it, so its progress is written to the
+// database rather than kept only in the worker's memory. That is what lets the user
+// close the modal, come back later — possibly to a different worker, or after a
+// restart — and still be told where the run got to.
+
+async function saveRunProgress(runId, snapshot) {
+  const conn = await getConnection();
+  try {
+    const payload = JSON.stringify(snapshot);
+    const params = [
+      { name: 'runId', type: TYPES.Int, value: runId },
+      { name: 'status', type: TYPES.NVarChar, value: snapshot.status || 'running' },
+      { name: 'phase', type: TYPES.NVarChar, value: (snapshot.phase || '').slice(0, 100) },
+      { name: 'percent', type: TYPES.Int, value: Number(snapshot.percent) || 0 },
+      { name: 'message', type: TYPES.NVarChar, value: (snapshot.message || '').slice(0, 1000) },
+      { name: 'payload', type: TYPES.NVarChar, value: payload },
+    ];
+    // One row per run, upserted. MERGE would be a single round trip but needs a
+    // unique index to be safe; the two-statement form works on drifted schemas too.
+    const updated = await execSql(
+      conn,
+      `UPDATE analysis_run_progress SET status=@status, phase=@phase, percent=@percent, message=@message, payload=@payload, updated_at=SYSUTCDATETIME() OUTPUT INSERTED.run_id WHERE run_id=@runId`,
+      params
+    );
+    if (!updated.length) {
+      await execSql(
+        conn,
+        `INSERT INTO analysis_run_progress (run_id, status, phase, percent, message, payload) VALUES (@runId, @status, @phase, @percent, @message, @payload)`,
+        params
+      );
+    }
+  } finally {
+    conn.close();
+  }
+}
+
+function parseProgressRow(row) {
+  if (!row) return null;
+  let snapshot = null;
+  try { snapshot = JSON.parse(row.payload); } catch { snapshot = null; }
+  if (!snapshot) return null;
+  return {
+    ...snapshot,
+    runId: row.run_id,
+    // The server clock owns staleness. Trusting the worker-written `updatedAt`
+    // inside the payload would let a worker with a skewed clock look alive forever.
+    updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : snapshot.updatedAt,
+  };
+}
+
+async function getRunProgress(runId) {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(conn, 'SELECT run_id, payload, updated_at FROM analysis_run_progress WHERE run_id=@runId', [
+      { name: 'runId', type: TYPES.Int, value: runId },
+    ]);
+    return parseProgressRow(rows[0]);
+  } catch (err) {
+    if ((err.message || '').includes('Invalid object name')) return null;
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+/** Snapshots for every run that has not reached a terminal state. */
+async function getLiveRunProgress() {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(
+      conn,
+      `SELECT run_id, payload, updated_at FROM analysis_run_progress WHERE status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')`
+    );
+    return rows.map(parseProgressRow).filter(Boolean);
+  } catch (err) {
+    if ((err.message || '').includes('Invalid object name')) return [];
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+/**
+ * Closes off runs whose worker died. Called at startup, where an orphan is
+ * expected: the process that owned the run is by definition gone. The heartbeat
+ * threshold keeps this from touching a run another worker is still executing.
+ */
+async function markInterruptedRuns(staleSeconds) {
+  const conn = await getConnection();
+  try {
+    const cutoffParam = { name: 'stale', type: TYPES.Int, value: Math.max(60, Number(staleSeconds) || 900) };
+    const orphans = await execSql(
+      conn,
+      `SELECT r.id FROM analysis_runs r
+       LEFT JOIN analysis_run_progress p ON p.run_id = r.id
+       WHERE r.status IN ('running', 'cancelling')
+         AND DATEDIFF(second, COALESCE(p.updated_at, r.started_at), SYSUTCDATETIME()) >= @stale`,
+      [cutoffParam]
+    );
+    if (!orphans.length) return [];
+
+    const ids = orphans.map(row => row.id);
+    for (const id of ids) {
+      const idParam = { name: 'id', type: TYPES.Int, value: id };
+      await execSql(conn, `UPDATE analysis_runs SET status='interrupted', completed_at=GETUTCDATE() WHERE id=@id`, [idParam]);
+      await execSql(conn, `UPDATE analysis_run_progress SET status='interrupted', updated_at=SYSUTCDATETIME() WHERE run_id=@id`, [idParam]);
+    }
+    return ids;
+  } catch (err) {
+    if ((err.message || '').includes('Invalid object name')) return [];
+    throw err;
   } finally {
     conn.close();
   }
@@ -496,6 +679,186 @@ async function markWorkspaceDeletedInRuns(workspaceId) {
       updated += 1;
     }
     return updated;
+  } finally {
+    conn.close();
+  }
+}
+
+// ── Application settings ──
+// Values are JSON documents. A caller that stored something unparseable gets the
+// fallback rather than an exception: a broken setting must not take a page down.
+async function getAppSetting(key, fallback = null) {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(conn, 'SELECT setting_value FROM app_settings WHERE setting_key=@key', [
+      { name: 'key', type: TYPES.NVarChar, value: key },
+    ]);
+    if (!rows.length || rows[0].setting_value == null) return fallback;
+    try {
+      return JSON.parse(rows[0].setting_value);
+    } catch {
+      console.warn('[DB] Setting "' + key + '" is not valid JSON; using the default.');
+      return fallback;
+    }
+  } catch (err) {
+    if (err.message && err.message.includes('Invalid object name')) return fallback;
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+async function saveAppSetting(key, value, actor) {
+  const conn = await getConnection();
+  try {
+    // MERGE rather than delete-then-insert: a reader between the two would see the
+    // setting absent and fall back to the default.
+    await execSql(conn, `MERGE app_settings AS target
+      USING (SELECT @key AS setting_key) AS source ON target.setting_key = source.setting_key
+      WHEN MATCHED THEN UPDATE SET setting_value=@value, updated_at=SYSUTCDATETIME(), updated_by=@by
+      WHEN NOT MATCHED THEN INSERT (setting_key, setting_value, updated_by) VALUES (@key, @value, @by);`, [
+      { name: 'key', type: TYPES.NVarChar, value: key },
+      { name: 'value', type: TYPES.NVarChar, value: JSON.stringify(value) },
+      { name: 'by', type: TYPES.NVarChar, value: actor || null },
+    ]);
+  } finally {
+    conn.close();
+  }
+}
+
+// ── Analysis schedules ──
+// Deliberately its own table rather than a `kind` column on capacity_schedules:
+// the two share only their timing, and nothing else about a capacity action
+// resembles a scan.
+async function getAnalysisSchedules() {
+  const conn = await getConnection();
+  try {
+    return await execSql(conn, 'SELECT * FROM analysis_schedules ORDER BY name');
+  } catch (err) {
+    // The table may not exist yet on an instance that has not migrated.
+    if (err.message && err.message.includes('Invalid object name')) return [];
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+async function saveAnalysisSchedule(schedule) {
+  const conn = await getConnection();
+  try {
+    const parsedSpId = Number.parseInt(schedule.spId, 10);
+    const rows = await execSql(conn, `INSERT INTO analysis_schedules
+      (name, sp_id, scope_kind, scope_workspaces, schedule_type, schedule_hour, schedule_minute,
+       schedule_day, timezone, enabled, created_by)
+      OUTPUT INSERTED.id
+      VALUES (@name, @spId, @scopeKind, @scopeWs, @type, @hour, @minute, @day, @tz, @enabled, @by)`, [
+      { name: 'name', type: TYPES.NVarChar, value: schedule.name },
+      { name: 'spId', type: TYPES.Int, value: Number.isFinite(parsedSpId) ? parsedSpId : null },
+      { name: 'scopeKind', type: TYPES.NVarChar, value: schedule.scopeKind || 'tenant' },
+      { name: 'scopeWs', type: TYPES.NVarChar, value: schedule.scopeWorkspaces || null },
+      { name: 'type', type: TYPES.NVarChar, value: schedule.scheduleType },
+      { name: 'hour', type: TYPES.Int, value: schedule.hour != null ? schedule.hour : null },
+      { name: 'minute', type: TYPES.Int, value: schedule.minute != null ? schedule.minute : 0 },
+      { name: 'day', type: TYPES.NVarChar, value: schedule.day || null },
+      { name: 'tz', type: TYPES.NVarChar, value: schedule.timezone || 'UTC' },
+      { name: 'enabled', type: TYPES.Bit, value: schedule.enabled !== false },
+      { name: 'by', type: TYPES.NVarChar, value: schedule.createdBy || null },
+    ]);
+    const insertedId = rows && rows[0] ? parseInt(rows[0].id, 10) : null;
+    return Number.isFinite(insertedId) ? insertedId : null;
+  } finally {
+    conn.close();
+  }
+}
+
+async function updateAnalysisSchedule(id, fields) {
+  const assignments = [];
+  const params = [{ name: 'id', type: TYPES.Int, value: id }];
+  const set = (column, param) => { assignments.push(column + '=@' + param.name); params.push(param); };
+
+  if (fields.name !== undefined) set('name', { name: 'name', type: TYPES.NVarChar, value: fields.name });
+  if (fields.spId !== undefined) set('sp_id', { name: 'spId', type: TYPES.Int, value: fields.spId });
+  if (fields.scopeKind !== undefined) set('scope_kind', { name: 'scopeKind', type: TYPES.NVarChar, value: fields.scopeKind });
+  if (fields.scopeWorkspaces !== undefined) set('scope_workspaces', { name: 'scopeWs', type: TYPES.NVarChar, value: fields.scopeWorkspaces });
+  if (fields.scheduleType !== undefined) set('schedule_type', { name: 'type', type: TYPES.NVarChar, value: fields.scheduleType });
+  if (fields.hour !== undefined) set('schedule_hour', { name: 'hour', type: TYPES.Int, value: fields.hour });
+  if (fields.minute !== undefined) set('schedule_minute', { name: 'minute', type: TYPES.Int, value: fields.minute });
+  if (fields.day !== undefined) set('schedule_day', { name: 'day', type: TYPES.NVarChar, value: fields.day });
+  if (fields.timezone !== undefined) set('timezone', { name: 'tz', type: TYPES.NVarChar, value: fields.timezone });
+  if (fields.enabled !== undefined) set('enabled', { name: 'enabled', type: TYPES.Bit, value: fields.enabled });
+  if (!assignments.length) return;
+
+  const conn = await getConnection();
+  try {
+    await execSql(conn, 'UPDATE analysis_schedules SET ' + assignments.join(', ') + ' WHERE id=@id', params);
+  } finally {
+    conn.close();
+  }
+}
+
+async function deleteAnalysisSchedule(id) {
+  const conn = await getConnection();
+  try {
+    await execSql(conn, 'DELETE FROM analysis_schedule_history WHERE schedule_id=@id', [
+      { name: 'id', type: TYPES.Int, value: id },
+    ]);
+    await execSql(conn, 'DELETE FROM analysis_schedules WHERE id=@id', [
+      { name: 'id', type: TYPES.Int, value: id },
+    ]);
+  } finally {
+    conn.close();
+  }
+}
+
+async function logAnalysisScheduleRun(scheduleId, runId, status, message) {
+  const conn = await getConnection();
+  try {
+    await execSql(conn, `INSERT INTO analysis_schedule_history (schedule_id, run_id, status, message, executed_at)
+      VALUES (@sid, @rid, @status, @msg, GETUTCDATE())`, [
+      { name: 'sid', type: TYPES.Int, value: scheduleId },
+      { name: 'rid', type: TYPES.Int, value: Number.isFinite(Number.parseInt(runId, 10)) ? Number.parseInt(runId, 10) : null },
+      { name: 'status', type: TYPES.NVarChar, value: status },
+      { name: 'msg', type: TYPES.NVarChar, value: (message || '').slice(0, 2000) },
+    ]);
+  } catch (err) {
+    // History is evidence, not the action. A scan that ran must not be reported as
+    // failed because its log line could not be written.
+    console.warn('[Analysis schedule] Could not record history for schedule', scheduleId, err.message);
+  } finally {
+    conn.close();
+  }
+}
+
+/**
+ * The last time each schedule actually started a scan.
+ *
+ * This is what stops a catch-up window replaying a scan the previous tick — or a
+ * previous worker — already started. In-memory attempt tracking cannot: App
+ * Service recycles workers, and a scan is expensive enough that starting it twice
+ * matters.
+ */
+async function getLastAnalysisScheduleRuns() {
+  const conn = await getConnection();
+  try {
+    return await execSql(conn, `SELECT schedule_id, MAX(executed_at) AS last_executed_at
+      FROM analysis_schedule_history WHERE status <> 'error' GROUP BY schedule_id`);
+  } catch (err) {
+    if (err.message && err.message.includes('Invalid object name')) return [];
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+async function getAnalysisScheduleHistory(scheduleId, limit = 20) {
+  const conn = await getConnection();
+  try {
+    const capped = Math.max(1, Math.min(200, Number.parseInt(limit, 10) || 20));
+    return await execSql(conn, `SELECT TOP (${capped}) * FROM analysis_schedule_history
+      WHERE schedule_id=@id ORDER BY executed_at DESC`, [{ name: 'id', type: TYPES.Int, value: scheduleId }]);
+  } catch (err) {
+    if (err.message && err.message.includes('Invalid object name')) return [];
+    throw err;
   } finally {
     conn.close();
   }
@@ -756,6 +1119,25 @@ async function runMigrations() {
       await runStatement(conn, `add analysis_run_totals.${def.column}`, `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_run_totals') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'analysis_run_totals') AND name = N'${def.column}') ALTER TABLE analysis_run_totals ADD ${def.column} BIGINT NOT NULL DEFAULT 0`);
     }
 
+    // Live progress for a run, so a run sent to the background can be checked on
+    // later from any worker — and so an abandoned run can be recognised as such
+    // instead of appearing to run forever.
+    await runStatement(conn, 'create analysis_run_progress', `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_run_progress') AND type = 'U')
+      BEGIN
+        CREATE TABLE analysis_run_progress (
+          run_id INT NOT NULL PRIMARY KEY,
+          status NVARCHAR(20) NOT NULL DEFAULT 'running',
+          phase NVARCHAR(100) NULL,
+          percent INT NOT NULL DEFAULT 0,
+          message NVARCHAR(1000) NULL,
+          payload NVARCHAR(MAX) NOT NULL,
+          updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+        );
+        CREATE INDEX IX_analysis_run_progress_status ON analysis_run_progress (status, updated_at DESC);
+      END
+    `);
+
     // Cached artifact details, so opening an artifact does not re-read the APIs
     // every time. Refreshed on demand from the details modal.
     await runStatement(conn, 'create item_details_cache', `
@@ -819,6 +1201,68 @@ async function runMigrations() {
         )
       END
     `);
+
+    // A small key/value store for settings that are documents rather than tables —
+    // read as a whole, by one owner, never filtered on. A file would not do: App
+    // Service can run several instances, and each would have its own copy.
+    await runStatement(conn, 'create app_settings', `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'app_settings') AND type = 'U')
+      BEGIN
+        CREATE TABLE app_settings (
+          setting_key NVARCHAR(100) NOT NULL PRIMARY KEY,
+          setting_value NVARCHAR(MAX) NULL,
+          updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+          updated_by NVARCHAR(255) NULL
+        )
+      END
+    `);
+
+    // ── Scheduled analysis scans ──
+    // A scan used to be something people did by hand, because it always meant the
+    // whole tenant and took hours. A scoped scan is short enough to schedule, so
+    // schedules and scopes arrive together.
+    await runStatement(conn, 'create analysis_schedules', `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_schedules') AND type = 'U')
+      BEGIN
+        CREATE TABLE analysis_schedules (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          name NVARCHAR(255) NOT NULL,
+          sp_id INT NULL,
+          scope_kind NVARCHAR(20) NOT NULL DEFAULT 'tenant',
+          scope_workspaces NVARCHAR(MAX) NULL,
+          schedule_type NVARCHAR(20) NOT NULL,
+          schedule_hour INT NULL,
+          schedule_minute INT NULL,
+          schedule_day NVARCHAR(20) NULL,
+          timezone NVARCHAR(100) NULL,
+          enabled BIT NOT NULL DEFAULT 1,
+          created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+          created_by NVARCHAR(255) NULL
+        )
+      END
+    `);
+
+    await runStatement(conn, 'create analysis_schedule_history', `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_schedule_history') AND type = 'U')
+      BEGIN
+        CREATE TABLE analysis_schedule_history (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          schedule_id INT NULL,
+          run_id INT NULL,
+          status NVARCHAR(20) NOT NULL,
+          message NVARCHAR(2000) NULL,
+          executed_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+        );
+        CREATE INDEX IX_analysis_schedule_history_schedule_time
+          ON analysis_schedule_history (schedule_id, executed_at DESC);
+      END
+    `);
+
+    // What a run covered. Runs recorded before this have no scope and were, in
+    // fact, tenant-wide — which is exactly what the default says.
+    await runStatement(conn, 'add analysis_runs.scope_kind', `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_runs') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'analysis_runs') AND name = N'scope_kind') ALTER TABLE analysis_runs ADD scope_kind NVARCHAR(20) NOT NULL DEFAULT 'tenant'`);
+    await runStatement(conn, 'add analysis_runs.scope_workspaces', `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_runs') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'analysis_runs') AND name = N'scope_workspaces') ALTER TABLE analysis_runs ADD scope_workspaces NVARCHAR(MAX) NULL`);
+    await runStatement(conn, 'add analysis_runs.schedule_id', `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_runs') AND type = 'U') AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'analysis_runs') AND name = N'schedule_id') ALTER TABLE analysis_runs ADD schedule_id INT NULL`);
 
     // Create capacity schedule history table if missing
     await runStatement(conn, 'create capacity_schedule_history', `
@@ -943,6 +1387,23 @@ async function runMigrations() {
     await runStatement(conn, 'add service_principals.key_vault_secret_name', `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'key_vault_secret_name') ALTER TABLE service_principals ADD key_vault_secret_name NVARCHAR(255) NULL`);
     // Make client_secret nullable (it may already be)
     await runStatement(conn, 'relax service_principals.client_secret', `IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'client_secret' AND is_nullable = 0) ALTER TABLE service_principals ALTER COLUMN client_secret NVARCHAR(MAX) NULL`);
+    // Reconciliation engine tables
+    for (const migration of RECONCILIATION_MIGRATIONS) {
+      await runStatement(conn, migration.label, migration.sql);
+    }
+    // Master data management tables
+    for (const migration of MDM_MIGRATIONS) {
+      await runStatement(conn, migration.label, migration.sql);
+    }
+    // Relational view of an analysis run, plus indexes for the newer predicates
+    for (const migration of ANALYSIS_MODEL_MIGRATIONS) {
+      await runStatement(conn, migration.label, migration.sql);
+    }
+    // People, security groups and the workspaces they are attached to
+    for (const migration of SECURITY_GROUP_MIGRATIONS) {
+      await runStatement(conn, migration.label, migration.sql);
+    }
+
     console.log('[DB] Migrations complete.');
   } catch (err) {
     console.warn('[DB] Migration warning:', err.message);
@@ -965,12 +1426,26 @@ module.exports = {
   updateAnalysisRun,
   getAnalysisRuns,
   getAnalysisRunById,
+  getAnalysisRunMeta,
   deleteAnalysisRun,
+  saveRunProgress,
+  getRunProgress,
+  getLiveRunProgress,
+  markInterruptedRuns,
   saveRunTotals,
   getRunTotals,
   getComparableRuns,
   getItemDetailsCache,
   saveItemDetailsCache,
+  getAppSetting,
+  saveAppSetting,
+  getAnalysisSchedules,
+  saveAnalysisSchedule,
+  updateAnalysisSchedule,
+  deleteAnalysisSchedule,
+  logAnalysisScheduleRun,
+  getLastAnalysisScheduleRuns,
+  getAnalysisScheduleHistory,
   getCapacitySchedules,
   saveCapacitySchedule,
   updateCapacitySchedule,
@@ -979,5 +1454,7 @@ module.exports = {
   logScheduleExecution,
   getScheduleHistory,
   getLastScheduleExecutions,
-  _private: { buildInsert, buildUpdate, extractProblemColumns },
+  _private: { buildInsert, buildUpdate, extractProblemColumns, RUN_META_COLUMNS, RUN_META_COLUMNS_LEGACY },
+  // SQL primitives shared with feature-specific repositories.
+  _sql: { getConnection, execSql, TYPES, execWithColumnFallback, buildInsert, buildUpdate },
 };

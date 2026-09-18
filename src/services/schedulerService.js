@@ -1,6 +1,8 @@
 const db = require('./databaseService');
 const { executeCapacityActionWithSp } = require('./capacityActionService');
-const { normalizeTimezone, getTimeInTimezone } = require('./scheduleTimeService');
+const { normalizeTimezone } = require('./scheduleTimeService');
+const { findDueSlot, isDueNow, getScheduleSlotKey } = require('./scheduleDueService');
+const analysisSchedules = require('./analysisScheduleService');
 
 // How far back a tick looks for a schedule that came due. On App Service the worker
 // can be recycled or idled out for long stretches, so a 20 minute window silently
@@ -30,6 +32,10 @@ const status = {
   lastTickDurationMs: null,
   schedulesLoaded: 0,
   enabledSchedules: 0,
+  analysisSchedulesLoaded: 0,
+  enabledAnalysisSchedules: 0,
+  lastAnalysisAt: null,
+  lastAnalysisSummary: null,
   lastDueAt: null,
   lastActionAt: null,
   lastActionSummary: null,
@@ -37,62 +43,9 @@ const status = {
   lastErrorAt: null,
 };
 
-function getDateKey(parts) {
-  return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
-}
-
-function getScheduleMinute(schedule) {
-  const minute = parseInt(schedule.schedule_minute, 10);
-  return Number.isFinite(minute) ? minute : 0;
-}
-
-function getScheduleHour(schedule) {
-  const hour = parseInt(schedule.schedule_hour, 10);
-  return Number.isFinite(hour) ? hour : 0;
-}
-
-function isDueNow(schedule, nowLocal) {
-  const type = schedule.schedule_type;
-  const minute = getScheduleMinute(schedule);
-  const hour = getScheduleHour(schedule);
-  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-
-  if (nowLocal.minute !== minute) return false;
-  if (type === 'hourly') return true;
-  if (nowLocal.hour !== hour) return false;
-  if (type === 'daily') return true;
-  if (type === 'weekdays') return nowLocal.dayOfWeek >= 1 && nowLocal.dayOfWeek <= 5;
-  if (type === 'weekly') return dayNames[nowLocal.dayOfWeek] === schedule.schedule_day;
-  return false;
-}
-
-function getScheduleSlotKey(schedule, nowLocal) {
-  if (!isDueNow(schedule, nowLocal)) return null;
-  const dateKey = getDateKey(nowLocal);
-  const hour = String(nowLocal.hour).padStart(2, '0');
-  const minute = String(nowLocal.minute).padStart(2, '0');
-  return `${dateKey}T${hour}:${minute}`;
-}
-
-function truncateToMinute(date) {
-  return new Date(Math.floor(date.getTime() / 60000) * 60000);
-}
-
-/**
- * Most recent minute within the catch-up window at which `schedule` was due,
- * or null if it was not due at all. Walking back minute by minute (rather than
- * computing the slot arithmetically) keeps DST transitions correct, because each
- * candidate instant is re-resolved in the schedule's own timezone.
- */
-function findDueSlot(schedule, timezone, now, windowMinutes) {
-  for (let minutesBack = 0; minutesBack <= windowMinutes; minutesBack += 1) {
-    const candidate = truncateToMinute(new Date(now.getTime() - minutesBack * 60000));
-    const local = getTimeInTimezone(timezone, candidate);
-    const slotKey = getScheduleSlotKey(schedule, local);
-    if (slotKey) return { slotKey, dueAt: candidate, minutesLate: minutesBack };
-  }
-  return null;
-}
+// The due-time logic — including the daylight-saving-correct catch-up walk — now
+// lives in scheduleDueService, because analysis scans are scheduled too and the
+// two must agree about what "daily at 07:00 Europe/Warsaw" means.
 
 async function getServicePrincipalForSchedule(schedule) {
   const allSps = await db.getServicePrincipals();
@@ -125,6 +78,71 @@ async function executeSchedule(schedule) {
     console.error(`[Scheduler] Error executing schedule ${schedule.id}:`, err.message);
     await db.logScheduleExecution(schedule.id, schedule.capacity_name, schedule.action, 'error', err.message);
     return { status: 'error', message: err.message };
+  }
+}
+
+/**
+ * The analysis half of a tick.
+ *
+ * It shares the timer rather than running its own: a second interval would mean a
+ * second self-healing path, a second catch-up window and two things to explain
+ * when nothing ran. The attempt keys are namespaced so a capacity schedule and an
+ * analysis schedule with the same id cannot shadow each other.
+ */
+async function runAnalysisSchedules(now, source) {
+  let schedules = [];
+  try {
+    schedules = await db.getAnalysisSchedules();
+  } catch (err) {
+    // A missing table on an un-migrated instance must not take the capacity
+    // scheduler down with it.
+    console.warn('[Scheduler] Could not read analysis schedules:', err.message);
+    return;
+  }
+  status.analysisSchedulesLoaded = schedules.length;
+  status.enabledAnalysisSchedules = schedules.filter(schedule => schedule.enabled).length;
+  if (!schedules.length) return;
+
+  const lastRuns = new Map();
+  for (const row of await db.getLastAnalysisScheduleRuns().catch(() => [])) {
+    const id = parseInt(row.schedule_id, 10);
+    const executedAt = row.last_executed_at ? new Date(row.last_executed_at) : null;
+    if (Number.isFinite(id) && executedAt && !Number.isNaN(executedAt.getTime())) {
+      lastRuns.set(id, executedAt);
+    }
+  }
+
+  for (const schedule of schedules) {
+    if (!schedule.enabled) continue;
+    const scheduleId = parseInt(schedule.id, 10);
+    if (!Number.isFinite(scheduleId)) continue;
+
+    const timezone = normalizeTimezone(schedule.timezone || 'UTC');
+    const due = findDueSlot(schedule, timezone, now, CATCHUP_WINDOW_MINUTES);
+    if (!due) continue;
+
+    const key = 'analysis:' + scheduleId;
+    const attemptState = triggeredSlots.get(key);
+    const attempts = attemptState && attemptState.slotKey === due.slotKey ? attemptState.attempts : 0;
+    if (attempts >= MAX_SLOT_ATTEMPTS) continue;
+
+    // The database is what stops a repeat across workers and restarts. A scan is
+    // expensive enough that starting it twice is worth more than one guard.
+    const lastRunAt = lastRuns.get(scheduleId);
+    if (lastRunAt && lastRunAt.getTime() >= due.dueAt.getTime()) {
+      triggeredSlots.set(key, { slotKey: due.slotKey, attempts: MAX_SLOT_ATTEMPTS });
+      continue;
+    }
+    triggeredSlots.set(key, { slotKey: due.slotKey, attempts: attempts + 1 });
+
+    const lateNote = due.minutesLate > 0 ? ` (catch-up, ${due.minutesLate} min late)` : '';
+    console.log(`[Scheduler] Analysis schedule ${scheduleId} (${schedule.name}) due at ${due.slotKey} ${timezone}${lateNote}`);
+    const result = await analysisSchedules.executeSchedule(schedule, { source: source || 'tick' });
+    status.lastAnalysisAt = new Date().toISOString();
+    status.lastAnalysisSummary = `${schedule.name}: ${result.status} — ${result.message}`;
+    if (result.status !== 'error') {
+      triggeredSlots.set(key, { slotKey: due.slotKey, attempts: MAX_SLOT_ATTEMPTS });
+    }
   }
 }
 
@@ -193,6 +211,8 @@ async function runSchedulerTick(source) {
         triggeredSlots.set(scheduleId, { slotKey: due.slotKey, attempts: MAX_SLOT_ATTEMPTS });
       }
     }
+
+    await runAnalysisSchedules(now, source);
   } catch (err) {
     status.lastError = err.message;
     status.lastErrorAt = new Date().toISOString();
@@ -208,7 +228,7 @@ function startScheduler() {
   schedulerStarted = true;
   status.started = true;
   status.startedAt = new Date().toISOString();
-  console.log(`[Scheduler] Capacity scheduler started (tick ${TICK_INTERVAL_MS}ms, catch-up ${CATCHUP_WINDOW_MINUTES} min)`);
+  console.log(`[Scheduler] Scheduler started for capacity actions and analysis scans (tick ${TICK_INTERVAL_MS}ms, catch-up ${CATCHUP_WINDOW_MINUTES} min)`);
   // A plain interval rather than a cron expression: the tick is "every minute"
   // either way, and this keeps the cron parser out of the critical path.
   tickTimer = setInterval(() => runSchedulerTick('timer'), TICK_INTERVAL_MS);
@@ -254,5 +274,5 @@ module.exports = {
   kickScheduler,
   runSchedulerNow,
   getSchedulerStatus,
-  _private: { getScheduleSlotKey, isDueNow, executeSchedule, findDueSlot, runSchedulerTick },
+  _private: { getScheduleSlotKey, isDueNow, executeSchedule, findDueSlot, runSchedulerTick, runAnalysisSchedules },
 };

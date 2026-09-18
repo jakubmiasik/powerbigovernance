@@ -2,6 +2,8 @@
 // and why. Everything here is derived from data already stored in results_json —
 // no extra API calls — and every function is pure so it can be tested directly.
 
+const { checkWorkspace, normalizeConvention } = require('./namingConventionService');
+
 const DEFAULT_STALE_DAYS = 90;
 const DEFAULT_OVERSHARED_USERS = 50;
 
@@ -57,12 +59,28 @@ const FINDING_DEFS = [
     description: 'Fabric-only items sit in a workspace that is not on dedicated capacity, so they cannot run.',
   },
   {
+    key: 'personalAccess',
+    label: 'No group-based access',
+    severity: 'medium',
+    weight: 25,
+    icon: 'person-lines-fill',
+    description: 'Access is held by individual accounts and no security group holds any role. Every joiner and leaver then has to be remembered by hand, which is how access outlives the job that needed it.',
+  },
+  {
     key: 'overShared',
     label: 'Broadly shared',
     severity: 'low',
     weight: 20,
     icon: 'people',
     description: 'Access has been granted to an unusually large number of principals.',
+  },
+  {
+    key: 'namingConvention',
+    label: 'Off-convention names',
+    severity: 'low',
+    weight: 18,
+    icon: 'type',
+    description: 'Artifacts whose names do not follow the configured Fabric naming convention. Open the workspace to see each one and the name it should have.',
   },
   {
     key: 'emptyWorkspace',
@@ -75,6 +93,28 @@ const FINDING_DEFS = [
 ];
 
 const FINDING_BY_KEY = new Map(FINDING_DEFS.map(def => [def.key, def]));
+
+/**
+ * What a risk score means, in words.
+ *
+ * The score is the sum of the weights of everything found — nothing is averaged
+ * and nothing is capped, so it is a workload figure rather than a percentage:
+ * two medium problems outrank one, and one severe problem outranks three trivial
+ * ones. The bands exist so a number on a badge can be read without the table of
+ * weights beside it.
+ */
+const RISK_BANDS = [
+  { key: 'critical', label: 'Critical', min: 150, color: 'danger', description: 'Several serious problems at once, or one severe problem in a workspace that also has others. Deal with these first.' },
+  { key: 'high', label: 'High', min: 80, color: 'danger', description: 'At least one high-severity finding — typically nobody accountable for the workspace.' },
+  { key: 'medium', label: 'Medium', min: 35, color: 'warning', description: 'Worth scheduling: a single point of failure, abandoned content, or access nobody manages as a group.' },
+  { key: 'low', label: 'Low', min: 1, color: 'secondary', description: 'Housekeeping. Nothing here stops anyone working today.' },
+  { key: 'clean', label: 'Clean', min: 0, color: 'success', description: 'Nothing found by any of the checks below.' },
+];
+
+function riskBand(score) {
+  const value = Number(score) || 0;
+  return RISK_BANDS.find(band => value >= band.min) || RISK_BANDS[RISK_BANDS.length - 1];
+}
 
 // Item types that only exist on Fabric capacity.
 const FABRIC_ONLY_TYPES = new Set([
@@ -94,6 +134,14 @@ function isAdminRole(role) {
 function isPersonPrincipal(user) {
   const type = (user && user.type ? String(user.type) : 'User').toLowerCase();
   return type === 'user' || type === '';
+}
+
+// A security group is the only principal whose membership is managed somewhere
+// else — which is what makes joiner/leaver handling somebody's job rather than
+// nobody's.
+function isGroupPrincipal(user) {
+  const type = (user && user.type ? String(user.type) : '').toLowerCase();
+  return type === 'group' || type === 'securitygroup' || type === 'distributionlist';
 }
 
 function userDisplay(user) {
@@ -172,6 +220,18 @@ function analyzeWorkspace(workspace, context) {
       addFinding('singleAdmin', 'Only ' + userDisplay(humanAdmins[0]) + ' has Admin access.');
     }
 
+    // Access held only by named people. The workspace works today and falls apart
+    // quietly: nothing tells anyone to remove a leaver, and nothing grants a joiner.
+    const groupPrincipals = users.filter(isGroupPrincipal);
+    const peoplePrincipals = users.filter(isPersonPrincipal);
+    if (peoplePrincipals.length && !groupPrincipals.length) {
+      const named = peoplePrincipals.slice(0, 3).map(userDisplay).join(', ');
+      addFinding('personalAccess',
+        peoplePrincipals.length + ' individual account(s) hold access and no security group does: '
+        + named + (peoplePrincipals.length > 3 ? ', …' : '') + '.',
+        { count: peoplePrincipals.length });
+    }
+
     if (users.length >= overSharedUsers) {
       addFinding('overShared', users.length + ' principals have access (threshold ' + overSharedUsers + ').', { count: users.length });
     }
@@ -209,6 +269,20 @@ function analyzeWorkspace(workspace, context) {
     }
   }
 
+  // Names that do not follow the configured convention. Only when one is
+  // configured *and* switched on: an unconfigured convention would flag an entire
+  // tenant on its first scan, which is noise, not a finding.
+  if (context.namingConvention && items.length) {
+    const naming = checkWorkspace(workspace, context.namingConvention);
+    if (naming.offenders.length) {
+      const named = naming.offenders.slice(0, 3).map(offender => offender.name).join(', ');
+      addFinding('namingConvention',
+        naming.offenders.length + ' of ' + naming.checked + ' checked artifact(s) do not follow the convention: '
+        + named + (naming.offenders.length > 3 ? ', …' : '') + '.',
+        { count: naming.offenders.length, checked: naming.checked });
+    }
+  }
+
   // Fabric-only content in a workspace that is not on dedicated capacity.
   const onDedicatedCapacity = !!workspace.capacityId && workspace.capacityId !== EMPTY_CAPACITY_ID;
   if (!onDedicatedCapacity) {
@@ -236,6 +310,9 @@ function analyzeWorkspace(workspace, context) {
     lastActivityDays: lastActivity ? daysBetween(lastActivity, context.referenceDate) : null,
     findings,
     score,
+    // Read off the number actually shown on the badge, rather than off the worst
+    // single finding: a workspace with four medium problems is not "medium".
+    band: riskBand(score),
     highestSeverity: findings.length ? findings[0].severity : null,
   };
 }
@@ -262,7 +339,14 @@ function computeWorkspaceInsights(results, options = {}) {
   // nothing than to report a tenant-wide false positive.
   const detectOrphans = knownPrincipals.size > 0;
 
-  const context = { referenceDate, staleDays, overSharedUsers, knownPrincipals, detectOrphans };
+  // Normalized once for the whole run rather than per workspace: a tenant has
+  // thousands of items, and re-deriving the rules for each of them is work that
+  // produces the same answer every time.
+  const namingConvention = options.namingConvention && options.namingConvention.enabled
+    ? normalizeConvention(options.namingConvention)
+    : null;
+
+  const context = { referenceDate, staleDays, overSharedUsers, knownPrincipals, detectOrphans, namingConvention };
   const analyzed = workspaces.map(workspace => analyzeWorkspace(workspace, context));
 
   analyzed.sort((a, b) => b.score - a.score || b.totalItems - a.totalItems || a.name.localeCompare(b.name));
@@ -281,6 +365,13 @@ function computeWorkspaceInsights(results, options = {}) {
     totalCount: analyzed.length,
     byFinding,
     thresholds: { staleDays, overSharedUsers },
+    // So the page can explain the number on the badge instead of asking the
+    // reader to take it on trust.
+    riskBands: RISK_BANDS,
+    maxScore: FINDING_DEFS.reduce((sum, def) => sum + def.weight, 0),
+    // So the page can hide the naming card rather than showing a permanent zero
+    // for a check nobody has switched on.
+    namingConventionEnabled: !!namingConvention,
     referenceDate: referenceDate.toISOString(),
     orphanDetectionAvailable: detectOrphans,
   };
@@ -288,6 +379,8 @@ function computeWorkspaceInsights(results, options = {}) {
 
 module.exports = {
   FINDING_DEFS,
+  RISK_BANDS,
+  riskBand,
   DEFAULT_STALE_DAYS,
   DEFAULT_OVERSHARED_USERS,
   computeWorkspaceInsights,

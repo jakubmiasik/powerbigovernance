@@ -1,0 +1,218 @@
+<%- include('../partials/header') %>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-play-circle me-2"></i>Reconciliation Runs</h2>
+    <p class="text-muted mb-0">Every run is kept: what was checked, when, which rule version, and what it produced.</p>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    <a href="/reconciliation/compare" class="btn btn-sm btn-outline-primary"><i class="bi bi-arrow-left-right me-1"></i>Compare runs</a>
+    <% if (runs.length) { %>
+      <button class="btn btn-sm btn-outline-danger" onclick="openDeleteAll()"><i class="bi bi-trash3 me-1"></i>Delete runs</button>
+    <% } %>
+    <a href="/reconciliation" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+  </div>
+</div>
+<% if (error) { %><div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div><% } %>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-clock-history me-2"></i>Run History (<%= runs.length %>)</span>
+    <input type="text" class="form-control form-control-sm" style="max-width:260px;" placeholder="Filter runs..." oninput="filterTable(this, 'recon-runs-table')">
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0" id="recon-runs-table">
+      <thead><tr><th>Run</th><th>Rule</th><th>Group</th><th>Version</th><th>Status</th><th>Source A</th><th>Source B</th><th>Compared</th><th>Matched</th><th>Exceptions</th><th>Started</th><th>By</th><th></th></tr></thead>
+      <tbody>
+        <% if (!runs.length) { %><tr data-filter="none"><td colspan="13" class="text-muted small py-3">No runs yet. Activate a rule and run it from the Rules page.</td></tr><% } %>
+        <% runs.forEach(function(run) { %>
+          <tr data-filter="<%= [run.rule_name || '', ruleGroupLabel(run.rule_group), run.status, run.run_by || ''].join(' ').toLowerCase() %>">
+            <td><a href="/reconciliation/runs/<%= run.id %>">#<%= run.id %></a></td>
+            <td><%= run.rule_name || ('Rule #' + run.rule_id) %></td>
+            <td class="small"><span class="badge bg-light text-dark border"><%= ruleGroupLabel(run.rule_group) %></span></td>
+            <td class="small">v<%= run.rule_version %></td>
+            <td><span class="badge bg-<%= run.status === 'completed' ? 'success' : run.status === 'failed' ? 'danger' : 'secondary' %>"><%= run.status %></span></td>
+            <td><%= run.records_a === null || run.records_a === undefined ? '-' : run.records_a %></td>
+            <td><%= run.records_b === null || run.records_b === undefined ? '-' : run.records_b %></td>
+            <td><%= run.keys_compared === null || run.keys_compared === undefined ? '-' : run.keys_compared %></td>
+            <td><%= run.matched === null || run.matched === undefined ? '-' : run.matched %></td>
+            <td>
+              <% if (run.status !== 'completed') { %>-
+              <% } else if (run.exception_count) { %><span class="badge bg-danger"><%= run.exception_count %></span>
+              <% } else { %><span class="badge bg-success">0</span><% } %>
+            </td>
+            <td class="small"><%= run.started_at ? new Date(run.started_at).toLocaleString() : '-' %></td>
+            <td class="small"><%= run.run_by || '-' %></td>
+            <td class="text-end text-nowrap">
+              <% if (run.status === 'completed') { %>
+                <a href="/reconciliation/compare?to=<%= run.id %>" class="btn btn-sm btn-outline-primary p-0 px-1" title="Compare this run with another run of the same rule"><i class="bi bi-arrow-left-right"></i></a>
+              <% } %>
+              <button class="btn btn-sm btn-outline-danger p-0 px-1" onclick="confirmDeleteRun(<%= run.id %>)" title="Delete this run and everything belonging only to it"><i class="bi bi-trash"></i></button>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+<div class="modal fade" id="deleteRunModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title"><i class="bi bi-trash3 me-2 text-danger"></i>Delete Run</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="deleteRunBody"></div>
+      <div class="modal-footer" id="deleteRunFooter"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="deleteAllModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title"><i class="bi bi-trash3 me-2 text-danger"></i>Delete Runs</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <label class="form-label small" for="deleteAllRule">Which runs</label>
+        <select class="form-select form-select-sm mb-3" id="deleteAllRule">
+          <option value="">Every run of every rule</option>
+          <% rules.forEach(function(rule) { %>
+            <option value="<%= rule.id %>">Only the runs of <%= rule.name %></option>
+          <% }) %>
+        </select>
+        <div class="alert alert-warning small mb-0">
+          <i class="bi bi-exclamation-triangle me-1"></i>
+          This cannot be undone. Exceptions that no surviving run ever saw are removed with the runs; the rest keep their history and
+          have their first and last sighting recomputed from the runs that remain.
+        </div>
+        <div class="mt-3" id="deleteAllProgress"></div>
+      </div>
+      <div class="modal-footer" id="deleteAllFooter">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger btn-sm" id="deleteAllBtn" onclick="startDeleteAll()">
+          <i class="bi bi-trash3 me-1"></i>Delete
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function escapeText(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+/** Says what will go before it goes: the effect on exceptions is not obvious. */
+async function confirmDeleteRun(runId) {
+  var modal = new bootstrap.Modal(document.getElementById('deleteRunModal'));
+  var body = document.getElementById('deleteRunBody');
+  var footer = document.getElementById('deleteRunFooter');
+  body.innerHTML = '<div class="text-center py-3"><div class="spinner-border text-primary"></div></div>';
+  footer.innerHTML = '';
+  modal.show();
+
+  try {
+    var resp = await fetch('/reconciliation/runs/' + runId + '/deletion-impact');
+    var data = await resp.json();
+    if (!data.success) { body.innerHTML = '<div class="alert alert-danger mb-0">' + escapeText(data.message) + '</div>'; return; }
+
+    body.innerHTML =
+      '<p class="small">Run <strong>#' + data.run.id + '</strong> of <strong>' + escapeText(data.run.ruleName || 'this rule') + '</strong>' +
+        (data.run.startedAt ? ', ' + new Date(data.run.startedAt).toLocaleString() : '') + '.</p>' +
+      '<ul class="small">' +
+        '<li><strong>' + data.findings + '</strong> finding(s) recorded by this run will be removed</li>' +
+        '<li><strong>' + data.exceptionsToDelete + '</strong> exception(s) will be deleted — no other run ever saw them</li>' +
+        '<li><strong>' + data.exceptionsToKeep + '</strong> exception(s) will be kept, with their sightings recomputed</li>' +
+      '</ul>' +
+      (data.attributable ? '' :
+        '<div class="alert alert-warning small mb-0"><i class="bi bi-exclamation-triangle me-1"></i>' +
+        'This run recorded no findings, so nothing can be attributed to it. Only the run itself will go; its exceptions are left alone.' +
+        '</div>') +
+      '<div class="mt-3" id="deleteRunProgress"></div>';
+    footer.innerHTML =
+      '<button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>' +
+      '<button type="button" class="btn btn-danger btn-sm" id="deleteRunBtn" onclick="startDeleteRun(' + runId + ')">' +
+        '<i class="bi bi-trash3 me-1"></i>Delete run #' + runId + '</button>';
+  } catch (e) {
+    body.innerHTML = '<div class="alert alert-danger mb-0">' + escapeText(e.message) + '</div>';
+  }
+}
+
+async function startDeleteRun(runId) {
+  var progress = document.getElementById('deleteRunProgress');
+  document.getElementById('deleteRunBtn').disabled = true;
+  progress.innerHTML = '<div class="small text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Starting...</div>';
+
+  try {
+    var resp = await fetch('/reconciliation/runs/' + runId, { method: 'DELETE' });
+    var data = await resp.json();
+    if (!data.success) { progress.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeText(data.message) + '</div>'; return; }
+
+    pollJob(data.jobId,
+      function(job) {
+        progress.innerHTML = jobProgressHtml(job,
+          (job.counters.exceptions || 0) + ' exception(s) removed · ' + (job.counters.repaired || 0) + ' kept and repointed');
+      },
+      function(job) {
+        if (job.status !== 'completed') {
+          progress.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeText(job.message || 'The deletion did not finish.') + '</div>';
+          return;
+        }
+        progress.innerHTML = '<div class="alert alert-success py-2 small mb-0">Deleted. Reloading...</div>';
+        setTimeout(function() { window.location.reload(); }, 700);
+      });
+  } catch (e) {
+    progress.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeText(e.message) + '</div>';
+  }
+}
+
+function openDeleteAll() {
+  document.getElementById('deleteAllProgress').innerHTML = '';
+  document.getElementById('deleteAllBtn').disabled = false;
+  new bootstrap.Modal(document.getElementById('deleteAllModal')).show();
+}
+
+async function startDeleteAll() {
+  var ruleId = document.getElementById('deleteAllRule').value;
+  var progress = document.getElementById('deleteAllProgress');
+  document.getElementById('deleteAllBtn').disabled = true;
+  progress.innerHTML = '<div class="small text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Starting...</div>';
+
+  try {
+    var resp = await fetch('/reconciliation/runs/delete-all', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      // Deleting every run of every rule is confirmed explicitly; the server
+      // refuses it otherwise.
+      body: JSON.stringify({ ruleId: ruleId || null, confirm: !ruleId })
+    });
+    var data = await resp.json();
+    if (!data.success) {
+      progress.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeText(data.message) + '</div>';
+      document.getElementById('deleteAllBtn').disabled = false;
+      return;
+    }
+
+    pollJob(data.jobId,
+      function(job) {
+        progress.innerHTML = jobProgressHtml(job,
+          (job.counters.runs || 0) + ' run(s) · ' + (job.counters.exceptions || 0) + ' exception(s) removed');
+      },
+      function(job) {
+        if (job.status !== 'completed') {
+          progress.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeText(job.message || 'The deletion did not finish.') + '</div>';
+          return;
+        }
+        var problems = (job.problems || []).map(function(p) {
+          return '<li>' + escapeText(p.key) + ' — ' + escapeText(p.message) + '</li>';
+        }).join('');
+        progress.innerHTML = '<div class="alert alert-' + (problems ? 'warning' : 'success') + ' py-2 small mb-0">' +
+          (job.counters.runs || 0) + ' run(s) deleted.' +
+          (problems ? '<br>Not deleted:<ul class="mb-0">' + problems + '</ul>' : ' Reloading...') + '</div>';
+        setTimeout(function() { window.location.reload(); }, problems ? 5000 : 700);
+      });
+  } catch (e) {
+    progress.innerHTML = '<div class="alert alert-danger py-2 small mb-0">' + escapeText(e.message) + '</div>';
+  }
+}
+</script>
+<%- include('../partials/footer') %>

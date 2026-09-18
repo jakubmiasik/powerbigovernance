@@ -20,6 +20,26 @@ function request(server, path) {
   });
 }
 
+function postJson(server, path, payload) {
+  const { port } = server.address();
+  const body = JSON.stringify(payload);
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1', port, path, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { text += chunk; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(text)); } catch (err) { reject(new Error('Non-JSON response: ' + text.slice(0, 200))); }
+      });
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
 test('health endpoint responds without database access', async () => {
   const server = await new Promise(resolve => {
     const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
@@ -616,6 +636,9 @@ test('triage flags workspaces with no admin and with only non-user admins', () =
       ws({ name: 'Healthy', users: [
         { name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' },
         { name: 'Cleo', email: 'cleo@x.com', role: 'Admin', type: 'User' },
+        // A security group somewhere in the list, or this workspace is flagged for
+        // being held by named people alone — see the group-based access tests.
+        { name: 'BI Readers', role: 'Viewer', type: 'Group' },
       ] }),
     ],
   }, { referenceDate: SCAN_DATE });
@@ -1201,5 +1224,5123 @@ test('the pipeline grant redirect resolves the async auth URL', async () => {
     server.close();
     authService.getDelegatedAuthUrl = original;
     delete require.cache[require.resolve('../src/routes/pipelines')];
+  }
+});
+
+// ── Data reconciliation engine ──
+const recon = require('../src/services/reconciliationService');
+
+const INVOICE_RULE = {
+  keyFieldA: 'InvoiceNumber',
+  keyFieldB: 'Invoice_No',
+  priority: 'medium',
+  compareFields: [
+    { label: 'Customer', fieldA: 'Customer', fieldB: 'CustomerName', type: 'string' },
+    { label: 'Net amount', fieldA: 'NetAmount', fieldB: 'Net', type: 'number' },
+  ],
+};
+
+test('reconciliation matches records that agree in both systems', () => {
+  const result = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: 'INV-1', CustomerName: 'Acme', Net: 100 }],
+    rule: INVOICE_RULE,
+  });
+  assert.equal(result.summary.matched, 1);
+  assert.equal(result.summary.exceptions, 0);
+  assert.equal(result.summary.passed, true);
+  assert.deepEqual(result.exceptions, []);
+});
+
+test('reconciliation reports which system a record is missing from', () => {
+  const result = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: 'INV-2', CustomerName: 'Beta', Net: 50 }],
+    rule: INVOICE_RULE,
+  });
+  const byOutcome = Object.fromEntries(result.exceptions.map(e => [e.businessKey, e.outcome]));
+  assert.equal(byOutcome['INV-1'], recon.OUTCOME.MISSING_FROM_B);
+  assert.equal(byOutcome['INV-2'], recon.OUTCOME.MISSING_FROM_A);
+  assert.equal(result.summary.matched, 0);
+  assert.equal(result.summary.passed, false);
+});
+
+test('reconciliation reports the specific values that differ', () => {
+  const result = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: 'INV-1', CustomerName: 'Acme Corp', Net: 120 }],
+    rule: INVOICE_RULE,
+  });
+  assert.equal(result.exceptions.length, 1);
+  const exception = result.exceptions[0];
+  assert.equal(exception.outcome, recon.OUTCOME.VALUE_MISMATCH);
+  assert.deepEqual(exception.differences.map(d => d.field), ['Customer', 'Net amount']);
+  // The amount difference is quantified, not just flagged.
+  assert.equal(exception.differences[1].difference, 20);
+  assert.deepEqual(exception.valuesA, { Customer: 'Acme', 'Net amount': 100 });
+});
+
+test('reconciliation accepts differences inside an agreed tolerance', () => {
+  const rule = {
+    ...INVOICE_RULE,
+    compareFields: [
+      { label: 'Tax', fieldA: 'Tax', fieldB: 'TaxAmount', type: 'number', tolerance: { type: 'absolute', value: 0.02 } },
+    ],
+  };
+  const within = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Tax: 19.99 }],
+    rowsB: [{ Invoice_No: 'INV-1', TaxAmount: 20.00 }],
+    rule,
+  });
+  assert.equal(within.summary.matched, 1, 'a one-cent rounding difference is immaterial');
+
+  const outside = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Tax: 19.00 }],
+    rowsB: [{ Invoice_No: 'INV-1', TaxAmount: 20.00 }],
+    rule,
+  });
+  assert.equal(outside.summary.exceptions, 1, 'a whole unit is not');
+});
+
+test('percentage tolerance scales with the value being compared', () => {
+  const field = { fieldA: 'a', fieldB: 'b', type: 'number', tolerance: { type: 'percent', value: 1 } };
+  assert.equal(recon.compareValues(1000, 1005, field).equal, true);
+  assert.equal(recon.compareValues(1000, 1050, field).equal, false);
+  // A percentage of zero has no meaning, so it falls back to an exact comparison.
+  assert.equal(recon.compareValues(0, 5, field).equal, false);
+});
+
+test('reconciliation flags duplicate business keys instead of guessing', () => {
+  const rows = {
+    rowsA: [
+      { InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 },
+      { InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 },
+    ],
+    rowsB: [{ Invoice_No: 'INV-1', CustomerName: 'Acme', Net: 100 }],
+  };
+  const flagged = recon.reconcile({ ...rows, rule: INVOICE_RULE });
+  assert.equal(flagged.exceptions[0].outcome, recon.OUTCOME.DUPLICATE);
+  assert.equal(flagged.exceptions[0].countA, 2);
+
+  // A rule may instead accept the first record when duplicates are expected.
+  const tolerated = recon.reconcile({ ...rows, rule: { ...INVOICE_RULE, duplicateHandling: 'first' } });
+  assert.equal(tolerated.summary.matched, 1);
+  assert.equal(tolerated.summary.exceptions, 0);
+});
+
+test('records with a blank business key are reported, never matched together', () => {
+  const result = recon.reconcile({
+    rowsA: [{ InvoiceNumber: '', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: '   ', CustomerName: 'Beta', Net: 50 }],
+    rule: INVOICE_RULE,
+  });
+  assert.equal(result.exceptions.length, 2);
+  assert.ok(result.exceptions.every(e => e.outcome === recon.OUTCOME.INVALID_KEY));
+  // Two blank keys must not be treated as the same business item.
+  assert.equal(result.summary.matched, 0);
+
+  const ignored = recon.reconcile({
+    rowsA: [{ InvoiceNumber: '', Customer: 'Acme' }],
+    rowsB: [{ Invoice_No: '', CustomerName: 'Beta' }],
+    rule: { ...INVOICE_RULE, incompleteKeyHandling: 'ignore' },
+  });
+  assert.equal(ignored.summary.exceptions, 0);
+});
+
+test('business keys match regardless of case and surrounding spaces', () => {
+  const result = recon.reconcile({
+    rowsA: [{ InvoiceNumber: ' inv-1 ', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: 'INV-1', CustomerName: 'Acme', Net: 100 }],
+    rule: INVOICE_RULE,
+  });
+  assert.equal(result.summary.matched, 1);
+});
+
+test('a high-priority rule raises the severity of what it finds', () => {
+  const normal = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: 'INV-1', CustomerName: 'Other', Net: 100 }],
+    rule: INVOICE_RULE,
+  });
+  assert.equal(normal.exceptions[0].severity, 'medium');
+
+  const critical = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-1', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [{ Invoice_No: 'INV-1', CustomerName: 'Other', Net: 100 }],
+    rule: { ...INVOICE_RULE, priority: 'high' },
+  });
+  assert.equal(critical.exceptions[0].severity, 'high');
+});
+
+test('date comparison tolerates a configured number of days', () => {
+  const field = { fieldA: 'a', fieldB: 'b', type: 'date', tolerance: { type: 'days', value: 1 } };
+  assert.equal(recon.compareValues('2026-07-01', '2026-07-02', field).equal, true);
+  assert.equal(recon.compareValues('2026-07-01', '2026-07-05', field).equal, false);
+  assert.equal(recon.compareValues('2026-07-01', 'not a date', field).equal, false);
+});
+
+test('the exception lifecycle only allows supported transitions', () => {
+  assert.equal(recon.isStatusTransitionAllowed('open', 'acknowledged'), true);
+  assert.equal(recon.isStatusTransitionAllowed('acknowledged', 'investigating'), true);
+  assert.equal(recon.isStatusTransitionAllowed('investigating', 'resolved'), true);
+  // A closed exception can only be reopened, not moved sideways.
+  assert.equal(recon.isStatusTransitionAllowed('resolved', 'open'), true);
+  assert.equal(recon.isStatusTransitionAllowed('resolved', 'investigating'), false);
+  assert.equal(recon.isStatusTransitionAllowed('open', 'open'), false);
+});
+
+test('the same unresolved item keeps one identity across runs', () => {
+  const first = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'INV-9', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [],
+    rule: INVOICE_RULE,
+  });
+  const second = recon.reconcile({
+    rowsA: [{ InvoiceNumber: 'inv-9', Customer: 'Acme', NetAmount: 100 }],
+    rowsB: [],
+    rule: INVOICE_RULE,
+  });
+  assert.equal(
+    recon.exceptionFingerprint(7, first.exceptions[0]),
+    recon.exceptionFingerprint(7, second.exceptions[0]),
+    'the same business item must not be raised as a new exception each run'
+  );
+  // A different rule checking the same key is a different control.
+  assert.notEqual(
+    recon.exceptionFingerprint(7, first.exceptions[0]),
+    recon.exceptionFingerprint(8, first.exceptions[0])
+  );
+});
+
+test('a rule without a business key is refused rather than matching everything', () => {
+  assert.throws(
+    () => recon.reconcile({ rowsA: [{ a: 1 }], rowsB: [{ b: 2 }], rule: { compareFields: [] } }),
+    /business key/i
+  );
+});
+
+// ── Comparison operands: fields, SQL expressions and fixed values ──
+
+test('a rule can compare a column against a fixed value', () => {
+  const rule = {
+    keyFieldA: 'InvoiceNumber', keyFieldB: 'Invoice_No',
+    compareFields: [{ label: 'Currency', a: { kind: 'field', value: 'Currency' }, b: { kind: 'constant', value: 'EUR' }, type: 'string' }],
+  };
+  const plan = recon.planRule(rule);
+  // A constant is never selected from the source.
+  assert.deepEqual(plan.selectionsB.map(s => s.alias), [recon.KEY_ALIAS]);
+  assert.equal(plan.engineRule.compareFields[0].constantB, 'EUR');
+
+  const result = recon.reconcile({
+    rowsA: [
+      { [recon.KEY_ALIAS]: 'INV-1', recon_c0a: 'EUR' },
+      { [recon.KEY_ALIAS]: 'INV-2', recon_c0a: 'USD' },
+    ],
+    rowsB: [{ [recon.KEY_ALIAS]: 'INV-1' }, { [recon.KEY_ALIAS]: 'INV-2' }],
+    rule: plan.engineRule,
+  });
+  assert.equal(result.summary.matched, 1);
+  assert.equal(result.exceptions.length, 1);
+  assert.equal(result.exceptions[0].businessKey, 'INV-2');
+  assert.deepEqual(result.exceptions[0].valuesB, { Currency: 'EUR' });
+});
+
+test('a SQL expression becomes an aliased selection on its own side', () => {
+  const plan = recon.planRule({
+    keyFieldA: 'Id', keyFieldB: 'Id',
+    compareFields: [{
+      label: 'Customer',
+      a: { kind: 'expression', value: 'TRIM(Customer)' },
+      b: { kind: 'field', value: 'CustomerName' },
+      type: 'string',
+    }],
+  });
+  const expression = plan.selectionsA.find(s => s.kind === 'expression');
+  assert.equal(expression.value, 'TRIM(Customer)');
+  assert.equal(expression.alias, plan.engineRule.compareFields[0].fieldA);
+  // Source B still selects a plain column.
+  assert.equal(plan.selectionsB[1].kind, 'field');
+  assert.equal(plan.selectionsB[1].value, 'CustomerName');
+});
+
+test('expressions are checked for anything beyond a read-only expression', () => {
+  assert.equal(recon.validateSqlExpression('TRIM(Customer)'), null);
+  assert.equal(recon.validateSqlExpression("CASE WHEN Status = 1 THEN 'Posted' ELSE 'Draft' END"), null);
+  assert.equal(recon.validateSqlExpression('CAST(Amount AS decimal(18,2))'), null);
+
+  assert.match(recon.validateSqlExpression('Amount; DROP TABLE Invoices'), /statement separators/);
+  assert.match(recon.validateSqlExpression('Amount -- comment'), /comments/);
+  assert.match(recon.validateSqlExpression('Amount /* x */'), /comments/);
+  assert.match(recon.validateSqlExpression('(SELECT 1 FROM t WHERE 1=1'), /parentheses/);
+  assert.match(recon.validateSqlExpression("(SELECT x FROM y) + (DELETE FROM z)"), /read-only/);
+  assert.match(recon.validateSqlExpression('   '), /empty/);
+});
+
+test('rule validation reports every operand problem at once', () => {
+  const problems = recon.validateCompareFields([
+    { label: 'Bad expression', a: { kind: 'expression', value: 'Amount;' }, b: { kind: 'field', value: 'Net' } },
+    { label: 'Empty field', a: { kind: 'field', value: '' }, b: { kind: 'field', value: 'Net' } },
+    { label: 'Two constants', a: { kind: 'constant', value: '1' }, b: { kind: 'constant', value: '1' } },
+  ]);
+  assert.equal(problems.length, 3);
+  assert.match(problems[0], /Bad expression.*source A/i);
+  assert.match(problems[1], /Empty field.*source A/i);
+  assert.match(problems[2], /both sides are constants/i);
+});
+
+test('rules written before operands existed still plan and run', () => {
+  // Legacy shape: plain fieldA/fieldB with no operand descriptors.
+  const plan = recon.planRule({
+    keyFieldA: 'InvoiceNumber', keyFieldB: 'Invoice_No',
+    compareFields: [{ label: 'Net', fieldA: 'NetAmount', fieldB: 'Net', type: 'number' }],
+  });
+  assert.equal(plan.selectionsA[1].kind, 'field');
+  assert.equal(plan.selectionsA[1].value, 'NetAmount');
+  assert.equal(plan.selectionsB[1].value, 'Net');
+
+  const result = recon.reconcile({
+    rowsA: [{ [recon.KEY_ALIAS]: 'INV-1', recon_c0a: 100 }],
+    rowsB: [{ [recon.KEY_ALIAS]: 'INV-1', recon_c0b: 100 }],
+    rule: plan.engineRule,
+  });
+  assert.equal(result.summary.matched, 1);
+});
+
+test('a constant on the missing side is still reported in the exception values', () => {
+  const plan = recon.planRule({
+    keyFieldA: 'Id', keyFieldB: 'Id',
+    compareFields: [{ label: 'Expected status', a: { kind: 'field', value: 'Status' }, b: { kind: 'constant', value: 'Posted' }, type: 'string' }],
+  });
+  const result = recon.reconcile({
+    rowsA: [{ [recon.KEY_ALIAS]: 'INV-9', recon_c0a: 'Draft' }],
+    rowsB: [],
+    rule: plan.engineRule,
+  });
+  assert.equal(result.exceptions[0].outcome, recon.OUTCOME.MISSING_FROM_B);
+  assert.deepEqual(result.exceptions[0].valuesA, { 'Expected status': 'Draft' });
+});
+
+// ── Analysis run progress ──
+const runProgress = require('../src/services/runProgressService');
+
+// Drives a progress state through the phases a real run goes through, up to the
+// point named by `stopAfter`.
+function progressThrough(stopAfter, { startedAt = 0 } = {}) {
+  const state = runProgress.createProgress({ runId: 7, startedAt });
+  const steps = [
+    ['workspaces', 12],
+    ['items', 400],
+    ['capacities', 3],
+    ['pipelines', 1],
+    ['workspaceDetails', 12],
+    ['access', 12],
+    ['storage', 90],
+    ['details', 300],
+    ['tenantSettings', 200],
+    ['save', 1],
+  ];
+  for (const [key, total] of steps) {
+    runProgress.beginPhase(state, key, { total, now: startedAt });
+    runProgress.advancePhase(state, key, { done: total, now: startedAt });
+    runProgress.completePhase(state, key, { now: startedAt });
+    if (key === stopAfter) break;
+  }
+  return state;
+}
+
+test('progress is weighted by phase, so finishing a cheap phase is not most of the run', () => {
+  const early = progressThrough('capacities');
+  const late = progressThrough('storage');
+  assert.ok(runProgress.overallPercent(early) < 15,
+    'three list calls should not read as a large share of the run');
+  assert.ok(runProgress.overallPercent(late) > 55);
+  assert.ok(runProgress.overallPercent(late) < runProgress.overallPercent(progressThrough('details')));
+});
+
+test('a run still going never reports 100 percent', () => {
+  // Regression: storage used to drive the bar to 100 while artifact details — the
+  // second-longest phase — had not started, so "nearly done" and "done" looked alike.
+  const state = progressThrough('storage');
+  runProgress.beginPhase(state, 'details', { total: 300 });
+  runProgress.advancePhase(state, 'details', { done: 300 });
+  runProgress.completePhase(state, 'details');
+  runProgress.completePhase(state, 'tenantSettings');
+  runProgress.completePhase(state, 'save');
+  assert.equal(runProgress.overallPercent(state), 99);
+
+  state.status = 'completed';
+  assert.equal(runProgress.overallPercent(state), 100);
+});
+
+test('the storage phase moves the bar item by item, not workspace by workspace', () => {
+  const state = progressThrough('access');
+  const before = runProgress.overallPercent(state);
+  runProgress.beginPhase(state, 'storage', { total: 200 });
+  runProgress.advancePhase(state, 'storage', { done: 100 });
+  const half = runProgress.overallPercent(state);
+  runProgress.advancePhase(state, 'storage', { done: 200 });
+  assert.ok(half > before, 'half of the storage items should show as progress');
+  assert.ok(runProgress.overallPercent(state) > half);
+});
+
+test('work done and work remaining are counted from the sized phases', () => {
+  const state = runProgress.createProgress({ runId: 1 });
+  runProgress.beginPhase(state, 'workspaces', { total: 10 });
+  runProgress.completePhase(state, 'workspaces');
+  runProgress.beginPhase(state, 'storage', { total: 40 });
+  runProgress.advancePhase(state, 'storage', { done: 15 });
+
+  const units = runProgress.unitTotals(state);
+  assert.equal(units.total, 50);
+  assert.equal(units.done, 25);
+  assert.equal(units.remaining, 25);
+});
+
+test('a phase left active is closed when the next one starts', () => {
+  // Phases that end in a swallowed error never call completePhase; without this the
+  // run would look permanently stuck on whichever one failed.
+  const state = runProgress.createProgress({ runId: 1 });
+  runProgress.beginPhase(state, 'pipelines', { total: 1 });
+  runProgress.beginPhase(state, 'storage', { total: 5 });
+  assert.equal(runProgress.findPhase(state, 'pipelines').state, 'done');
+  assert.equal(runProgress.findPhase(state, 'workspaces').state, 'skipped');
+});
+
+test('remaining time is withheld until the estimate means something', () => {
+  const startedAt = 1000000;
+  const state = progressThrough('access', { startedAt });
+  // Ten seconds in, an extrapolation from a couple of list calls is noise.
+  assert.equal(runProgress.estimateRemainingSeconds(state, startedAt + 10000), null);
+
+  const eta = runProgress.estimateRemainingSeconds(state, startedAt + 120000);
+  assert.ok(typeof eta === 'number' && eta > 0);
+});
+
+test('throttling is reported as waiting, not as a stall', () => {
+  const now = 5000000;
+  const state = runProgress.createProgress({ runId: 3, startedAt: now - 600000 });
+  state.updatedAt = now - 300000;
+  state.throttledUntil = now + 45000;
+
+  const summary = runProgress.summarize(state, { now, stallSeconds: 90 });
+  assert.equal(summary.stalled, false);
+  assert.equal(summary.throttleRemainingSeconds, 45);
+
+  state.throttledUntil = null;
+  assert.equal(runProgress.summarize(state, { now, stallSeconds: 90 }).stalled, true);
+});
+
+test('a stored snapshot rebuilds the phase counts for another worker to read', () => {
+  const state = progressThrough('access');
+  runProgress.beginPhase(state, 'storage', { total: 120 });
+  runProgress.advancePhase(state, 'storage', { done: 30, detail: 'Finance → Sales lakehouse' });
+
+  const now = state.updatedAt + 1000;
+  const summary = runProgress.fromSnapshot(runProgress.toSnapshot(state), { now });
+  assert.equal(summary.status, 'running');
+  assert.equal(summary.fromSnapshot, true);
+  assert.equal(summary.phaseDone, 30);
+  assert.equal(summary.phaseTotal, 120);
+  assert.equal(summary.detail, 'Finance → Sales lakehouse');
+  assert.equal(summary.progress, runProgress.overallPercent(state));
+});
+
+test('a snapshot that stopped being written is reported as interrupted', () => {
+  // The worker that owned the run is gone. Reporting it as still running would
+  // leave the user watching a run that will never move again.
+  const state = progressThrough('access');
+  const snapshot = runProgress.toSnapshot(state);
+  const now = snapshot.updatedAt + 3600000;
+
+  const summary = runProgress.fromSnapshot(snapshot, { now, staleSeconds: 900 });
+  assert.equal(summary.status, 'interrupted');
+  assert.equal(summary.live, false);
+  assert.match(summary.message, /stopped reporting progress/i);
+
+  const fresh = runProgress.fromSnapshot(snapshot, { now: snapshot.updatedAt + 5000, staleSeconds: 900 });
+  assert.equal(fresh.status, 'running');
+  assert.equal(fresh.live, true);
+});
+
+test('a finished snapshot is left alone however old it is', () => {
+  const state = progressThrough('save');
+  state.status = 'completed';
+  const snapshot = runProgress.toSnapshot(state);
+  const summary = runProgress.fromSnapshot(snapshot, { now: snapshot.updatedAt + 86400000 });
+  assert.equal(summary.status, 'completed');
+  assert.equal(summary.progress, 100);
+});
+
+test('checking a backgrounded run answers from the stored snapshot', async () => {
+  // No in-memory run: this stands in for a different worker, or the same one after
+  // a restart — the case the in-memory-only version could not answer at all.
+  const state = progressThrough('access');
+  runProgress.beginPhase(state, 'storage', { total: 60 });
+  runProgress.advancePhase(state, 'storage', { done: 20 });
+  const snapshot = runProgress.toSnapshot(state);
+  snapshot.updatedAt = Date.now() - 2000;
+
+  const original = dbService.getRunProgress;
+  dbService.getRunProgress = async runId => (runId === 42 ? { ...snapshot, runId } : null);
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const response = await request(server, '/analysis/progress/42');
+    const body = JSON.parse(response.body);
+    assert.equal(body.status, 'running');
+    assert.equal(body.live, true);
+    assert.equal(body.fromSnapshot, true);
+    assert.equal(body.phaseTotal, 60);
+    assert.equal(body.phaseDone, 20);
+    assert.ok(body.unitsRemaining > 0);
+  } finally {
+    dbService.getRunProgress = original;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('a run whose worker died is reported as interrupted, not as running forever', async () => {
+  const snapshot = runProgress.toSnapshot(progressThrough('items'));
+  snapshot.updatedAt = Date.now() - 3600000;
+
+  const original = dbService.getRunProgress;
+  dbService.getRunProgress = async () => snapshot;
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = JSON.parse((await request(server, '/analysis/progress/99')).body);
+    assert.equal(body.status, 'interrupted');
+    assert.equal(body.live, false);
+  } finally {
+    dbService.getRunProgress = original;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('the runs table can read every in-flight run in one call', async () => {
+  const first = runProgress.toSnapshot(progressThrough('access'));
+  first.runId = 11;
+  first.updatedAt = Date.now() - 1000;
+  const second = runProgress.toSnapshot(progressThrough('items'));
+  second.runId = 12;
+  second.updatedAt = Date.now() - 1000;
+
+  const original = dbService.getLiveRunProgress;
+  dbService.getLiveRunProgress = async () => [first, second];
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = JSON.parse((await request(server, '/analysis/progress')).body);
+    assert.deepEqual(body.runs.map(run => run.runId).sort(), [11, 12]);
+    assert.ok(body.runs.every(run => run.live));
+  } finally {
+    dbService.getLiveRunProgress = original;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+// ── Reconciliation: shared SQL projection ──
+test('both kinds of source read the same projection for a planned rule', () => {
+  // A Fabric endpoint and a registered database must return identically shaped rows,
+  // or the two sides of a comparison would not line up.
+  const plan = recon.planRule({
+    keyFieldA: 'InvoiceNumber', keyFieldB: 'Invoice_No',
+    compareFields: [
+      { label: 'Net', a: { kind: 'expression', value: 'ROUND(NetAmount, 2)' }, b: { kind: 'field', value: 'Net' }, type: 'number' },
+      { label: 'Currency', a: { kind: 'field', value: 'Ccy' }, b: { kind: 'constant', value: 'EUR' }, type: 'string' },
+    ],
+  });
+
+  const sqlA = recon.buildSelectSql({ dataset: 'dbo.Invoices', selections: plan.selectionsA, rowLimit: 500 });
+  assert.match(sqlA, /^SELECT TOP \(500\) /);
+  assert.match(sqlA, /\[InvoiceNumber\] AS \[recon_key\]/);
+  assert.match(sqlA, /\(ROUND\(NetAmount, 2\)\) AS \[recon_c0a\]/);
+  assert.match(sqlA, /FROM \[dbo\]\.\[Invoices\]$/);
+
+  // The constant is never selected from either source.
+  const sqlB = recon.buildSelectSql({ dataset: 'Sales', selections: plan.selectionsB });
+  assert.ok(!/EUR/.test(sqlB), 'a fixed value must not be read from the source');
+  assert.match(sqlB, /\[Net\] AS \[recon_c0b\]/);
+});
+
+test('an identifier that is not a plain name is refused rather than concatenated', () => {
+  assert.throws(
+    () => recon.buildSelectSql({ dataset: 'Invoices; DROP TABLE x', selections: [{ alias: 'a', kind: 'field', value: 'Id' }] }),
+    /Unsupported identifier/
+  );
+});
+
+// ── Reconciliation: external database sources ──
+const sqlSource = require('../src/services/sqlSourceService');
+
+test('external source schema is reshaped into datasets and fields', () => {
+  const datasets = sqlSource.shapeSchemaRows([
+    { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'Invoices', TABLE_TYPE: 'BASE TABLE', COLUMN_NAME: 'Id', DATA_TYPE: 'int', IS_NULLABLE: 'NO' },
+    { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'Invoices', TABLE_TYPE: 'BASE TABLE', COLUMN_NAME: 'Customer', DATA_TYPE: 'nvarchar', IS_NULLABLE: 'YES', CHARACTER_MAXIMUM_LENGTH: 200 },
+    { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'InvoiceView', TABLE_TYPE: 'VIEW', COLUMN_NAME: 'Total', DATA_TYPE: 'decimal', NUMERIC_PRECISION: 18, NUMERIC_SCALE: 2 },
+    // A table with no columns readable by this identity still appears, so an
+    // access problem does not look like a missing table.
+    { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'Locked', TABLE_TYPE: 'BASE TABLE', COLUMN_NAME: null },
+  ]);
+
+  assert.equal(datasets.length, 3);
+  assert.deepEqual(datasets[0].fields.map(f => f.name), ['Id', 'Customer']);
+  assert.equal(datasets[0].fields[1].dataType, 'nvarchar(200)');
+  assert.equal(datasets[0].fields[1].nullable, true);
+  assert.equal(datasets[1].kind, 'View');
+  assert.equal(datasets[1].fields[0].dataType, 'decimal(18,2)');
+  assert.equal(datasets[2].fields.length, 0);
+});
+
+test('a SQL login source builds a password connection, an Entra one builds a token connection', () => {
+  const { connectionConfig } = sqlSource._private;
+
+  const entra = connectionConfig({ connection_string: 'srv.database.windows.net', database_name: 'ERP', auth_mode: 'entra' }, 'a-token');
+  assert.equal(entra.server, 'srv.database.windows.net');
+  assert.equal(entra.authentication.type, 'azure-active-directory-access-token');
+  assert.equal(entra.authentication.options.token, 'a-token');
+  assert.equal(entra.options.encrypt, true);
+
+  const sql = connectionConfig({
+    connection_string: 'onprem', database_name: 'ERP', auth_mode: 'sql',
+    sql_username: 'svc', sql_password: 'plaintext-legacy', sql_port: '1444',
+  }, null);
+  assert.equal(sql.authentication.type, 'default');
+  assert.equal(sql.authentication.options.userName, 'svc');
+  assert.equal(sql.options.port, 1444);
+});
+
+test('a SQL login with no stored password is refused rather than attempted anonymously', () => {
+  assert.throws(
+    () => sqlSource._private.connectionConfig({ connection_string: 's', auth_mode: 'sql', sql_username: 'svc' }, null),
+    /no username or password is stored/
+  );
+});
+
+test('connection failures are explained rather than passed through raw', () => {
+  const source = { connection_string: 'srv.database.windows.net', database_name: 'ERP', auth_mode: 'entra' };
+  assert.match(sqlSource.explainSqlFailure(new Error('getaddrinfo ENOTFOUND srv'), source), /Cannot resolve/);
+  assert.match(sqlSource.explainSqlFailure(new Error('Login failed for user'), source), /Grant it read access/);
+  assert.match(
+    sqlSource.explainSqlFailure(new Error('Login failed for user'), { ...source, auth_mode: 'sql' }),
+    /username and password/
+  );
+  assert.match(sqlSource.explainSqlFailure(new Error('Cannot open database "ERP"'), source), /not available to this identity/);
+});
+
+// ── Reconciliation: comparing runs ──
+const reconCompare = require('../src/services/reconciliationComparisonService');
+
+const RUN_A = { id: 1, rule_id: 9, rule_version: 1, started_at: '2026-08-01T10:00:00Z', records_a: 100, records_b: 98, keys_compared: 100, matched: 90, exception_count: 10 };
+const RUN_B = { id: 2, rule_id: 9, rule_version: 1, started_at: '2026-08-10T10:00:00Z', records_a: 120, records_b: 120, keys_compared: 120, matched: 114, exception_count: 6 };
+
+function finding(fingerprint, key, outcome, severity = 'medium') {
+  return { fingerprint, business_key: key, outcome, severity, exception_id: null };
+}
+
+test('run comparison reports which items were fixed, which are new and which persist', () => {
+  const comparison = reconCompare.compareRuns({
+    fromRun: RUN_A, toRun: RUN_B,
+    findingsFrom: [finding('f1', 'INV-1', 'value_mismatch'), finding('f2', 'INV-2', 'missing_from_b'), finding('f3', 'INV-3', 'duplicate')],
+    findingsTo: [finding('f2', 'INV-2', 'missing_from_b'), finding('f4', 'INV-4', 'duplicate')],
+  });
+
+  assert.equal(comparison.findings.resolved.total, 2);
+  assert.equal(comparison.findings.introduced.total, 1);
+  assert.equal(comparison.findings.persisting.total, 1);
+  assert.equal(comparison.summary.verdict, 'churn');
+  assert.deepEqual(comparison.findings.introduced.sample[0].businessKey, 'INV-4');
+});
+
+test('an item that starts failing for a different reason is reported as changed, not as fixed and new', () => {
+  const comparison = reconCompare.compareRuns({
+    fromRun: RUN_A, toRun: RUN_B,
+    findingsFrom: [finding('f1', 'INV-1', 'value_mismatch')],
+    findingsTo: [finding('f1', 'INV-1', 'missing_from_b')],
+  });
+  assert.equal(comparison.findings.changed.total, 1);
+  assert.equal(comparison.findings.resolved.total, 0);
+  assert.equal(comparison.findings.introduced.total, 0);
+  assert.equal(comparison.findings.changed.sample[0].fromOutcomeLabel, 'Value mismatch');
+});
+
+test('equal exception counts are not reported as no change when the items moved', () => {
+  // The reason this works from findings rather than totals: ten before and ten after
+  // can mean nothing happened, or that ten were fixed and ten new ones appeared.
+  const comparison = reconCompare.compareRuns({
+    fromRun: { ...RUN_A, exception_count: 2 }, toRun: { ...RUN_B, exception_count: 2 },
+    findingsFrom: [finding('f1', 'A', 'duplicate'), finding('f2', 'B', 'duplicate')],
+    findingsTo: [finding('f3', 'C', 'duplicate'), finding('f4', 'D', 'duplicate')],
+  });
+  assert.equal(comparison.summary.verdict, 'churn');
+  assert.equal(comparison.summary.netChange, 0);
+  assert.equal(comparison.findings.persisting.total, 0);
+});
+
+test('runs given in the wrong order are compared by date, not by argument position', () => {
+  const comparison = reconCompare.compareRuns({
+    fromRun: RUN_B, toRun: RUN_A,
+    findingsFrom: [finding('f2', 'INV-2', 'duplicate')],
+    findingsTo: [finding('f1', 'INV-1', 'duplicate')],
+  });
+  assert.equal(comparison.earlier.id, RUN_A.id);
+  assert.equal(comparison.later.id, RUN_B.id);
+  assert.equal(comparison.reversed, true);
+  assert.equal(comparison.findings.introduced.sample[0].businessKey, 'INV-2');
+});
+
+test('runs of different rules are refused', () => {
+  assert.throws(
+    () => reconCompare.compareRuns({ fromRun: RUN_A, toRun: { ...RUN_B, rule_id: 42 }, findingsFrom: [], findingsTo: [] }),
+    /same rule/
+  );
+  assert.throws(
+    () => reconCompare.compareRuns({ fromRun: RUN_A, toRun: RUN_A, findingsFrom: [], findingsTo: [] }),
+    /two different runs/
+  );
+});
+
+test('a rule redefined between runs is flagged, because movement may not be the data', () => {
+  const comparison = reconCompare.compareRuns({
+    fromRun: RUN_A, toRun: { ...RUN_B, rule_version: 3 }, findingsFrom: [], findingsTo: [],
+  });
+  assert.equal(comparison.versionChanged, true);
+  assert.equal(comparison.summary.verdict, 'clean');
+});
+
+test('metric deltas know which direction is an improvement', () => {
+  const metrics = reconCompare.diffRunMetrics(RUN_A, RUN_B);
+  const byKey = Object.fromEntries(metrics.map(metric => [metric.key, metric]));
+  assert.equal(byKey.matched.direction, 'improved');
+  assert.equal(byKey.exception_count.direction, 'improved');
+  assert.equal(byKey.exception_count.delta, -4);
+  assert.equal(byKey.records_a.direction, 'changed');
+
+  const worse = reconCompare.diffRunMetrics(RUN_B, RUN_A);
+  assert.equal(worse.find(m => m.key === 'exception_count').direction, 'worsened');
+});
+
+test('item lists are capped but their counts stay exact', () => {
+  const many = Array.from({ length: 250 }, (_, i) => finding('f' + i, 'KEY-' + i, 'duplicate'));
+  const diff = reconCompare.diffFindings([], many, { sampleLimit: 10 });
+  assert.equal(diff.introduced.total, 250);
+  assert.equal(diff.introduced.sample.length, 10);
+});
+
+// ── Reconciliation: the dashboard's connection discipline ──
+const reconRepo = require('../src/services/reconciliationRepository');
+
+/**
+ * Stands in for a tedious connection, which carries exactly one request at a time.
+ * A second request issued while the first is in flight is rejected — the real
+ * driver's behaviour, and the fault that left the dashboard panels empty.
+ */
+function fakeSqlPrimitives(rowsFor) {
+  let inFlight = false;
+  const executed = [];
+  return {
+    executed,
+    getConnection: async () => ({ close() {} }),
+    execSql: async (conn, sql, params) => {
+      if (inFlight) throw new Error('Requests can only be made in the LoggedIn state, not the SentClientRequest state');
+      inFlight = true;
+      executed.push({ sql, params });
+      await new Promise(resolve => setImmediate(resolve));
+      inFlight = false;
+      return rowsFor(sql);
+    },
+  };
+}
+
+async function withFakeSql(rowsFor, fn) {
+  const real = { getConnection: dbService._sql.getConnection, execSql: dbService._sql.execSql };
+  const fake = fakeSqlPrimitives(rowsFor);
+  dbService._sql.getConnection = fake.getConnection;
+  dbService._sql.execSql = fake.execSql;
+  try {
+    return { result: await fn(), executed: fake.executed };
+  } finally {
+    Object.assign(dbService._sql, real);
+  }
+}
+
+test('every dashboard panel is populated, not just the first one', async () => {
+  // Regression: the queries used to be issued together on one connection, so the
+  // first answered and the rest were rejected. The errors were swallowed, so the
+  // panels rendered empty and looked like data that had not refreshed after a run.
+  const { result, executed } = await withFakeSql(sql => {
+    if (/FROM recon_rules/.test(sql)) return [{ status: 'active', total: 3 }];
+    if (/GROUP BY status/.test(sql)) return [{ status: 'open', total: 7 }];
+    if (/GROUP BY outcome/.test(sql)) return [{ outcome: 'duplicate', total: 2 }];
+    if (/GROUP BY severity/.test(sql)) return [{ severity: 'high', total: 1 }];
+    if (/GROUP BY rule_id/.test(sql)) return [{ rule_id: 9, rule_name: 'R', open_count: 4 }];
+    if (/FROM recon_runs/.test(sql)) return [{ id: 3 }];
+    if (/GROUP BY owner/.test(sql)) return [{ owner: 'Ann', total: 5 }];
+    if (/DATEDIFF/.test(sql)) return [{ week1: 1, month1: 2, older: 3 }];
+    return [];
+  }, () => reconRepo.getDashboardData());
+
+  assert.deepEqual(result.problems, [], 'no panel should fail');
+  assert.equal(result.rules[0].total, 3);
+  assert.equal(result.exceptionsByStatus[0].total, 7);
+  assert.equal(result.exceptionsByOutcome[0].total, 2);
+  assert.equal(result.byOwner[0].owner, 'Ann');
+  assert.equal(result.byRule[0].open_count, 4);
+  assert.equal(result.recentRuns.length, 1);
+  assert.equal(result.ageing.older, 3);
+  assert.ok(executed.length >= 8);
+});
+
+test('scoping the dashboard to one run asks what that run found', async () => {
+  const { result, executed } = await withFakeSql(sql => {
+    if (/FROM recon_run_findings/.test(sql) && /GROUP BY outcome/.test(sql)) return [{ outcome: 'value_mismatch', total: 4 }];
+    if (/WHERE id=@run/.test(sql)) return [{ id: 12, rule_id: 9, matched: 80 }];
+    return [];
+  }, () => reconRepo.getDashboardData({ runId: 12 }));
+
+  assert.equal(result.scoped, true);
+  assert.equal(result.scopedRun.id, 12);
+  assert.equal(result.exceptionsByOutcome[0].total, 4);
+  assert.ok(executed.some(entry => /recon_run_findings/.test(entry.sql)),
+    'a scoped dashboard must read the run\'s findings, not the standing exception list');
+  assert.deepEqual(result.problems, []);
+});
+
+test('one unreadable panel is reported rather than silently blanking the page', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/GROUP BY owner/.test(sql)) throw new Error("Invalid object name 'recon_exceptions'");
+    return [];
+  }, () => reconRepo.getDashboardData());
+
+  assert.deepEqual(result.byOwner, []);
+  assert.ok(result.problems.length, 'a failed panel must be named so it cannot hide');
+});
+
+test('a batch rule change writes each rule separately and keeps going after a failure', async () => {
+  const { result, executed } = await withFakeSql(sql => {
+    if (/UPDATE recon_rules/.test(sql) && /@id/.test(sql)) return [];
+    if (/SELECT version/.test(sql)) return [{ version: 4 }];
+    if (/SELECT \* FROM recon_rules/.test(sql)) return [{ id: 1, name: 'R' }];
+    return [];
+  }, () => reconRepo.batchUpdateRules([1, 2, 3], { status: 'retired' }, 'tester'));
+
+  assert.equal(result.length, 3);
+  assert.ok(result.every(entry => entry.success));
+  // Each rule gets its own version row: a batch is a convenience for the operator,
+  // not a reason for the audit trail to lose track of what happened to each control.
+  const versionWrites = executed.filter(entry => /INSERT INTO recon_rule_versions/.test(entry.sql));
+  assert.equal(versionWrites.length, 3);
+});
+
+test('a batch that changes nothing is refused before it touches the database', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateRules([1], {}, 'tester'));
+  assert.equal(executed.length, 0);
+});
+
+test('a batch activation moves the valid rules and names the ones it could not activate', async () => {
+  // An incomplete control must never be presented to operators as active, but one
+  // bad rule in a selection should not block the rest.
+  const complete = {
+    id: 1, name: 'Complete', status: 'draft', source_a_id: 1, source_b_id: 2,
+    dataset_a: 'A', dataset_b: 'B', key_field_a: 'Id', key_field_b: 'Id',
+    compareFields: [{ label: 'Net', a: { kind: 'field', value: 'Net' }, b: { kind: 'field', value: 'Net' }, type: 'number' }],
+  };
+  const incomplete = { id: 2, name: 'No key yet', status: 'draft', source_a_id: 1, source_b_id: 2, dataset_a: 'A', dataset_b: 'B', compareFields: [] };
+
+  const original = {
+    listRules: reconRepo.listRules, getRuleById: reconRepo.getRuleById, batchUpdateRules: reconRepo.batchUpdateRules,
+  };
+  reconRepo.listRules = async () => [complete, incomplete];
+  reconRepo.getRuleById = async id => (Number(id) === 1 ? complete : incomplete);
+  let applied = null;
+  reconRepo.batchUpdateRules = async (ids, change) => { applied = { ids, change }; return ids.map(id => ({ id, success: true })); };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/reconciliation/rules/batch', {
+      ruleIds: [1, 2], status: 'active', assignOwner: true, owner: 'Ann',
+    });
+    assert.equal(body.success, true);
+    assert.equal(body.updated, 1);
+    assert.deepEqual(applied.ids, [1]);
+    assert.equal(applied.change.owner, 'Ann');
+    assert.equal(body.skipped.length, 1);
+    assert.equal(body.skipped[0].name, 'No key yet');
+    assert.match(body.skipped[0].message, /business key/i);
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+// ── Reconciliation: comparing every rule at once ──
+test('the per-rule overview pairs each rule\'s two most recent runs', () => {
+  const runs = [
+    { id: 1, rule_id: 9, rule_name: 'Invoices', status: 'completed', started_at: '2026-08-01T10:00:00Z', exception_count: 4 },
+    { id: 2, rule_id: 9, rule_name: 'Invoices', status: 'completed', started_at: '2026-08-10T10:00:00Z', exception_count: 2 },
+    { id: 3, rule_id: 9, rule_name: 'Invoices', status: 'completed', started_at: '2026-07-01T10:00:00Z', exception_count: 9 },
+    { id: 4, rule_id: 10, rule_name: 'Ledger', status: 'completed', started_at: '2026-08-05T10:00:00Z', exception_count: 1 },
+    { id: 5, rule_id: 10, rule_name: 'Ledger', status: 'failed', started_at: '2026-08-09T10:00:00Z' },
+  ];
+  const pairs = reconCompare.latestPairsByRule(runs);
+  const invoices = pairs.find(pair => pair.ruleId === 9);
+  assert.equal(invoices.later.id, 2, 'the newest run is the later side');
+  assert.equal(invoices.earlier.id, 1, 'the one before it is the earlier side, not the oldest');
+
+  // A failed run is not a result to compare against.
+  const ledger = pairs.find(pair => pair.ruleId === 10);
+  assert.equal(ledger.later.id, 4);
+  assert.equal(ledger.earlier, null);
+});
+
+test('a rule that has only ever run once is listed rather than omitted', () => {
+  // A control nobody has re-run is exactly the one worth noticing.
+  const overview = reconCompare.compareAcrossRules({
+    runs: [{ id: 7, rule_id: 11, rule_name: 'New control', status: 'completed', started_at: '2026-08-01T10:00:00Z', exception_count: 3 }],
+    findings: [
+      { run_id: 7, rule_id: 11, fingerprint: 'a', business_key: 'K1', outcome: 'duplicate', severity: 'high' },
+      { run_id: 7, rule_id: 11, fingerprint: 'b', business_key: 'K2', outcome: 'duplicate', severity: 'low' },
+    ],
+  });
+  assert.equal(overview.length, 1);
+  assert.equal(overview[0].comparable, false);
+  assert.equal(overview[0].comparison, null);
+  assert.equal(overview[0].exceptionCount, 3);
+  assert.deepEqual(overview[0].severity, { high: 1, medium: 0, low: 1 });
+});
+
+test('the overview reports each rule\'s movement and keeps rules independent', () => {
+  const runs = [
+    { id: 1, rule_id: 9, rule_name: 'Improving', status: 'completed', started_at: '2026-08-01T10:00:00Z', exception_count: 2 },
+    { id: 2, rule_id: 9, rule_name: 'Improving', status: 'completed', started_at: '2026-08-10T10:00:00Z', exception_count: 0 },
+    { id: 3, rule_id: 10, rule_name: 'Worsening', status: 'completed', started_at: '2026-08-02T10:00:00Z', exception_count: 0 },
+    { id: 4, rule_id: 10, rule_name: 'Worsening', status: 'completed', started_at: '2026-08-11T10:00:00Z', exception_count: 2 },
+  ];
+  const findings = [
+    { run_id: 1, rule_id: 9, fingerprint: 'a', business_key: 'A', outcome: 'duplicate', severity: 'medium' },
+    { run_id: 1, rule_id: 9, fingerprint: 'b', business_key: 'B', outcome: 'duplicate', severity: 'medium' },
+    { run_id: 4, rule_id: 10, fingerprint: 'c', business_key: 'C', outcome: 'missing_from_b', severity: 'high' },
+    { run_id: 4, rule_id: 10, fingerprint: 'd', business_key: 'D', outcome: 'missing_from_b', severity: 'high' },
+  ];
+  const overview = reconCompare.compareAcrossRules({ runs, findings });
+  const byName = Object.fromEntries(overview.map(row => [row.ruleName, row]));
+
+  assert.equal(byName.Improving.summary.verdict, 'better');
+  assert.equal(byName.Improving.summary.resolved, 2);
+  assert.equal(byName.Worsening.summary.verdict, 'worse');
+  assert.equal(byName.Worsening.summary.introduced, 2);
+  // Findings are grouped by run, so one rule's items never leak into another's.
+  assert.equal(byName.Improving.summary.introduced, 0);
+});
+
+test('a rule the overview cannot compare does not take the other rules down with it', () => {
+  const overview = reconCompare.compareAcrossRules({
+    runs: [
+      // Same rule id but the same run twice — compareRuns refuses this pair.
+      { id: 1, rule_id: 9, rule_name: 'Broken', status: 'completed', started_at: '2026-08-01T10:00:00Z' },
+      { id: 1, rule_id: 9, rule_name: 'Broken', status: 'completed', started_at: '2026-08-02T10:00:00Z' },
+      { id: 3, rule_id: 10, rule_name: 'Fine', status: 'completed', started_at: '2026-08-01T10:00:00Z' },
+      { id: 4, rule_id: 10, rule_name: 'Fine', status: 'completed', started_at: '2026-08-02T10:00:00Z' },
+    ],
+    findings: [],
+  });
+  const broken = overview.find(row => row.ruleName === 'Broken');
+  const fine = overview.find(row => row.ruleName === 'Fine');
+  assert.ok(broken.error, 'the unusable pair reports its problem');
+  assert.equal(fine.summary.verdict, 'clean');
+});
+
+// ── Reconciliation: bulk decisions on exceptions ──
+test('a bulk decision records owner, severity and status as separate history entries', async () => {
+  const { result, executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    [{ id: 1, status: 'open', severity: 'medium', owner: null }],
+    { assignOwner: true, owner: 'Ann', severity: 'high', toStatus: 'investigating', actor: 'tester' }
+  ));
+
+  assert.equal(result[0].success, true);
+  assert.equal(result[0].changed, true);
+
+  // The three entries are written in one multi-row statement now, so the property
+  // to assert is that all three exist — not how many statements carried them.
+  const eventWrites = executed.filter(entry => /INSERT INTO recon_exception_events/.test(entry.sql));
+  assert.equal(eventWrites.length, 1, 'history is written in one batch');
+  const actions = eventWrites[0].params.filter(param => /^a\d+$/.test(param.name)).map(param => param.value);
+  assert.deepEqual(actions.sort(), ['assigned', 'severity-change', 'status-change'],
+    'assignment, severity change and status change are each auditable');
+
+  const update = executed.find(entry => /UPDATE recon_exceptions/.test(entry.sql));
+  assert.match(update.sql, /owner=@owner/);
+  assert.match(update.sql, /severity=@severity/);
+  assert.match(update.sql, /status=@status/);
+  assert.match(update.sql, /WHERE id IN \(@i0\)/, 'the update targets a bound id set');
+});
+
+test('a bulk decision that matches what an exception already says writes nothing', async () => {
+  const { result, executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    [{ id: 1, status: 'open', severity: 'high', owner: 'Ann' }],
+    { assignOwner: true, owner: 'Ann', severity: 'high', toStatus: 'open', actor: 'tester' }
+  ));
+  assert.equal(result[0].changed, false);
+  assert.equal(executed.length, 0, 'no update and no history entry for a no-op');
+});
+
+test('closing in bulk stamps the reason and the resolution date', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    [{ id: 1, status: 'investigating', severity: 'high', owner: 'Ann' }],
+    { toStatus: 'resolved', reason: 'Source system corrected', actor: 'tester' }
+  ));
+  const update = executed.find(entry => /UPDATE recon_exceptions/.test(entry.sql));
+  assert.match(update.sql, /resolved_at=SYSUTCDATETIME\(\)/);
+  assert.match(update.sql, /resolution_reason=@reason/);
+});
+
+test('reopening clears the resolution date rather than leaving a stale one', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    [{ id: 1, status: 'resolved', severity: 'high' }],
+    { toStatus: 'open', actor: 'tester' }
+  ));
+  const update = executed.find(entry => /UPDATE recon_exceptions/.test(entry.sql));
+  assert.match(update.sql, /resolved_at=NULL/);
+});
+
+test('exception ids are parameterised, never interpolated into the statement', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.getExceptionsByIds([4, 9, 'nonsense']));
+  const select = executed[0];
+  assert.match(select.sql, /WHERE id IN \(@e0, @e1\)/);
+  assert.deepEqual(select.params.map(p => p.value), [4, 9]);
+});
+
+test('a bulk status change moves what it can and names what it cannot', async () => {
+  // A selection routinely mixes statuses. The open one can be resolved; the one
+  // already accepted cannot, and forcing it would put the audit trail at odds with
+  // the process it evidences.
+  const rows = [
+    { id: 1, business_key: 'INV-1', status: 'open', severity: 'medium' },
+    { id: 2, business_key: 'INV-2', status: 'accepted', severity: 'low' },
+  ];
+  const original = { getExceptionsByIds: reconRepo.getExceptionsByIds, batchUpdateExceptions: reconRepo.batchUpdateExceptions };
+  reconRepo.getExceptionsByIds = async () => rows;
+  let applied = null;
+  reconRepo.batchUpdateExceptions = async (exceptions, change) => {
+    applied = { ids: exceptions.map(e => e.id), change };
+    return exceptions.map(e => ({ id: e.id, success: true, changed: true }));
+  };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/reconciliation/exceptions/batch', {
+      ids: [1, 2], status: 'resolved', reason: 'Corrected at source', assignOwner: true, owner: 'Ann', severity: 'high',
+    });
+    assert.equal(body.success, true);
+    assert.deepEqual(applied.ids, [1]);
+    assert.equal(applied.change.severity, 'high');
+    assert.equal(applied.change.owner, 'Ann');
+    assert.equal(body.skipped.length, 1);
+    assert.equal(body.skipped[0].key, 'INV-2');
+    assert.match(body.skipped[0].message, /Cannot move from "accepted"/);
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('closing exceptions in bulk still requires a recorded reason', async () => {
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/reconciliation/exceptions/batch', { ids: [1, 2], status: 'resolved' });
+    assert.equal(body.success, false);
+    assert.match(body.message, /Record why/);
+
+    const empty = await postJson(server, '/reconciliation/exceptions/batch', { ids: [1] });
+    assert.equal(empty.success, false);
+    assert.match(empty.message, /owner, a severity, a status/);
+
+    const bad = await postJson(server, '/reconciliation/exceptions/batch', { ids: [1], severity: 'catastrophic' });
+    assert.equal(bad.success, false);
+    assert.match(bad.message, /Unknown severity/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+// ── Master data: standardisation ──
+const mdm = require('../src/services/mdmService');
+
+test('standardisation removes meaningless differences and treats absence markers as absent', () => {
+  const rules = ['trim', 'collapse_whitespace', 'strip_punctuation', 'strip_diacritics', 'lower'];
+  assert.equal(mdm.standardiseValue('  ACME,  Ltd. ', { rules }), 'acme ltd');
+  assert.equal(mdm.standardiseValue('Müller', { rules }), 'muller');
+
+  // Two records both saying "N/A" are not two records that agree — treating them as
+  // data is a classic false merge.
+  for (const absent of ['N/A', '  ', 'unknown', '-', 'NULL']) {
+    assert.equal(mdm.standardiseValue(absent, { rules }), null, absent + ' should read as absent');
+  }
+  assert.equal(mdm.standardiseValue(0, { rules }), '0', 'zero is a value, not an absence');
+});
+
+test('abbreviation expansion makes address variants comparable', () => {
+  const rules = ['trim', 'strip_punctuation', 'lower', 'expand_abbreviations'];
+  assert.equal(mdm.standardiseValue('12 Main St.', { rules }), '12 main street');
+  assert.equal(mdm.standardiseValue('12 Main Street', { rules }), '12 main street');
+  assert.equal(mdm.standardiseValue('Acme Ltd', { rules }), 'acme limited');
+});
+
+test('digit-only standardisation makes separator differences comparable, and no more', () => {
+  const rules = ['digits_only'];
+  assert.equal(mdm.standardiseValue('44-20-7946-0958', { rules }), '442079460958');
+  assert.equal(mdm.standardiseValue('44 (20) 7946 0958', { rules }), '442079460958');
+
+  // A trunk zero is a digit, so international and national forms of the same number
+  // do not become equal. Standardisation removes formatting, not domain knowledge —
+  // a field like this wants an edit-distance comparator rather than exact equality.
+  const national = mdm.standardiseValue('+44 (0)20 7946 0958', { rules });
+  assert.equal(national, '4402079460958');
+  assert.equal(mdm.compareValues(national, '442079460958', { comparator: 'exact' }), 0);
+  assert.ok(mdm.compareValues(national, '442079460958', { comparator: 'edit' }) > 0.9);
+});
+
+// ── Master data: comparators ──
+test('each comparator suits the error its field actually suffers from', () => {
+  // Transposition in a keyed reference.
+  assert.ok(mdm.editSimilarity('INV-10432', 'INV-14032') > 0.75);
+  // Names agree at the start; Jaro-Winkler rewards that.
+  assert.ok(mdm.jaroWinkler('robert', 'roberto') > mdm.editSimilarity('robert', 'roberto'));
+  // Word order and extra tokens in company names.
+  assert.equal(mdm.tokenSetSimilarity('acme limited', 'limited acme'), 1);
+  assert.ok(mdm.tokenSetSimilarity('acme limited london', 'acme limited') > 0.6);
+  // Sounds alike.
+  assert.equal(mdm.soundex('Smith'), mdm.soundex('Smyth'));
+  assert.notEqual(mdm.soundex('Smith'), mdm.soundex('Jones'));
+});
+
+test('numeric comparison degrades past its tolerance instead of falling off a cliff', () => {
+  const field = { comparator: 'numeric', tolerance: 1 };
+  assert.equal(mdm.compareValues('100', '100.5', field), 1);
+  const near = mdm.compareValues('100', '102', field);
+  const far = mdm.compareValues('100', '120', field);
+  assert.ok(near > 0 && near < 1);
+  assert.ok(far < near);
+});
+
+// ── Master data: scoring ──
+const PERSON_FIELDS = [
+  { key: 'name', column: 'Name', standardisers: ['trim', 'lower'], comparator: 'jaro_winkler', weight: 3 },
+  { key: 'email', column: 'Email', standardisers: ['trim', 'lower'], comparator: 'exact', weight: 3 },
+  { key: 'city', column: 'City', standardisers: ['trim', 'lower'], comparator: 'exact', weight: 1 },
+];
+
+function personRecord(raw, fields = PERSON_FIELDS) {
+  return { raw, sourceId: raw.Id, sourceSystem: raw.SourceSystem, standardised: mdm.standardiseRecord(raw, fields) };
+}
+
+test('weights are shared among the fields that could actually be compared', () => {
+  // Without this, a sparse pair never reaches the threshold — and sparse records are
+  // exactly the ones most in need of mastering.
+  const a = personRecord({ Id: 1, Name: 'Jane Smith', Email: 'jane@x.com', City: null });
+  const b = personRecord({ Id: 2, Name: 'Jane Smith', Email: 'jane@x.com', City: 'London' });
+  const result = mdm.scorePair(a, b, PERSON_FIELDS, {});
+  assert.equal(result.score, 1, 'the missing city must not drag a perfect match down');
+  assert.equal(result.comparedFields, 2);
+  assert.equal(result.decision, 'match');
+});
+
+test('a missing value can be counted as disagreement where the field is mandatory', () => {
+  const fields = PERSON_FIELDS.map(field => (field.key === 'city' ? { ...field, nullPolicy: 'disagree' } : field));
+  const a = personRecord({ Id: 1, Name: 'Jane Smith', Email: 'jane@x.com', City: null }, fields);
+  const b = personRecord({ Id: 2, Name: 'Jane Smith', Email: 'jane@x.com', City: 'London' }, fields);
+  assert.ok(mdm.scorePair(a, b, fields, {}).score < 1);
+});
+
+test('a required field that disagrees rejects the pair however well everything else matches', () => {
+  const fields = PERSON_FIELDS.map(field => (field.key === 'email' ? { ...field, required: true } : field));
+  const a = personRecord({ Id: 1, Name: 'Jane Smith', Email: 'jane@x.com', City: 'London' }, fields);
+  const b = personRecord({ Id: 2, Name: 'Jane Smith', Email: 'other@x.com', City: 'London' }, fields);
+  const result = mdm.scorePair(a, b, fields, {});
+  assert.equal(result.decision, 'no_match');
+  assert.equal(result.rejectedBy.field, 'email');
+});
+
+test('a blocker field stops two similar records in different countries from merging', () => {
+  const fields = [
+    { key: 'name', column: 'Name', standardisers: ['lower'], comparator: 'jaro_winkler', weight: 3 },
+    { key: 'country', column: 'Country', standardisers: ['lower'], comparator: 'exact', weight: 1, blocker: true },
+  ];
+  const a = personRecord({ Id: 1, Name: 'Acme Ltd', Country: 'GB' }, fields);
+  const b = personRecord({ Id: 2, Name: 'Acme Ltd', Country: 'US' }, fields);
+  assert.equal(mdm.scorePair(a, b, fields, {}).decision, 'no_match');
+
+  // Absent is not the same as conflicting: a blocker only rejects disagreement.
+  const c = personRecord({ Id: 3, Name: 'Acme Ltd', Country: null }, fields);
+  assert.equal(mdm.scorePair(a, c, fields, {}).decision, 'match');
+});
+
+test('the middle band goes to a steward rather than being decided either way', () => {
+  const a = personRecord({ Id: 1, Name: 'Jonathan Smith', Email: 'j.smith@x.com', City: 'London' });
+  const b = personRecord({ Id: 2, Name: 'Jon Smith', Email: 'jsmith@x.com', City: 'London' });
+  const result = mdm.scorePair(a, b, PERSON_FIELDS, { autoMatchThreshold: 0.95, reviewThreshold: 0.5 });
+  assert.equal(result.decision, 'review');
+});
+
+// ── Master data: blocking ──
+test('blocking cuts the comparisons and reports what it cost', () => {
+  const records = Array.from({ length: 200 }, (_, i) =>
+    personRecord({ Id: i, Name: 'Person ' + (i % 50), Email: 'p' + i + '@x.com', City: 'London' }));
+  const blocked = mdm.generateCandidatePairs(records, [{ field: 'name', strategy: 'exact' }]);
+
+  const everything = records.length * (records.length - 1) / 2;
+  assert.ok(blocked.pairs.length < everything / 10, 'blocking must remove most comparisons');
+  assert.equal(blocked.largestBlock, 4);
+  assert.ok(blocked.blocksExamined >= 50);
+});
+
+test('several blocking keys widen the net rather than narrowing it', () => {
+  const records = [
+    personRecord({ Id: 1, Name: 'Smith', Email: 'a@x.com', City: 'London' }),
+    personRecord({ Id: 2, Name: 'Smyth', Email: 'a@x.com', City: 'Leeds' }),
+  ];
+  // Neither name nor city agrees exactly, so an exact block finds nothing.
+  assert.equal(mdm.generateCandidatePairs(records, [{ field: 'name', strategy: 'exact' }]).pairs.length, 0);
+  // Sounds-alike on the name, or exact on the email, each catch it.
+  assert.equal(mdm.generateCandidatePairs(records, [
+    { field: 'name', strategy: 'phonetic' }, { field: 'city', strategy: 'exact' },
+  ]).pairs.length, 1);
+});
+
+test('candidate generation stops at its limit and says so', () => {
+  const records = Array.from({ length: 60 }, (_, i) => personRecord({ Id: i, Name: 'Same', Email: 'e@x.com', City: 'London' }));
+  const result = mdm.generateCandidatePairs(records, [{ field: 'name', strategy: 'exact' }], { maxPairs: 100 });
+  assert.equal(result.truncated, true);
+  assert.ok(result.pairs.length <= 100);
+});
+
+// ── Master data: clustering ──
+test('matches are transitive by default, which is how master data over-merges', () => {
+  // A~B and B~C, but A and C were never compared favourably. Union-find puts all
+  // three together, and this is exactly the behaviour strict mode exists to refuse.
+  const loose = mdm.clusterRecords(3, [[0, 1], [1, 2]], { strict: false });
+  assert.deepEqual(loose, [[0, 1, 2]]);
+
+  const strict = mdm.clusterRecords(3, [[0, 1], [1, 2]], { strict: true });
+  assert.equal(strict.length, 3, 'a chain of weak links must not become one entity');
+});
+
+test('strict grouping still merges a group where every pair matched', () => {
+  const strict = mdm.clusterRecords(3, [[0, 1], [1, 2], [0, 2]], { strict: true });
+  assert.deepEqual(strict, [[0, 1, 2]]);
+});
+
+// ── Master data: survivorship ──
+const SURVIVOR_MODEL = {
+  sourceField: 'SourceSystem',
+  timestampField: 'UpdatedAt',
+  sourcePriority: ['SAP', 'CRM'],
+};
+
+function survivorRecords(fields) {
+  return [
+    { Id: 'c-1', SourceSystem: 'CRM', UpdatedAt: '2026-08-10', Name: 'Jonathan Smith', Phone: null, Credit: 5000 },
+    { Id: 's-1', SourceSystem: 'SAP', UpdatedAt: '2026-01-05', Name: 'J Smith', Phone: '0200000', Credit: 3000 },
+    { Id: 'l-1', SourceSystem: 'Legacy', UpdatedAt: '2026-08-20', Name: 'Jonathan Smith', Phone: '0200000', Credit: 4000 },
+  ].map(raw => ({ raw, sourceId: raw.Id, sourceSystem: raw.SourceSystem, standardised: mdm.standardiseRecord(raw, fields) }));
+}
+
+test('each survivorship rule picks the value it claims to', () => {
+  const base = { column: 'Name', standardisers: ['trim'] };
+  const members = survivorRecords([{ key: 'name', ...base }]);
+
+  const trusted = mdm.pickSurvivor(members, { key: 'name', ...base, survivorship: 'source_priority' }, SURVIVOR_MODEL);
+  assert.equal(trusted.value, 'J Smith', 'SAP outranks CRM and Legacy');
+
+  const recent = mdm.pickSurvivor(members, { key: 'name', ...base, survivorship: 'most_recent' }, SURVIVOR_MODEL);
+  assert.equal(recent.value, 'Jonathan Smith');
+
+  const longest = mdm.pickSurvivor(members, { key: 'name', ...base, survivorship: 'longest' }, SURVIVOR_MODEL);
+  assert.equal(longest.value, 'Jonathan Smith');
+
+  const frequent = mdm.pickSurvivor(members, { key: 'name', ...base, survivorship: 'most_frequent' }, SURVIVOR_MODEL);
+  assert.equal(frequent.value, 'Jonathan Smith');
+  assert.match(frequent.reason, /2 of 3 sources agree/);
+});
+
+test('a source not on the trust list ranks last rather than first', () => {
+  // An unexpected new system must never silently outrank the book of record.
+  const base = { key: 'name', column: 'Name', standardisers: ['trim'], survivorship: 'source_priority' };
+  const members = survivorRecords([base]);
+  assert.equal(mdm.pickSurvivor(members, base, SURVIVOR_MODEL).sourceSystem, undefined);
+  const winner = mdm.pickSurvivor(members, base, SURVIVOR_MODEL);
+  assert.equal(winner.from.sourceSystem, 'SAP');
+});
+
+test('the first non-empty value skips a source that carries nothing', () => {
+  const base = { key: 'phone', column: 'Phone', standardisers: ['trim'], survivorship: 'most_complete' };
+  const members = survivorRecords([base]);
+  // CRM ranks above Legacy but has no phone, so the value comes from SAP.
+  const survivor = mdm.pickSurvivor(members, base, SURVIVOR_MODEL);
+  assert.equal(survivor.value, '0200000');
+  assert.equal(survivor.from.sourceSystem, 'SAP');
+});
+
+test('numeric survivorship handles the aggregate rules', () => {
+  const base = { key: 'credit', column: 'Credit', standardisers: [] };
+  const members = survivorRecords([base]);
+  assert.equal(mdm.pickSurvivor(members, { ...base, survivorship: 'max' }, SURVIVOR_MODEL).value, 5000);
+  assert.equal(mdm.pickSurvivor(members, { ...base, survivorship: 'min' }, SURVIVOR_MODEL).value, 3000);
+  assert.equal(mdm.pickSurvivor(members, { ...base, survivorship: 'sum' }, SURVIVOR_MODEL).value, 12000);
+});
+
+test('most-recent falls back to trust rather than guessing when no dates exist', () => {
+  const base = { key: 'name', column: 'Name', standardisers: ['trim'], survivorship: 'most_recent' };
+  const members = survivorRecords([base]).map(record => ({ ...record, raw: { ...record.raw, UpdatedAt: null } }));
+  const survivor = mdm.pickSurvivor(members, base, SURVIVOR_MODEL);
+  assert.match(survivor.reason, /no timestamps available/);
+  assert.equal(survivor.from.sourceSystem, 'SAP');
+});
+
+test('a golden record records where every value came from', () => {
+  // A golden record whose values cannot be traced back cannot be defended, and
+  // disagreement is the normal case in master data.
+  const fields = [
+    { key: 'name', column: 'Name', standardisers: ['trim'], survivorship: 'longest' },
+    { key: 'credit', column: 'Credit', standardisers: [], survivorship: 'max' },
+  ];
+  const golden = mdm.buildGoldenRecord(survivorRecords(fields), fields, SURVIVOR_MODEL, 0);
+
+  assert.equal(golden.goldenId, 'MDM-000001');
+  assert.equal(golden.memberCount, 3);
+  assert.deepEqual(golden.sourceRecordIds, ['c-1', 's-1', 'l-1']);
+  assert.equal(golden.provenance.name.strategy, 'longest');
+  assert.equal(golden.provenance.credit.sourceSystem, 'CRM');
+  assert.equal(golden.conflicts, 2, 'both fields disagreed across the sources');
+});
+
+test('a field reserved for a steward is left empty and flags the record', () => {
+  const fields = [{ key: 'name', column: 'Name', standardisers: ['trim'], survivorship: 'manual' }];
+  const golden = mdm.buildGoldenRecord(survivorRecords(fields), fields, SURVIVOR_MODEL, 0);
+  assert.equal(golden.values.name, null);
+  assert.equal(golden.needsSteward, true);
+});
+
+// ── Master data: the whole pipeline ──
+const CUSTOMER_MODEL = {
+  sourceIdField: 'Id',
+  sourceField: 'SourceSystem',
+  timestampField: 'UpdatedAt',
+  sourcePriority: ['SAP', 'CRM', 'Legacy'],
+  autoMatchThreshold: 0.9,
+  reviewThreshold: 0.7,
+  blocks: [{ field: 'name', strategy: 'phonetic' }, { field: 'email', strategy: 'exact' }],
+  fields: [
+    { key: 'name', column: 'Name', standardisers: ['trim', 'collapse_whitespace', 'strip_punctuation', 'lower'], comparator: 'jaro_winkler', weight: 3, survivorship: 'longest' },
+    { key: 'email', column: 'Email', standardisers: ['trim', 'lower'], comparator: 'exact', weight: 4, survivorship: 'most_recent' },
+    { key: 'city', column: 'City', standardisers: ['trim', 'lower'], comparator: 'exact', weight: 1, survivorship: 'source_priority' },
+  ],
+};
+
+const RAW_CUSTOMERS = [
+  { Id: 'sap-1', SourceSystem: 'SAP', UpdatedAt: '2026-01-01', Name: 'ACME Ltd.', Email: 'ops@acme.com', City: 'London' },
+  { Id: 'crm-1', SourceSystem: 'CRM', UpdatedAt: '2026-08-01', Name: 'Acme Limited', Email: 'ops@acme.com', City: 'London' },
+  { Id: 'leg-1', SourceSystem: 'Legacy', UpdatedAt: '2026-03-01', Name: 'ACME  LTD', Email: 'ops@acme.com', City: null },
+  { Id: 'sap-2', SourceSystem: 'SAP', UpdatedAt: '2026-02-01', Name: 'Globex Corporation', Email: 'hi@globex.com', City: 'Leeds' },
+];
+
+test('the pipeline turns raw records from several systems into golden records', () => {
+  const result = mdm.buildMasterData(RAW_CUSTOMERS, CUSTOMER_MODEL);
+
+  assert.equal(result.stats.rawRecords, 4);
+  assert.equal(result.stats.goldenRecords, 2, 'the three Acme rows become one');
+  assert.equal(result.stats.duplicatesRemoved, 2);
+  assert.equal(result.stats.mergedClusters, 1);
+
+  const acme = result.golden.find(record => record.memberCount === 3);
+  assert.deepEqual(acme.sourceSystems.sort(), ['CRM', 'Legacy', 'SAP']);
+  assert.equal(acme.values.name, 'Acme Limited', 'the longest name survives');
+  assert.equal(acme.values.city, 'London');
+  assert.equal(acme.provenance.city.sourceSystem, 'SAP', 'city came from the most trusted source carrying one');
+
+  // The crosswalk maps every source record to exactly one golden record.
+  assert.equal(result.crosswalk.length, 4);
+  assert.equal(new Set(result.crosswalk.map(entry => entry.sourceId)).size, 4);
+});
+
+test('the pipeline reports the blocking cost, which is what makes a model scale or not', () => {
+  const result = mdm.buildMasterData(RAW_CUSTOMERS, CUSTOMER_MODEL);
+  assert.ok(result.stats.pairsCompared > 0);
+  assert.ok(result.stats.blocksExamined > 0);
+  assert.ok(result.stats.largestBlock >= 3);
+  assert.equal(result.stats.pairsTruncated, false);
+});
+
+test('an over-large group is flagged rather than left to be discovered downstream', () => {
+  const rows = Array.from({ length: 40 }, (_, i) => ({
+    Id: 'r-' + i, SourceSystem: 'SAP', UpdatedAt: '2026-01-01',
+    Name: 'Same Name', Email: 'same@x.com', City: 'London',
+  }));
+  const result = mdm.buildMasterData(rows, CUSTOMER_MODEL);
+  assert.equal(result.stats.largestCluster, 40);
+  assert.equal(result.stats.overMergeSuspected, true);
+});
+
+test('a model with no fields is refused rather than producing one record per row', () => {
+  assert.throws(() => mdm.buildMasterData(RAW_CUSTOMERS, { fields: [] }), /no fields/);
+});
+
+test('golden ids can be the most trusted record\'s own identifier', () => {
+  const result = mdm.buildMasterData(RAW_CUSTOMERS, { ...CUSTOMER_MODEL, goldenIdStrategy: 'primary_source_id' });
+  const acme = result.golden.find(record => record.memberCount === 3);
+  assert.equal(acme.goldenId, 'sap-1', 'the SAP record ranks highest, so its id becomes the master id');
+});
+
+// ── Master data: publishing to a destination ──
+test('a lakehouse endpoint is refused as a destination before a run reaches the write', () => {
+  // A lakehouse SQL analytics endpoint is read-only however the permissions are set,
+  // so this has to be said at the point of choosing rather than discovered at the end
+  // of a long run.
+  const lakehouse = sqlSource.describeWritability({ kind: 'fabric-sql', item_type: 'Lakehouse' });
+  assert.equal(lakehouse.writable, false);
+  assert.match(lakehouse.reason, /read-only/);
+
+  assert.equal(sqlSource.describeWritability({ kind: 'fabric-sql', item_type: 'Warehouse' }).writable, true);
+  assert.equal(sqlSource.describeWritability({ kind: 'external-sql' }).writable, true);
+});
+
+test('golden records are written as bound parameters, never as statement text', () => {
+  const statements = sqlSource.buildInsertStatements('dbo.CustomerMaster', ['golden_id', 'name'], [
+    { golden_id: 'MDM-000001', name: "O'Brien & Sons; DROP TABLE x" },
+    { golden_id: 'MDM-000002', name: null },
+  ]);
+
+  assert.equal(statements.length, 1);
+  assert.match(statements[0].sql, /INSERT INTO \[dbo\]\.\[CustomerMaster\] \(\[golden_id\], \[name\]\) VALUES \(@p0_0, @p0_1\), \(@p1_0, @p1_1\)/);
+  assert.ok(!/DROP TABLE/.test(statements[0].sql), 'a value must never appear in the statement');
+  assert.equal(statements[0].params.length, 4);
+  assert.equal(statements[0].params[1].value, "O'Brien & Sons; DROP TABLE x");
+  assert.equal(statements[0].params[3].value, null);
+});
+
+test('large writes are split into batches SQL Server will accept', () => {
+  // SQL Server caps a request at 2100 parameters, so the batch size has to follow
+  // the column count rather than being a fixed number of rows.
+  const columns = Array.from({ length: 10 }, (_, i) => 'c' + i);
+  const rows = Array.from({ length: 500 }, (_, i) => Object.fromEntries(columns.map(c => [c, c + i])));
+  const statements = sqlSource.buildInsertStatements('dbo.Target', columns, rows);
+
+  assert.ok(statements.length > 1);
+  for (const statement of statements) {
+    assert.ok(statement.params.length <= 2000, 'no batch may exceed the parameter cap');
+  }
+  const written = statements.reduce((total, statement) => total + statement.params.length / columns.length, 0);
+  assert.equal(written, 500, 'every row is written exactly once');
+});
+
+test('a destination table name that is not a plain identifier is refused', () => {
+  assert.throws(
+    () => sqlSource.buildInsertStatements('Target; DROP TABLE x', ['a'], [{ a: 1 }]),
+    /Unsupported identifier/
+  );
+});
+
+test('the create-if-missing statement is guarded so an existing table is left alone', () => {
+  const sql = sqlSource.buildCreateTableSql('dbo.CustomerMaster', ['golden_id', 'name']);
+  assert.match(sql, /IF OBJECT_ID\(N'dbo\.CustomerMaster', 'U'\) IS NULL/);
+  assert.match(sql, /CREATE TABLE \[dbo\]\.\[CustomerMaster\]/);
+  assert.match(sql, /\[golden_id\] NVARCHAR\(4000\) NULL/);
+});
+
+// ── Relational view of an analysis run ──
+const analysisModel = require('../src/services/analysisModelRepository');
+
+const SCAN_RESULT = {
+  summary: { totalWorkspaces: 2 },
+  workspaces: [
+    {
+      id: 'ws-1', name: 'Finance', type: 'Workspace', state: 'Active',
+      capacityId: 'cap-1', capacityName: 'F64', capacitySku: 'F64', isOnDedicatedCapacity: true,
+      storageSize: 1024, storageFiles: 8,
+      items: [
+        { id: 'i-1', name: 'Sales', type: 'Lakehouse', storageSize: 900 },
+        { id: 'i-2', name: 'Finance DW', type: 'Warehouse' },
+        { id: 'i-3', name: 'Monthly', type: 'Report', lastUpdate: '2026-07-01T00:00:00Z' },
+      ],
+      users: [
+        { identifier: 'u1', displayName: 'Ann', emailAddress: 'ann@x.com', groupUserAccessRight: 'Admin', principalType: 'User' },
+        { identifier: 'sp1', displayName: 'Scanner', groupUserAccessRight: 'Admin', principalType: 'App' },
+      ],
+    },
+    // A workspace whose access list could not be read is not a workspace with no
+    // users, and the two must stay distinguishable.
+    { id: 'ws-2', name: 'Marketing', items: [], users: [], usersReadable: false },
+  ],
+};
+
+test('a scan result is flattened into workspaces, items and access grants', () => {
+  const shaped = analysisModel.shapeRun(7, SCAN_RESULT);
+
+  assert.equal(shaped.workspaces.length, 2);
+  assert.equal(shaped.items.length, 3);
+  assert.equal(shaped.users.length, 2);
+
+  const finance = shaped.workspaces.find(w => w.workspaceId === 'ws-1');
+  assert.equal(finance.runId, 7);
+  assert.equal(finance.itemCount, 3);
+  assert.equal(finance.userCount, 2);
+  assert.equal(finance.capacitySku, 'F64');
+  assert.equal(finance.usersReadable, true);
+
+  const lakehouse = shaped.items.find(item => item.itemId === 'i-1');
+  assert.equal(lakehouse.type, 'Lakehouse');
+  assert.equal(lakehouse.workspaceId, 'ws-1');
+  assert.equal(lakehouse.storageSize, 900);
+  assert.equal(shaped.items.find(item => item.itemId === 'i-3').modifiedAt, '2026-07-01T00:00:00Z');
+
+  const ann = shaped.users.find(user => user.email === 'ann@x.com');
+  assert.equal(ann.accessRight, 'Admin');
+  assert.equal(ann.principalType, 'User');
+});
+
+test('an unreadable access list is recorded as unreadable, not as no users', () => {
+  const shaped = analysisModel.shapeRun(7, SCAN_RESULT);
+  const marketing = shaped.workspaces.find(w => w.workspaceId === 'ws-2');
+  assert.equal(marketing.usersReadable, false);
+  assert.equal(marketing.userCount, 0);
+});
+
+test('an empty or malformed scan flattens to nothing rather than throwing', () => {
+  for (const input of [null, {}, { workspaces: null }, { workspaces: [{ id: 'a' }] }]) {
+    const shaped = analysisModel.shapeRun(1, input);
+    assert.ok(Array.isArray(shaped.workspaces));
+    assert.ok(Array.isArray(shaped.items));
+    assert.ok(Array.isArray(shaped.users));
+  }
+});
+
+test('rebuilding a run replaces its rows instead of duplicating them', async () => {
+  // A scan that updates its storage figures rewrites the model, and a backfill can
+  // be run twice; both must converge.
+  const { executed } = await withFakeSql(() => [], () => analysisModel.saveRunModel(7, SCAN_RESULT));
+
+  const deletes = executed.filter(entry => /^DELETE FROM analysis_/.test(entry.sql.trim()));
+  assert.equal(deletes.length, 4, 'the three fact tables and the state row are cleared before rewriting');
+  assert.ok(executed.some(entry => /INSERT INTO analysis_workspaces/.test(entry.sql)));
+  assert.ok(executed.some(entry => /INSERT INTO analysis_items/.test(entry.sql)));
+  assert.ok(executed.some(entry => /INSERT INTO analysis_workspace_users/.test(entry.sql)));
+  assert.ok(executed.some(entry => /INSERT INTO analysis_run_model_state/.test(entry.sql)));
+});
+
+test('items are looked up by type with bound parameters, not an interpolated list', async () => {
+  const { executed } = await withFakeSql(() => [], () => analysisModel.listRunItemsByType(7, ['Lakehouse', 'Warehouse']));
+  const select = executed[0];
+  assert.match(select.sql, /LOWER\(i\.type\) IN \(@t0, @t1\)/);
+  assert.deepEqual(select.params.map(p => p.value), [7, 'lakehouse', 'warehouse']);
+  assert.match(select.sql, /LEFT JOIN analysis_workspaces/, 'the workspace name comes from the join, not a second pass');
+});
+
+test('an empty type list reads nothing rather than everything', async () => {
+  const { executed } = await withFakeSql(() => [], () => analysisModel.listRunItemsByType(7, []));
+  assert.equal(executed.length, 0);
+});
+
+// ── Exception filtering: list, count and bulk action must agree ──
+test('the list reads only the columns it renders', async () => {
+  // The values and differences are large JSON documents the list never shows, and
+  // reading them for every row made the page pay for data it discarded.
+  const { executed } = await withFakeSql(() => [], () => reconRepo.listExceptions({ ruleId: 9 }));
+  assert.ok(!/SELECT TOP \(\d+\) \* FROM recon_exceptions/.test(executed[0].sql));
+  assert.ok(!/values_a/.test(executed[0].sql));
+  assert.match(executed[0].sql, /business_key/);
+});
+
+test('counting and acting on a filter build the same predicate as listing it', async () => {
+  const filters = { ruleId: 9, severity: 'high', openOnly: true };
+  const listed = await withFakeSql(() => [], () => reconRepo.listExceptions(filters));
+  const counted = await withFakeSql(() => [{ total: 42 }], () => reconRepo.countExceptions(filters));
+  const acted = await withFakeSql(() => [], () => reconRepo.listExceptionsForAction(filters));
+
+  // The action pages by id, so its statement carries an extra keyset predicate on
+  // top of the filter. The filter itself must still be identical.
+  const clauseOf = sql => sql
+    .slice(sql.indexOf(' WHERE '), sql.indexOf(' ORDER BY ') === -1 ? undefined : sql.indexOf(' ORDER BY '))
+    .replace(/ AND id > @after$/, '');
+  assert.equal(clauseOf(listed.executed[0].sql), clauseOf(acted.executed[0].sql));
+  assert.equal(clauseOf(listed.executed[0].sql), clauseOf(counted.executed[0].sql));
+  assert.equal(counted.result, 42);
+});
+
+test('acting on a whole filter reports when the set was larger than one action covers', async () => {
+  const rows = Array.from({ length: 12 }, (_, i) => ({ id: i + 1, status: 'open', severity: 'high' }));
+  const { result } = await withFakeSql(() => rows, () => reconRepo.listExceptionsForAction({ ruleId: 9 }, { max: 10 }));
+  assert.equal(result.exceptions.length, 10);
+  assert.equal(result.truncated, true);
+});
+
+test('a whole-filter bulk action covers the rule with no size limit, reporting progress', async () => {
+  // The list is capped and the old action stopped at 5,000. It now pages through
+  // the whole set as a job, so the size of the rule is not a limit on the decision.
+  const total = 12000;
+  const original = {
+    countExceptions: reconRepo.countExceptions,
+    listExceptionPage: reconRepo.listExceptionPage,
+    batchUpdateExceptions: reconRepo.batchUpdateExceptions,
+  };
+  reconRepo.countExceptions = async () => total;
+
+  let served = 0;
+  const seenFilters = [];
+  reconRepo.listExceptionPage = async (filters, { limit }) => {
+    seenFilters.push(filters);
+    const size = Math.min(limit, total - served);
+    const exceptions = Array.from({ length: size }, (_, i) => ({
+      id: served + i + 1, business_key: 'INV-' + (served + i), status: 'open', severity: 'medium', owner: null,
+    }));
+    served += size;
+    return { exceptions, nextAfter: served, done: served >= total };
+  };
+  let updated = 0;
+  reconRepo.batchUpdateExceptions = async exceptions => {
+    updated += exceptions.length;
+    return exceptions.map(e => ({ id: e.id, success: true, changed: true }));
+  };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const started = await postJson(server, '/reconciliation/exceptions/batch', {
+      scope: 'filter', ids: [1, 2], filters: { ruleId: 9, all: '' },
+      assignOwner: true, owner: 'Ann',
+    });
+    assert.equal(started.success, true);
+    assert.ok(started.jobId, 'a whole-set change runs as a job');
+    assert.equal(started.total, total);
+
+    // Follow it the way the page does.
+    let job;
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      job = await request(server, '/reconciliation/jobs/' + started.jobId).then(r => JSON.parse(r.body));
+      if (!job.live) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    assert.equal(job.status, 'completed');
+    assert.equal(job.total, total);
+    assert.equal(job.done, total, 'every exception the filter covers was processed');
+    assert.equal(job.counters.updated, total);
+    assert.equal(updated, total);
+    assert.equal(seenFilters[0].ruleId, 9);
+    assert.equal(seenFilters[0].openOnly, true);
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('a whole-filter action with no narrowing filter is refused', async () => {
+  // Acting on every exception in the system is almost never intended and cannot be
+  // undone.
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/reconciliation/exceptions/batch', {
+      scope: 'filter', filters: {}, assignOwner: true, owner: 'Ann',
+    });
+    assert.equal(body.success, false);
+    assert.match(body.message, /Narrow the list/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('closing in bulk succeeds once a reason is supplied', async () => {
+  // The reported failure was the reason never reaching the server, not the server
+  // rejecting a good one. This pins the accepting side.
+  const original = { getExceptionsByIds: reconRepo.getExceptionsByIds, batchUpdateExceptions: reconRepo.batchUpdateExceptions };
+  reconRepo.getExceptionsByIds = async () => ([{ id: 1, business_key: 'INV-1', status: 'open', severity: 'medium' }]);
+  let applied = null;
+  reconRepo.batchUpdateExceptions = async (exceptions, change) => {
+    applied = change;
+    return exceptions.map(e => ({ id: e.id, success: true, changed: true }));
+  };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    for (const status of ['resolved', 'accepted']) {
+      const body = await postJson(server, '/reconciliation/exceptions/batch', {
+        ids: [1], status, reason: 'Corrected at source',
+      });
+      assert.equal(body.success, true, status + ' with a reason must be accepted');
+      assert.equal(applied.reason, 'Corrected at source');
+      assert.equal(applied.toStatus, status);
+    }
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+// ── Quality section: guidance content and routing ──
+const guide = require('../src/services/qualityGuideService');
+
+test('every help topic is complete enough to render', () => {
+  // The partial walks these structures directly, so a topic missing a section would
+  // render a broken modal rather than fail loudly.
+  assert.ok(guide.HELP_TOPICS.length >= 2);
+  for (const topic of guide.HELP_TOPICS) {
+    assert.ok(topic.key && topic.title && topic.summary, topic.key + ' needs an identity');
+    assert.ok(topic.steps.length >= 3, topic.key + ' needs steps');
+    assert.ok(topic.steps.every(step => step.title && step.body));
+    assert.ok(topic.outcomes.length >= 3, topic.key + ' needs outcomes');
+    assert.ok(topic.outcomes.every(row => row.length === 2));
+    assert.ok(topic.sample.title && topic.sample.lines.length && topic.sample.reading,
+      topic.key + ' needs a worked example');
+  }
+  assert.deepEqual(guide.HELP_TOPICS.map(t => t.key).sort(), ['mdm', 'reconciliation']);
+  assert.equal(guide.HELP_BY_KEY.get('mdm').title, guide.MDM_HELP.title);
+});
+
+test('prerequisites are grouped by where the permission is granted', () => {
+  const keys = guide.PREREQUISITES.map(group => group.key);
+  // Each group is one administrator and one portal, which is how someone actually
+  // goes about obtaining them.
+  for (const expected of ['entra', 'fabric-tenant', 'fabric-admin', 'capacity', 'sql', 'hosting']) {
+    assert.ok(keys.includes(expected), 'missing the ' + expected + ' group');
+  }
+  for (const group of guide.PREREQUISITES) {
+    assert.ok(group.title && group.icon, group.key + ' needs a title and icon');
+    assert.ok(group.items.length, group.key + ' needs items');
+    assert.ok(group.items.every(item => typeof item.text === 'string' && typeof item.required === 'boolean'));
+    assert.ok(group.items.some(item => item.required), group.key + ' should say what is actually required');
+  }
+});
+
+test('the prerequisites name the permissions whose absence is hardest to diagnose', () => {
+  const text = guide.PREREQUISITES
+    .flatMap(group => group.items.map(item => item.text))
+    .join(' ')
+    .toLowerCase();
+
+  // Each of these fails silently or misleadingly, which is why they are stated.
+  assert.match(text, /contributor role on each fabric or power bi embedded capacity/);
+  assert.match(text, /tenant\.read\.all/);
+  assert.match(text, /admin consent/);
+  assert.match(text, /service principals can use fabric apis/);
+  assert.match(text, /workspace member/);
+  assert.match(text, /lakehouse sql endpoint is read-only/);
+  assert.match(text, /always on/);
+
+  const required = guide.requiredPrerequisites();
+  assert.ok(required.length >= 10);
+  assert.ok(required.every(entry => entry.group && entry.text));
+});
+
+test('source registration moved to Quality and the old links still resolve', async () => {
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    // Reconciliation and master data read the same registered systems, so
+    // registration belongs to neither of them.
+    const moved = await request(server, '/reconciliation/sources');
+    assert.equal(moved.statusCode, 301);
+    assert.equal(moved.headers.location, '/quality/sources');
+
+    assert.equal((await request(server, '/quality')).statusCode, 200);
+    assert.equal((await request(server, '/quality/sources')).statusCode, 200);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('the Quality landing page offers both guides and the shared registration', async () => {
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = (await request(server, '/quality')).body;
+    assert.match(body, /helpModal-reconciliation/);
+    assert.match(body, /helpModal-mdm/);
+    assert.match(body, /\/quality\/sources/);
+    // The guides' worked examples reach the page, not just their titles.
+    assert.match(body, /Business key: ERP\.InvoiceNumber/);
+    assert.match(body, /Trust order: SAP, CRM, Legacy/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('the home page states the prerequisites rather than only linking to them', async () => {
+  // `/` serves the sign-in landing page to an anonymous request, so the signed-in
+  // view is rendered directly with the locals its route supplies.
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/home.ejs', {
+    title: 'Home', user: { name: 'tester' }, currentUser: { name: 'tester' },
+    authEnabled: false, pagePath: '/', breadcrumb: [],
+    availableRuns: [], currentRun: null, hideRunSelector: true,
+    prerequisites: guide.PREREQUISITES,
+  }, {});
+
+  assert.match(html, /prerequisitesModal/);
+  assert.match(html, /Contributor role on each Fabric or Power BI Embedded capacity/);
+  assert.match(html, /Service principals can use Fabric APIs/);
+  // Required and optional are distinguished, so the list is a checklist rather than
+  // an undifferentiated wall of advice.
+  assert.match(html, /badge bg-danger">required/);
+  assert.match(html, /badge bg-secondary">optional/);
+});
+
+// ── Reconciliation in third normal form ──
+test('a rule\'s compare fields are written as rows, not one JSON column', async () => {
+  const rule = {
+    name: 'Invoices', sourceAId: 1, sourceBId: 2, datasetA: 'A', datasetB: 'B',
+    keyFieldA: 'Id', keyFieldB: 'Id',
+    compareFields: [
+      { label: 'Net', a: { kind: 'field', value: 'NetAmount' }, b: { kind: 'field', value: 'Net' }, type: 'number', tolerance: 0.01 },
+      { label: 'Currency', a: { kind: 'field', value: 'Ccy' }, b: { kind: 'constant', value: 'EUR' }, type: 'string' },
+    ],
+  };
+  const { executed } = await withFakeSql(sql => (/OUTPUT INSERTED.id/.test(sql) ? [{ id: 7 }] : []),
+    () => reconRepo.createRule(rule, 'tester'));
+
+  const insert = executed.find(entry => /INSERT INTO recon_rules/.test(entry.sql));
+  assert.ok(!/compare_fields/.test(insert.sql), 'the rule row no longer carries a JSON field list');
+
+  const fieldWrite = executed.find(entry => /INSERT INTO recon_rule_fields/.test(entry.sql));
+  assert.ok(fieldWrite, 'the fields are written to their own table');
+  assert.match(fieldWrite.sql, /VALUES \(.*\), \(.*\)/, 'both fields go in one statement');
+  const values = fieldWrite.params.map(param => param.value);
+  assert.ok(values.includes('NetAmount') && values.includes('EUR'));
+  assert.ok(values.includes('constant'), 'the operand kind is a column, not buried in a document');
+});
+
+test('a rule version snapshot still carries the fields the row no longer holds', async () => {
+  const { executed } = await withFakeSql(sql => {
+    if (/OUTPUT INSERTED.id/.test(sql)) return [{ id: 7 }];
+    if (/SELECT \* FROM recon_rules/.test(sql)) return [{ id: 7, name: 'Invoices', fields_normalized: 1 }];
+    if (/FROM recon_rule_fields/.test(sql)) {
+      return [{ rule_id: 7, ordinal: 0, label: 'Net', value_type: 'number', a_kind: 'field', a_value: 'NetAmount', b_kind: 'field', b_value: 'Net' }];
+    }
+    return [];
+  }, () => reconRepo.createRule({ name: 'Invoices', compareFields: [{ label: 'Net' }] }, 'tester'));
+
+  const version = executed.find(entry => /INSERT INTO recon_rule_versions/.test(entry.sql));
+  const snapshot = JSON.parse(version.params.find(param => param.name === 'snapshot').value);
+  assert.equal(snapshot.compareFields.length, 1, 'the audit snapshot must not lose the definition');
+  assert.equal(snapshot.compareFields[0].a.value, 'NetAmount');
+});
+
+test('a legacy rule still reads its fields from the JSON it was written with', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/FROM recon_rule_fields/.test(sql)) return [];
+    return [{
+      id: 3, name: 'Legacy', fields_normalized: 0,
+      compare_fields: JSON.stringify([{ label: 'Net', fieldA: 'NetAmount', fieldB: 'Net' }]),
+    }];
+  }, () => reconRepo.getRuleById(3));
+
+  assert.equal(result.compareFields.length, 1);
+  assert.equal(result.compareFields[0].fieldA, 'NetAmount');
+});
+
+test('exception values and differences are written as rows, in batches', async () => {
+  const exceptions = Array.from({ length: 30 }, (_, i) => ({
+    businessKey: 'INV-' + i, outcome: 'value_mismatch', severity: 'medium',
+    valuesA: { Net: 100 + i, Currency: 'EUR' },
+    valuesB: { Net: 101 + i, Currency: 'EUR' },
+    differences: [{ field: 'Net', reason: 'differs by 1', difference: 1 }],
+  }));
+
+  const { executed } = await withFakeSql(sql => (/OUTPUT INSERTED.id/.test(sql) ? [{ id: 42 }] : []),
+    () => reconRepo.recordExceptions(5, { id: 9, name: 'R' }, exceptions));
+
+  const exceptionInsert = executed.find(entry => /INSERT INTO recon_exceptions/.test(entry.sql));
+  assert.ok(!/values_a/.test(exceptionInsert.sql), 'the exception row no longer carries JSON documents');
+  assert.match(exceptionInsert.sql, /values_normalized/);
+
+  // 30 exceptions × 4 values and 30 differences, written in a handful of statements
+  // rather than one each.
+  const valueWrites = executed.filter(entry => /INSERT INTO recon_exception_values/.test(entry.sql));
+  const differenceWrites = executed.filter(entry => /INSERT INTO recon_exception_differences/.test(entry.sql));
+  assert.equal(valueWrites.length, 1);
+  assert.equal(differenceWrites.length, 1);
+  assert.equal(valueWrites[0].params.length, 30 * 4 * 4, 'four values per exception, four parameters each');
+
+  const findingWrites = executed.filter(entry => /INSERT INTO recon_run_findings/.test(entry.sql));
+  assert.equal(findingWrites.length, 1, 'findings are batched too');
+});
+
+test('an exception detail read assembles values from rows', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/FROM recon_exception_values/.test(sql)) {
+      return [
+        { exception_id: 1, side: 'a', field_label: 'Net', value: '100' },
+        { exception_id: 1, side: 'b', field_label: 'Net', value: '101' },
+      ];
+    }
+    if (/FROM recon_exception_differences/.test(sql)) {
+      return [{ exception_id: 1, field_label: 'Net', reason: 'differs by 1', delta: 1 }];
+    }
+    return [{ id: 1, business_key: 'INV-1', status: 'open', severity: 'medium', values_normalized: 1 }];
+  }, () => reconRepo.getExceptionById(1));
+
+  assert.deepEqual(result.valuesA, { Net: '100' });
+  assert.deepEqual(result.valuesB, { Net: '101' });
+  assert.equal(result.differences[0].field, 'Net');
+  assert.equal(result.differences[0].difference, 1);
+});
+
+test('an exception written before the tables existed still reads its stored JSON', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/FROM recon_exception_values|FROM recon_exception_differences/.test(sql)) return [];
+    return [{
+      id: 2, business_key: 'INV-2', status: 'open', values_normalized: 0,
+      values_a: JSON.stringify({ Net: 100 }), values_b: JSON.stringify({ Net: 105 }),
+      differences: JSON.stringify([{ field: 'Net', difference: 5 }]),
+    }];
+  }, () => reconRepo.getExceptionById(2));
+
+  assert.deepEqual(result.valuesA, { Net: 100 });
+  assert.equal(result.differences[0].difference, 5);
+});
+
+test('run outcome counts are rows, with the stored document as the fallback', async () => {
+  const fromRows = await withFakeSql(sql => (/FROM recon_run_outcome_counts/.test(sql)
+    ? [{ outcome: 'value_mismatch', total: 4 }, { outcome: 'duplicate', total: 1 }]
+    : []), () => reconRepo.getRunOutcomeCounts(5));
+  assert.deepEqual(fromRows.result, { value_mismatch: 4, duplicate: 1 });
+
+  const fromDocument = await withFakeSql(sql => (/FROM recon_run_outcome_counts/.test(sql)
+    ? []
+    : [{ counts_json: JSON.stringify({ duplicate: 2 }) }]), () => reconRepo.getRunOutcomeCounts(6));
+  assert.deepEqual(fromDocument.result, { duplicate: 2 });
+});
+
+// ── The bulk update is set-based ──
+test('a bulk change costs a handful of statements however many exceptions it covers', async () => {
+  // This is what the refactor is for. Fifty exceptions used to cost about a hundred
+  // round trips — one update and one history insert each.
+  const exceptions = Array.from({ length: 50 }, (_, i) => ({
+    id: i + 1, business_key: 'INV-' + i, status: 'open', severity: 'medium', owner: null,
+  }));
+  const { result, executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    exceptions, { assignOwner: true, owner: 'Ann', toStatus: 'acknowledged', actor: 'tester' }
+  ));
+
+  assert.equal(result.length, 50);
+  assert.ok(result.every(entry => entry.success && entry.changed));
+  assert.ok(executed.length <= 5, 'expected a handful of statements, got ' + executed.length);
+
+  const updates = executed.filter(entry => /UPDATE recon_exceptions/.test(entry.sql));
+  assert.equal(updates.length, 1, 'one update covers every exception needing the same change');
+  assert.match(updates[0].sql, /WHERE id IN \(@i0, @i1/);
+  assert.equal(updates[0].params.filter(param => /^i\d+$/.test(param.name)).length, 50);
+
+  const events = executed.filter(entry => /INSERT INTO recon_exception_events/.test(entry.sql));
+  assert.equal(events.length, 1, 'and one statement writes all the history');
+  assert.equal(events[0].params.filter(param => /^e\d+$/.test(param.name)).length, 100,
+    'two events per exception — the owner and the status — all still recorded');
+});
+
+test('exceptions needing different parts of the same change are grouped, not looped', async () => {
+  // Some already have the owner, some already have the severity. Each distinct
+  // combination becomes one statement.
+  const exceptions = [
+    { id: 1, status: 'open', severity: 'low', owner: null },
+    { id: 2, status: 'open', severity: 'high', owner: null },
+    { id: 3, status: 'open', severity: 'low', owner: 'Ann' },
+    { id: 4, status: 'open', severity: 'high', owner: 'Ann' },
+  ];
+  const { result, executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    exceptions, { assignOwner: true, owner: 'Ann', severity: 'high', actor: 'tester' }
+  ));
+
+  const updates = executed.filter(entry => /UPDATE recon_exceptions/.test(entry.sql));
+  assert.equal(updates.length, 3, 'owner+severity, owner only, severity only');
+  // The one already matching in both respects is reported as unchanged rather than
+  // rewritten.
+  assert.equal(result.find(entry => entry.id === 4).changed, false);
+  assert.ok(result.every(entry => entry.success));
+});
+
+test('a large selection is chunked so it stays under the parameter cap', async () => {
+  const exceptions = Array.from({ length: 5000 }, (_, i) => ({ id: i + 1, status: 'open', severity: 'low' }));
+  const { executed } = await withFakeSql(() => [], () => reconRepo.batchUpdateExceptions(
+    exceptions, { severity: 'high', actor: 'tester' }
+  ));
+
+  for (const entry of executed) {
+    assert.ok(entry.params.length <= 2001, 'no statement may exceed the parameter cap');
+  }
+  const updates = executed.filter(entry => /UPDATE recon_exceptions/.test(entry.sql));
+  assert.ok(updates.length > 1 && updates.length < 10, 'chunked, not one per row');
+});
+
+test('planning a change decides per exception what actually moves', () => {
+  const { planExceptionChange } = reconRepo._private;
+  const change = { assignOwner: true, owner: 'Ann', severity: 'high', toStatus: 'resolved', actor: 'tester' };
+
+  const moves = planExceptionChange({ id: 1, owner: null, severity: 'low', status: 'open' }, change);
+  assert.deepEqual(moves.parts.sort(), ['close', 'owner', 'severity']);
+  assert.equal(moves.events.length, 3);
+
+  const settled = planExceptionChange({ id: 2, owner: 'Ann', severity: 'high', status: 'resolved' }, change);
+  assert.deepEqual(settled.parts, []);
+  assert.equal(settled.changed, false, 'a change that matches what is already there does nothing');
+
+  // A comment with no other change is still worth recording.
+  const commented = planExceptionChange({ id: 3, owner: 'Ann', severity: 'high', status: 'resolved' },
+    { ...change, comment: 'checked again' });
+  assert.equal(commented.events.length, 1);
+  assert.equal(commented.events[0].action, 'comment');
+});
+
+test('closing sets the resolution date and reopening clears it', () => {
+  const { exceptionUpdateFor } = reconRepo._private;
+  const closing = exceptionUpdateFor(['close'], { toStatus: 'resolved', reason: 'Corrected' });
+  assert.ok(closing.assignments.includes('resolved_at=SYSUTCDATETIME()'));
+  assert.ok(closing.assignments.includes('resolution_reason=@reason'));
+
+  const reopening = exceptionUpdateFor(['reopen'], { toStatus: 'open' });
+  assert.ok(reopening.assignments.includes('resolved_at=NULL'));
+  assert.ok(!reopening.assignments.some(a => a.startsWith('resolution_reason')));
+});
+
+test('a bulk action reads only the columns it needs, not the whole exception', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.getExceptionsByIds([1, 2, 3]));
+  assert.ok(!/SELECT \* FROM recon_exceptions/.test(executed[0].sql),
+    'a bulk decision never looks at the captured values, so it must not read them');
+  assert.match(executed[0].sql, /WHERE id IN \(@e0, @e1, @e2\)/);
+});
+
+// ── Filtering to one run ──
+test('filtering to a run asks what that run found, not what it last touched', async () => {
+  // `last_run_id` means "the most recent run that saw this exception". For the
+  // newest run that is everything it touched, so the filter looked like it worked;
+  // for any earlier run it silently answered a different question.
+  const { executed } = await withFakeSql(() => [], () => reconRepo.listExceptions({ runId: 3 }));
+  const sql = executed[0].sql;
+
+  assert.match(sql, /id IN \(SELECT f\.exception_id FROM recon_run_findings f WHERE f\.run_id=@run\)/);
+  // Runs recorded before findings were kept have none, so they keep the old meaning
+  // rather than showing an empty list.
+  assert.match(sql, /NOT EXISTS \(SELECT 1 FROM recon_run_findings f2 WHERE f2\.run_id=@run\)/);
+  assert.equal(executed[0].params.find(param => param.name === 'run').value, 3);
+});
+
+test('a run page and its count agree on which exceptions belong to the run', async () => {
+  const listed = await withFakeSql(() => [], () => reconRepo.listExceptionPage({ runId: 3 }, { after: 0 }));
+  const counted = await withFakeSql(() => [{ total: 9 }], () => reconRepo.countExceptions({ runId: 3 }));
+  assert.match(listed.executed[0].sql, /recon_run_findings/);
+  assert.match(counted.executed[0].sql, /recon_run_findings/);
+  assert.equal(counted.result, 9);
+});
+
+test('paging walks the set by id rather than by offset', async () => {
+  // Keyset paging costs the same at page five hundred as at page one, and is not
+  // disturbed by the rows the action is itself updating.
+  const full = await withFakeSql(
+    () => [{ id: 41 }, { id: 42 }],
+    () => reconRepo.listExceptionPage({ ruleId: 9 }, { after: 40, limit: 2 })
+  );
+  assert.match(full.executed[0].sql, /AND id > @after ORDER BY id/);
+  assert.ok(!/OFFSET/.test(full.executed[0].sql));
+  assert.equal(full.executed[0].params.find(param => param.name === 'after').value, 40);
+  assert.equal(full.result.nextAfter, 42, 'the next page continues from the last id seen');
+  assert.equal(full.result.done, false, 'a full page could still have more behind it');
+
+  // Only a short page proves the end of the set.
+  const short = await withFakeSql(
+    () => [{ id: 43 }],
+    () => reconRepo.listExceptionPage({ ruleId: 9 }, { after: 42, limit: 2 })
+  );
+  assert.equal(short.result.done, true);
+});
+
+// ── Job progress ──
+const jobProgress = require('../src/services/jobProgressService');
+
+test('a job reports how far it has got and what is left', () => {
+  const job = jobProgress.createJob({ kind: 'test', total: 100 });
+  job.startedAt = Date.now() - 10000;
+
+  jobProgress.advanceJob(job, 25, 'quarter done');
+  const quarter = jobProgress.summarize(job);
+  assert.equal(quarter.percent, 25);
+  assert.equal(quarter.done, 25);
+  assert.equal(quarter.live, true);
+  assert.equal(quarter.message, 'quarter done');
+  assert.ok(quarter.etaSeconds > 0, 'an estimate once there is enough behind us');
+
+  jobProgress.finishJob(job, { status: 'completed', result: { updated: 100 } });
+  const finished = jobProgress.summarize(job);
+  assert.equal(finished.live, false);
+  assert.equal(finished.etaSeconds, null, 'nothing left to estimate');
+  assert.deepEqual(finished.result, { updated: 100 });
+});
+
+test('a job with no known size reports what it has done rather than inventing a percentage', () => {
+  const job = jobProgress.createJob({ kind: 'test' });
+  jobProgress.advanceJob(job, 7);
+  const summary = jobProgress.summarize(job);
+  assert.equal(summary.total, null);
+  assert.equal(summary.percent, null);
+  assert.equal(summary.done, 7);
+});
+
+test('a job whose worker died is reported as interrupted, not as still running', () => {
+  const job = jobProgress.createJob({ kind: 'test', total: 10 });
+  const now = Date.now() + jobProgress.STALE_MS + 1000;
+  const summary = jobProgress.summarize(job, now);
+  assert.equal(summary.status, 'interrupted');
+  assert.equal(summary.live, false);
+  assert.match(summary.message, /stopped reporting progress/);
+});
+
+test('work that throws marks its job failed rather than becoming an unhandled rejection', async () => {
+  const job = jobProgress.runJob({ kind: 'test', total: 1 }, async () => {
+    throw new Error('the source went away');
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const summary = jobProgress.summarize(jobProgress.getJob(job.id));
+  assert.equal(summary.status, 'failed');
+  assert.equal(summary.message, 'the source went away');
+});
+
+test('a finished job is dropped once nobody could still be polling it', () => {
+  const job = jobProgress.createJob({ kind: 'test' });
+  jobProgress.finishJob(job, { status: 'completed' });
+  job.finishedAt = Date.now() - jobProgress.RETAIN_MS - 1000;
+
+  jobProgress._private.sweep();
+  assert.equal(jobProgress.getJob(job.id), null);
+});
+
+test('progress for a job this process never had is reported honestly', async () => {
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = JSON.parse((await request(server, '/reconciliation/jobs/nope-123')).body);
+    assert.equal(body.success, false);
+    assert.equal(body.status, 'unknown');
+    assert.match(body.message, /No progress is being reported/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('a run\'s exception list is served a page at a time so it can be loaded with progress', async () => {
+  const original = reconRepo.listExceptionPage;
+  reconRepo.listExceptionPage = async (filters, { after, limit }) => {
+    assert.equal(filters.runId, 7);
+    assert.equal(Number(limit), 500);
+    return { exceptions: [{ id: Number(after) + 1, business_key: 'K' }], nextAfter: Number(after) + 1, done: true };
+  };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = JSON.parse((await request(server, '/reconciliation/runs/7/exceptions?after=40&limit=500')).body);
+    assert.equal(body.success, true);
+    assert.equal(body.exceptions[0].id, 41);
+    assert.equal(body.done, true);
+  } finally {
+    reconRepo.listExceptionPage = original;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+// ── Deleting a reconciliation run ──
+test('deleting a run removes only the exceptions no other run ever saw', async () => {
+  // An exception is a standing item keyed by fingerprint, seen by one or more runs.
+  // Deleting a run must not take with it the items other runs still evidence.
+  const { executed } = await withFakeSql(sql => {
+    if (/HAVING NOT EXISTS/.test(sql)) return [{ exception_id: 11 }, { exception_id: 12 }];
+    if (/SELECT DISTINCT f\.exception_id/.test(sql)) return [{ exception_id: 20 }];
+    if (/COUNT\(\*\) AS total FROM recon_run_findings/.test(sql)) return [{ total: 3 }];
+    return [];
+  }, () => reconRepo.deleteRun(5));
+
+  const deletedExceptions = executed.find(entry => /DELETE FROM recon_exceptions WHERE id IN/.test(entry.sql));
+  assert.deepEqual(deletedExceptions.params.map(param => param.value), [11, 12],
+    'only the solitary exceptions go');
+
+  // Their detail and history go with them; leaving those behind would orphan rows.
+  for (const table of ['recon_exception_values', 'recon_exception_differences', 'recon_exception_events']) {
+    assert.ok(executed.some(entry => new RegExp('DELETE FROM ' + table + ' WHERE exception_id IN').test(entry.sql)),
+      table + ' should be cleared for the deleted exceptions');
+  }
+
+  // The shared one is kept and repointed, not deleted.
+  assert.ok(!deletedExceptions.params.some(param => param.value === 20));
+  const repair = executed.find(entry => /UPDATE e SET/.test(entry.sql));
+  assert.match(repair.sql, /MIN\(run_id\) AS first_run, MAX\(run_id\) AS last_run, COUNT\(\*\) AS sightings/);
+  assert.deepEqual(repair.params.map(param => param.value), [20]);
+});
+
+test('a run\'s own rows go before the survivors are recomputed', async () => {
+  // The recomputation must see only the sightings that remain, or it would count
+  // the run being deleted.
+  const { executed } = await withFakeSql(sql => {
+    if (/HAVING NOT EXISTS/.test(sql)) return [];
+    if (/SELECT DISTINCT f\.exception_id/.test(sql)) return [{ exception_id: 20 }];
+    return [];
+  }, () => reconRepo.deleteRun(5));
+
+  const sqlOrder = executed.map(entry => entry.sql);
+  const findingsDeleted = sqlOrder.findIndex(sql => /DELETE FROM recon_run_findings WHERE run_id=@run/.test(sql));
+  const repaired = sqlOrder.findIndex(sql => /UPDATE e SET/.test(sql));
+  assert.ok(findingsDeleted !== -1 && repaired !== -1);
+  assert.ok(findingsDeleted < repaired, 'findings are removed first');
+
+  assert.ok(sqlOrder.some(sql => /DELETE FROM recon_run_outcome_counts WHERE run_id=@run/.test(sql)));
+  assert.ok(sqlOrder.some(sql => /DELETE FROM recon_runs WHERE id=@run/.test(sql)));
+});
+
+test('an exception still pointing at the deleted run is detached, not left dangling', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.deleteRun(5));
+  assert.ok(executed.some(entry => /UPDATE recon_exceptions SET last_run_id=NULL WHERE last_run_id=@run/.test(entry.sql)));
+  assert.ok(executed.some(entry => /UPDATE recon_exceptions SET first_run_id=NULL WHERE first_run_id=@run/.test(entry.sql)));
+});
+
+test('deletion reports its effect before it happens', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/FROM \(\s*SELECT f\.exception_id/.test(sql)) return [{ total: 2 }];
+    if (/COUNT\(DISTINCT f\.exception_id\)/.test(sql)) return [{ total: 1 }];
+    return [{ total: 3 }];
+  }, () => reconRepo.getRunDeletionImpact(5));
+
+  assert.equal(result.findings, 3);
+  assert.equal(result.exceptionsToDelete, 2);
+  assert.equal(result.exceptionsToKeep, 1);
+  assert.equal(result.attributable, true);
+});
+
+test('a run recorded before findings existed reports that nothing can be attributed to it', async () => {
+  const { result } = await withFakeSql(() => [{ total: 0 }], () => reconRepo.getRunDeletionImpact(5));
+  assert.equal(result.attributable, false, 'its exceptions must be left alone rather than guessed at');
+  assert.equal(result.exceptionsToDelete, 0);
+});
+
+test('deleting a run runs as a job and reports what it removed', async () => {
+  const original = { getRunById: reconRepo.getRunById, getRunDeletionImpact: reconRepo.getRunDeletionImpact, deleteRun: reconRepo.deleteRun };
+  reconRepo.getRunById = async () => ({ id: 5, rule_name: 'Invoices', started_at: new Date() });
+  reconRepo.getRunDeletionImpact = async () => ({ findings: 40, exceptionsToDelete: 30, exceptionsToKeep: 10, attributable: true });
+  reconRepo.deleteRun = async (runId, { onProgress }) => {
+    onProgress({ stage: 'planned', orphans: 30, shared: 10 });
+    onProgress({ stage: 'exceptions', done: 30, total: 30 });
+    onProgress({ stage: 'findings', done: 40 });
+    onProgress({ stage: 'repaired', done: 10, total: 10 });
+    return { findings: 40, exceptions: 30, repaired: 10 };
+  };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const started = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: '127.0.0.1', port: server.address().port, path: '/reconciliation/runs/5', method: 'DELETE',
+      }, res => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', chunk => { text += chunk; });
+        res.on('end', () => resolve(JSON.parse(text)));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    assert.equal(started.success, true);
+    assert.ok(started.jobId);
+    assert.equal(started.impact.exceptionsToDelete, 30);
+
+    let job;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      job = JSON.parse((await request(server, '/reconciliation/jobs/' + started.jobId)).body);
+      if (!job.live) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(job.status, 'completed');
+    assert.equal(job.counters.exceptions, 30);
+    assert.equal(job.counters.repaired, 10);
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('deleting every run of every rule needs an explicit confirmation', async () => {
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    // Clearing the whole history is not something to do by accident.
+    const refused = await postJson(server, '/reconciliation/runs/delete-all', {});
+    assert.equal(refused.success, false);
+    assert.match(refused.message, /explicit confirmation/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('deleting all runs of a rule keeps going when one will not delete', async () => {
+  const original = { listRunIds: reconRepo.listRunIds, deleteRun: reconRepo.deleteRun };
+  reconRepo.listRunIds = async ({ ruleId }) => {
+    assert.equal(ruleId, 9);
+    return [1, 2, 3];
+  };
+  reconRepo.deleteRun = async runId => {
+    if (runId === 2) throw new Error('still referenced');
+    return { findings: 5, exceptions: 4, repaired: 1 };
+  };
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const started = await postJson(server, '/reconciliation/runs/delete-all', { ruleId: 9 });
+    assert.equal(started.total, 3);
+
+    let job;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      job = JSON.parse((await request(server, '/reconciliation/jobs/' + started.jobId)).body);
+      if (!job.live) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(job.status, 'completed');
+    assert.equal(job.counters.runs, 3, 'every run was attempted');
+    assert.equal(job.counters.exceptions, 8, 'the two that worked did their work');
+    assert.equal(job.problems.length, 1);
+    assert.match(job.problems[0].key, /Run #2/);
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+// ── Exceptions left behind by a deleted run ──
+test('an exception with no run behind it is recognised as a leftover', async () => {
+  // Deleting a run only ever considered exceptions its findings pointed at, so
+  // anything recorded before per-run findings existed outlived its own run and kept
+  // appearing in the current state.
+  const { executed, result } = await withFakeSql(() => [{ total: 7 }], () => reconRepo.countOrphanedExceptions());
+  const sql = executed[0].sql;
+  assert.match(sql, /NOT EXISTS \(SELECT 1 FROM recon_run_findings f WHERE f\.exception_id = e\.id\)/);
+  assert.match(sql, /NOT EXISTS \(SELECT 1 FROM recon_runs r WHERE r\.id = e\.last_run_id\)/);
+  assert.match(sql, /NOT EXISTS \(SELECT 1 FROM recon_runs r2 WHERE r2\.id = e\.first_run_id\)/);
+  assert.equal(result, 7);
+});
+
+test('an exception whose run still exists is not treated as a leftover', async () => {
+  // The predicate requires all three: no findings, and neither run reference alive.
+  const { executed } = await withFakeSql(() => [], () => reconRepo.countOrphanedExceptions());
+  const sql = executed[0].sql.replace(/\s+/g, ' ');
+  assert.ok(sql.includes('AND NOT EXISTS'), 'the conditions are combined, not alternatives');
+  assert.equal((sql.match(/AND NOT EXISTS/g) || []).length, 2);
+});
+
+test('purging leftovers removes their detail and history too', async () => {
+  let served = false;
+  const { executed, result } = await withFakeSql(sql => {
+    if (/SELECT TOP \(\d+\) e\.id FROM recon_exceptions/.test(sql)) {
+      if (served) return [];
+      served = true;
+      return [{ id: 1 }, { id: 2 }];
+    }
+    return [];
+  }, () => reconRepo.deleteOrphanedExceptions());
+
+  assert.equal(result, 2);
+  for (const table of ['recon_exception_values', 'recon_exception_differences', 'recon_exception_events']) {
+    assert.ok(executed.some(entry => new RegExp('DELETE FROM ' + table + ' WHERE exception_id IN').test(entry.sql)));
+  }
+  assert.ok(executed.some(entry => /DELETE FROM recon_exceptions WHERE id IN/.test(entry.sql)));
+});
+
+test('deleting a run sweeps what it leaves without evidence', async () => {
+  let orphansServed = false;
+  const { executed } = await withFakeSql(sql => {
+    if (/SELECT TOP \(5000\) e\.id FROM recon_exceptions/.test(sql)) {
+      if (orphansServed) return [];
+      orphansServed = true;
+      return [{ id: 99 }];
+    }
+    return [];
+  }, () => reconRepo.deleteRun(5));
+
+  // The sweep happens after the run row goes, so the "no live run" test is true.
+  const order = executed.map(entry => entry.sql);
+  const runDeleted = order.findIndex(sql => /DELETE FROM recon_runs WHERE id=@run/.test(sql));
+  const orphanScan = order.findIndex(sql => /SELECT TOP \(5000\) e\.id FROM recon_exceptions/.test(sql));
+  assert.ok(runDeleted !== -1 && orphanScan > runDeleted, 'the sweep must run after the run is gone');
+
+  const orphanDelete = executed.filter(entry => /DELETE FROM recon_exceptions WHERE id IN/.test(entry.sql));
+  assert.ok(orphanDelete.some(entry => entry.params.some(param => param.value === 99)));
+});
+
+test('leftovers can be purged from the dashboard for an install already in that state', async () => {
+  const original = reconRepo.deleteOrphanedExceptions;
+  reconRepo.deleteOrphanedExceptions = async () => 12;
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/reconciliation/exceptions/purge-orphans', {});
+    assert.equal(body.success, true);
+    assert.equal(body.removed, 12);
+  } finally {
+    reconRepo.deleteOrphanedExceptions = original;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+// ── Rules Overview ──
+test('the rules overview breaks each rule down by the runs behind it', async () => {
+  const { result, executed } = await withFakeSql(sql => {
+    if (/FROM recon_run_findings f/.test(sql)) {
+      return [
+        { rule_id: 9, run_id: 5, total: 8, started_at: '2026-08-10T10:00:00Z', rule_version: 2 },
+        { rule_id: 9, run_id: 3, total: 6, started_at: '2026-08-01T10:00:00Z', rule_version: 1 },
+      ];
+    }
+    return [{
+      rule_id: 9, rule_name: 'Invoices', business_area: 'Finance', total: 12,
+      high: 3, medium: 8, low: 1, worst_recurrence: 4, last_seen: '2026-08-10T10:00:00Z',
+    }];
+  }, () => reconRepo.getRulesOverview());
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].total, 12);
+  assert.equal(result[0].runs.length, 2);
+  assert.equal(result[0].runs[0].runId, 5);
+  assert.equal(result[0].runs[0].total, 8);
+
+  // The two reads are one per level, not one per rule.
+  assert.equal(executed.length, 2);
+});
+
+test('exceptions no run accounts for are reported rather than quietly missing', async () => {
+  // 12 standing, 8 attributable — the hierarchy must add up or say why it does not.
+  const { result } = await withFakeSql(sql => {
+    if (/FROM recon_run_findings f/.test(sql)) {
+      return [{ rule_id: 9, run_id: 5, total: 8, started_at: '2026-08-10T10:00:00Z', rule_version: 1 }];
+    }
+    return [{ rule_id: 9, rule_name: 'Invoices', total: 12, high: 0, medium: 12, low: 0, worst_recurrence: 1 }];
+  }, () => reconRepo.getRulesOverview());
+
+  assert.equal(result[0].unattributed, 4);
+});
+
+test('a run whose row is gone still shows its contribution, labelled as deleted', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/FROM recon_run_findings f/.test(sql)) {
+      return [{ rule_id: 9, run_id: 3, total: 6, started_at: null, rule_version: null }];
+    }
+    return [{ rule_id: 9, rule_name: 'Invoices', total: 6, high: 0, medium: 6, low: 0, worst_recurrence: 1 }];
+  }, () => reconRepo.getRulesOverview());
+
+  assert.equal(result[0].runs[0].deleted, true);
+  assert.equal(result[0].runs[0].total, 6);
+  assert.equal(result[0].unattributed, 0);
+});
+
+test('the overview filters to one status, applying it at both levels', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.getRulesOverview({ status: 'acknowledged' }));
+  assert.equal(executed.length, 2);
+  for (const entry of executed) {
+    assert.match(entry.sql, /e\.status=@status/, 'both levels must agree on the filter');
+    assert.equal(entry.params[0].value, 'acknowledged');
+  }
+});
+
+test('without a status the overview means everything still open', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo.getRulesOverview());
+  for (const entry of executed) {
+    assert.match(entry.sql, /e\.status NOT IN \('resolved','accepted'\)/);
+    assert.equal(entry.params.length, 0);
+  }
+});
+
+test('the dashboard offers the rule hierarchy only when it is not scoped to a run', async () => {
+  const original = { getRulesOverview: reconRepo.getRulesOverview, getDashboardData: reconRepo.getDashboardData, listRuns: reconRepo.listRuns, countOrphanedExceptions: reconRepo.countOrphanedExceptions };
+  let overviewCalls = 0;
+  reconRepo.getRulesOverview = async () => { overviewCalls += 1; return []; };
+  reconRepo.getDashboardData = async () => ({ rules: [], exceptionsByStatus: [], exceptionsByOutcome: [], exceptionsBySeverity: [], byRule: [], recentRuns: [], byOwner: [], ageing: {}, problems: [], scoped: false });
+  reconRepo.listRuns = async () => [];
+  reconRepo.countOrphanedExceptions = async () => 0;
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const unscoped = await request(server, '/reconciliation');
+    assert.match(unscoped.body, /Rules Overview/);
+    assert.equal(overviewCalls, 1);
+
+    // Scoped to a run, the breakdown would be a single row per rule, so it is not built.
+    await request(server, '/reconciliation?runId=5');
+    assert.equal(overviewCalls, 1, 'the hierarchy is not built for a run-scoped page');
+  } finally {
+    Object.assign(reconRepo, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+// ── Aggregation in Values to Compare ──
+//
+// The two systems often hold the same fact at different grains — an analytical
+// ledger with one row per posting against a synthetic balance with one row per
+// account. Without aggregation the control has to compare postings to a balance,
+// which is meaningless; with it, the source database does the adding up.
+
+test('an aggregate operand groups the side by everything it does not aggregate', () => {
+  const sql = recon.buildSelectSql({
+    dataset: 'dbo.Postings',
+    selections: [
+      { alias: 'recon_key', kind: 'field', value: 'Account' },
+      { alias: 'recon_c0a', kind: 'aggregate', fn: 'sum', valueKind: 'field', value: 'Amount' },
+    ],
+  });
+  assert.equal(sql, 'SELECT [Account] AS [recon_key], SUM([Amount]) AS [recon_c0a] FROM [dbo].[Postings] GROUP BY [Account]');
+});
+
+test('a side with no aggregate is not grouped at all', () => {
+  const sql = recon.buildSelectSql({
+    dataset: 'dbo.Balances',
+    selections: [
+      { alias: 'recon_key', kind: 'field', value: 'Account' },
+      { alias: 'recon_c0b', kind: 'field', value: 'Amount' },
+    ],
+  });
+  assert.doesNotMatch(sql, /GROUP BY/, 'grouping a side that does not aggregate would change its grain');
+});
+
+test('the aggregate function comes from a fixed list, never from the rule text', () => {
+  assert.throws(
+    () => recon.aggregateSql({ fn: 'sum(1) FROM sys.tables --', value: 'Amount', valueKind: 'field' }),
+    /Unsupported aggregate function/);
+});
+
+test('count distinct and bare count each render the SQL they mean', () => {
+  assert.equal(recon.aggregateSql({ fn: 'count_distinct', valueKind: 'field', value: 'InvoiceNo' }), 'COUNT(DISTINCT [InvoiceNo])');
+  // Counting nothing in particular is counting the rows in the group.
+  assert.equal(recon.aggregateSql({ fn: 'count', value: '' }), 'COUNT(*)');
+  // Everything else needs something to aggregate, and says so.
+  assert.throws(() => recon.aggregateSql({ fn: 'sum', value: '' }), /needs a field or expression/);
+});
+
+test('an aggregate can wrap an expression as well as a column', () => {
+  assert.equal(
+    recon.aggregateSql({ fn: 'sum', valueKind: 'expression', value: 'CASE WHEN Reversed = 0 THEN Amount ELSE 0 END' }),
+    'SUM((CASE WHEN Reversed = 0 THEN Amount ELSE 0 END))');
+});
+
+test('an aggregated expression is still held to the read-only expression rules', () => {
+  const problems = recon.validateCompareFields([{
+    label: 'Amount',
+    a: { kind: 'aggregate', fn: 'sum', valueKind: 'expression', value: 'Amount; DROP TABLE Ledger' },
+    b: { kind: 'field', value: 'Amount' },
+  }]);
+  assert.ok(problems.some(p => /statement separators/.test(p)), problems.join(' | '));
+});
+
+test('mixing an aggregate with a plain column on one side is refused, with the reason', () => {
+  const problems = recon.validateCompareFields([
+    { label: 'Amount', a: { kind: 'aggregate', fn: 'sum', valueKind: 'field', value: 'Amount' }, b: { kind: 'field', value: 'Amount' } },
+    { label: 'Currency', a: { kind: 'field', value: 'Currency' }, b: { kind: 'field', value: 'Currency' } },
+  ]);
+  // Left unchecked, Currency would join source A's GROUP BY and split one account
+  // into several rows — duplicates that exist only because of how the rule is written.
+  const problem = problems.find(p => /Source A is grouped/.test(p));
+  assert.ok(problem, problems.join(' | '));
+  assert.match(problem, /Currency/);
+  // Source B aggregates nothing at all, so it has nothing to answer for.
+  assert.ok(!problems.some(p => /Source B is grouped/.test(p)), problems.join(' | '));
+});
+
+test('a fixed value alongside an aggregate is fine — it is never selected', () => {
+  const problems = recon.validateCompareFields([
+    { label: 'Amount', a: { kind: 'aggregate', fn: 'sum', valueKind: 'field', value: 'Amount' }, b: { kind: 'field', value: 'Amount' } },
+    { label: 'Ledger', a: { kind: 'constant', value: 'GL' }, b: { kind: 'field', value: 'Ledger' } },
+  ]);
+  assert.deepEqual(problems, []);
+});
+
+test('every value aggregating on one side is allowed', () => {
+  const problems = recon.validateCompareFields([
+    { label: 'Amount', a: { kind: 'aggregate', fn: 'sum', valueKind: 'field', value: 'Amount' }, b: { kind: 'field', value: 'Amount' } },
+    { label: 'Last posting', type: 'date', a: { kind: 'aggregate', fn: 'max', valueKind: 'field', value: 'PostedOn' }, b: { kind: 'field', value: 'PostedOn' } },
+  ]);
+  assert.deepEqual(problems, []);
+});
+
+test("planning the user's case: sum on the left, plain amount on the right", () => {
+  const plan = recon.planRule({
+    keyFieldA: 'Account', keyFieldB: 'Account',
+    compareFields: [{
+      label: 'Amount', type: 'number',
+      a: { kind: 'aggregate', fn: 'sum', valueKind: 'field', value: 'Amount' },
+      b: { kind: 'field', value: 'Amount' },
+    }],
+  });
+
+  assert.equal(plan.aggregatedA, true);
+  assert.equal(plan.aggregatedB, false);
+  assert.match(recon.buildSelectSql({ dataset: 'dbo.Analytics', selections: plan.selectionsA }), /GROUP BY \[Account\]$/);
+  assert.doesNotMatch(recon.buildSelectSql({ dataset: 'dbo.Synthetic', selections: plan.selectionsB }), /GROUP BY/);
+  // The engine still reads plain aliases; the grouping is entirely the source's job.
+  assert.equal(plan.engineRule.compareFields[0].fieldA, 'recon_c0a');
+  assert.match(plan.engineRule.compareFields[0].describeA, /sum\(Amount\) per business key/);
+});
+
+test('an aggregated side is reconciled by key like any other', () => {
+  // What the database would hand back after grouping: one row per account.
+  const result = recon.reconcile({
+    rowsA: [{ recon_key: 'A-1', recon_c0a: 300 }, { recon_key: 'A-2', recon_c0a: 50 }],
+    rowsB: [{ recon_key: 'A-1', recon_c0b: 300 }, { recon_key: 'A-2', recon_c0b: 75 }],
+    rule: {
+      keyFieldA: 'recon_key', keyFieldB: 'recon_key',
+      compareFields: [{ label: 'Amount', type: 'number', fieldA: 'recon_c0a', fieldB: 'recon_c0b' }],
+    },
+  });
+  assert.equal(result.summary.matched, 1);
+  assert.equal(result.exceptions.length, 1);
+  assert.equal(result.exceptions[0].businessKey, 'A-2');
+  assert.equal(result.exceptions[0].differences[0].difference, 25);
+});
+
+// ── Groups of rules ──
+
+test('an unrecognised group falls back to ungrouped rather than being stored raw', () => {
+  assert.equal(recon.normalizeRuleGroup('Left-To-Right'), 'ungrouped');
+  assert.equal(recon.normalizeRuleGroup('left_to_right'), 'left_to_right');
+  assert.equal(recon.normalizeRuleGroup('  END_TO_END '), 'end_to_end');
+  assert.equal(recon.normalizeRuleGroup(null), 'ungrouped');
+  assert.equal(recon.ruleGroupLabel('start_to_end'), 'Start-to-End');
+  assert.equal(recon.ruleGroupLabel('nonsense'), 'Ungrouped');
+});
+
+test('every group definition carries a label and an explanation', () => {
+  for (const def of recon.RULE_GROUP_DEFS) {
+    assert.ok(def.key && def.label && def.description, JSON.stringify(def));
+  }
+  const keys = recon.RULE_GROUP_DEFS.map(def => def.key);
+  assert.equal(new Set(keys).size, keys.length, 'group keys must be unique');
+  assert.ok(keys.includes('ungrouped'), 'the fallback must itself be a real group');
+});
+
+test('the exception filter narrows to one group', async () => {
+  const { executed } = await withFakeSql(() => [{ total: 0 }],
+    () => reconRepo.countExceptions({ ruleGroup: 'left_to_right', openOnly: true }));
+  assert.match(executed[0].sql, /rule_group=@group/);
+  assert.equal(executed[0].params.find(p => p.name === 'group').value, 'left_to_right');
+});
+
+test('the rules overview applies a group filter at both of its levels', async () => {
+  const { executed } = await withFakeSql(() => [],
+    () => reconRepo.getRulesOverview({ status: 'open', ruleGroup: 'end_to_end' }));
+  assert.equal(executed.length, 2);
+  for (const entry of executed) {
+    assert.match(entry.sql, /e\.rule_group=@group/, 'both levels must read the same population');
+    assert.equal(entry.params.find(p => p.name === 'group').value, 'end_to_end');
+  }
+});
+
+test('a rule stores its group, and an unknown one is normalised before it reaches SQL', async () => {
+  const { executed } = await withFakeSql(sql => (/OUTPUT INSERTED\.id/.test(sql) ? [{ id: 7 }] : []),
+    () => reconRepo.createRule({ name: 'R', ruleGroup: 'not-a-group', compareFields: [] }, 'tester'));
+  const insert = executed.find(entry => /INSERT INTO recon_rules/.test(entry.sql));
+  assert.match(insert.sql, /rule_group/);
+  assert.equal(insert.params.find(p => p.name === 'group').value, 'ungrouped');
+});
+
+test('a rule field round-trips its aggregate function and what the function wraps', () => {
+  const params = reconRepo._private.ruleFieldParams(3, {
+    label: 'Amount', type: 'number',
+    a: { kind: 'aggregate', fn: 'sum', valueKind: 'expression', value: 'Amount * -1' },
+    b: { kind: 'field', value: 'Amount' },
+  }, 0);
+  const value = name => params.find(p => p.name === name).value;
+  assert.equal(value('ak0'), 'aggregate');
+  assert.equal(value('af0'), 'sum');
+  assert.equal(value('avk0'), 'expression');
+  assert.equal(value('av0'), 'Amount * -1');
+  // A plain field carries no function, so an edit cannot leave a stale one behind.
+  assert.equal(value('bf0'), null);
+  assert.equal(value('bvk0'), null);
+
+  const mapped = reconRepo._private.mapRuleField({
+    label: 'Amount', value_type: 'number', tolerance: null, tolerance_days: null,
+    a_kind: 'aggregate', a_value: 'Amount * -1', a_fn: 'sum', a_value_kind: 'expression',
+    b_kind: 'field', b_value: 'Amount', b_fn: null, b_value_kind: null,
+  });
+  assert.deepEqual(mapped.a, { kind: 'aggregate', value: 'Amount * -1', fn: 'sum', valueKind: 'expression' });
+  assert.deepEqual(mapped.b, { kind: 'field', value: 'Amount' });
+});
+
+test('the rule-field insert binds one parameter per column, in column order', async () => {
+  const { executed } = await withFakeSql(() => [], () => reconRepo._private.writeRuleFields(
+    { close() {} },
+    3,
+    [{ label: 'Amount', a: { kind: 'aggregate', fn: 'sum', valueKind: 'field', value: 'Amount' }, b: { kind: 'field', value: 'Amount' } }]));
+  const insert = executed.find(entry => /INSERT INTO recon_rule_fields/.test(entry.sql));
+  const columns = insert.sql.match(/\(([^)]+)\) VALUES/)[1].split(',').length;
+  assert.equal(insert.params.length, columns, 'a column list and its bindings must not drift apart');
+});
+
+// ── Every reconciliation page still renders ──
+//
+// These templates are only reached through a live database, so a local that a
+// route stopped passing — or a column a view started reading — showed up as a
+// blank page in a browser and nowhere else. Rendering each one with the shape its
+// route hands it turns that into a failing test.
+test('every reconciliation view renders with the locals its route supplies', async () => {
+  const ejs = require('ejs');
+  const { RECONCILIATION_HELP } = require('../src/services/qualityGuideService');
+  const { VERDICT_DEFS, SEVERITY_LEVELS } = require('../src/services/reconciliationComparisonService');
+
+  const when = '2026-08-01T09:00:00Z';
+  const base = {
+    user: { name: 'T' }, currentUser: { name: 'T', email: 't@example.com' },
+    currentPath: '/reconciliation', breadcrumb: [], availableRuns: [], globalRun: null,
+    hideRunSelector: true, title: 'x', error: null,
+    ruleGroupDefs: recon.RULE_GROUP_DEFS, ruleGroupLabel: recon.ruleGroupLabel,
+    aggregateDefs: recon.AGGREGATE_DEFS, operandKinds: recon.OPERAND_KINDS,
+    outcomeDefs: recon.OUTCOME_DEFS, statusDefs: recon.STATUS_DEFS,
+    severityLevels: SEVERITY_LEVELS, verdictDefs: VERDICT_DEFS,
+  };
+
+  const rule = {
+    id: 1, name: 'Ledger vs Balances', rule_group: 'aggregate_to_detail', business_area: 'Finance',
+    owner: 'o@example.com', priority: 'high', status: 'active', version: 2, description: 'd',
+    source_a_id: 1, source_b_id: 2, dataset_a: 'dbo.Postings', dataset_b: 'dbo.Balances',
+    key_field_a: 'Account', key_field_b: 'Account',
+    compareFields: [{
+      label: 'Amount', type: 'number',
+      a: { kind: 'aggregate', fn: 'sum', valueKind: 'field', value: 'Amount' },
+      b: { kind: 'field', value: 'Amount' },
+    }],
+  };
+  const exception = {
+    id: 5, rule_id: 1, rule_name: rule.name, rule_group: 'aggregate_to_detail', business_area: 'Finance',
+    business_key: 'A-1', outcome: 'value_mismatch', severity: 'high', status: 'open', owner: null,
+    occurrence_count: 2, first_seen_at: when, last_seen_at: when, values: { a: {}, b: {} }, differences: [],
+  };
+  const run = {
+    id: 9, rule_id: 1, rule_name: rule.name, rule_group: 'aggregate_to_detail', rule_version: 2,
+    status: 'completed', started_at: when, completed_at: when, run_by: 'me',
+    records_a: 5, records_b: 5, keys_compared: 5, matched: 4, exception_count: 1,
+  };
+  const dashboardData = {
+    rules: [], exceptionsByStatus: [], exceptionsByOutcome: [], exceptionsBySeverity: [],
+    byRule: [{ rule_id: 1, rule_name: rule.name, rule_group: 'aggregate_to_detail', business_area: null, open_count: 3, worst_recurrence: 1, last_seen: when }],
+    byGroup: [{ rule_group: 'aggregate_to_detail', total: 3, high: 1 }],
+    rulesByGroup: [{ rule_group: 'aggregate_to_detail', total: 2, active: 1 }],
+    byOwner: [], recentRuns: [run], ageing: { week1: 0, month1: 0, older: 0 }, problems: [],
+  };
+  const overviewRow = {
+    ruleId: 1, ruleName: rule.name, ruleGroup: 'aggregate_to_detail', businessArea: 'Finance',
+    total: 3, high: 1, medium: 1, low: 1, worstRecurrence: 3, lastSeen: when,
+    runs: [{ runId: 9, total: 3, startedAt: when, ruleVersion: 2, deleted: false }], unattributed: 0,
+  };
+
+  const pages = [
+    ['reconciliation/dashboard', {
+      ...base, selectedRunId: null, ruleStatus: null, ruleGroup: null, helpTopic: RECONCILIATION_HELP,
+      data: { ...dashboardData, scoped: false, scopedRun: null }, runs: [run],
+      rulesOverview: [overviewRow], orphanedExceptions: 0,
+    }],
+    // Scoped to one run the panels answer a different question, through different branches.
+    ['reconciliation/dashboard', {
+      ...base, selectedRunId: 9, ruleStatus: null, ruleGroup: null, helpTopic: RECONCILIATION_HELP,
+      data: { ...dashboardData, scoped: true, scopedRun: run }, runs: [run],
+      rulesOverview: [], orphanedExceptions: 0,
+    }],
+    ['reconciliation/rules', { ...base, rules: [rule], owners: ['o@example.com'] }],
+    ['reconciliation/rule-form', { ...base, rule, sources: [{ id: 1, name: 'ERP', system_label: 'SAP' }], versions: [] }],
+    ['reconciliation/rule-form', { ...base, rule: null, sources: [], versions: [] }],
+    ['reconciliation/exceptions', {
+      ...base, exceptions: [exception], rules: [rule], owners: [],
+      filters: { status: null, severity: null, outcome: null, ruleId: null, ruleGroup: null, all: false },
+    }],
+    ['reconciliation/exception-detail', { ...base, exception, events: [], allowedNext: ['resolved'] }],
+    ['reconciliation/runs', { ...base, runs: [run], rules: [rule] }],
+    ['reconciliation/run-detail', { ...base, run, outcomeCounts: [], exceptionTotal: 1 }],
+    ['reconciliation/compare', {
+      ...base, runs: [run], comparison: null, fromId: null, toId: null, notice: null,
+      overview: [{
+        ruleId: 1, ruleName: rule.name, ruleGroup: 'aggregate_to_detail', later: run, earlier: null,
+        runCount: 1, severity: { high: 1, medium: 0, low: 0 }, exceptionCount: 1,
+        comparable: false, comparison: null, summary: null, error: null,
+      }],
+    }],
+  ];
+
+  for (const [page, locals] of pages) {
+    const html = await ejs.renderFile('src/views/' + page + '.ejs', locals);
+    assert.ok(html.length > 500, page + ' rendered almost nothing');
+  }
+});
+
+test('the rule form offers a group, an aggregate operand and a dataset filter', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/reconciliation/rule-form.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/reconciliation/rules/new',
+    breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true,
+    title: 'New', rule: null, sources: [], versions: [], error: null,
+    operandKinds: recon.OPERAND_KINDS, aggregateDefs: recon.AGGREGATE_DEFS, ruleGroupDefs: recon.RULE_GROUP_DEFS,
+  });
+  assert.match(html, /Group of rules/);
+  assert.match(html, /Start-to-Start/);
+  assert.match(html, /Aggregate \(group by key\)/);
+  assert.match(html, /id="datasetFilterA"/);
+  assert.match(html, /id="datasetFilterB"/);
+});
+
+test('the sidebar names the quality configuration page for what it is', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/quality', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
+  });
+  assert.match(html, /<span>Quality Configuration<\/span>/);
+});
+
+test('the master data form filters its raw-table list too', async () => {
+  const ejs = require('ejs');
+  const mdm = require('../src/services/mdmService');
+  const html = await ejs.renderFile('src/views/mdm/model-form.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/mdm/models/new',
+    breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true,
+    title: 'New', model: null, sources: [], versions: [], error: null,
+    catalogue: {
+      standardisers: mdm.STANDARDISER_DEFS, blocking: mdm.BLOCKING_DEFS,
+      comparators: mdm.COMPARATOR_DEFS, nullPolicies: mdm.NULL_POLICY_DEFS,
+      survivorship: mdm.SURVIVORSHIP_DEFS,
+    },
+  });
+  assert.match(html, /id="datasetFilter"/);
+});
+
+// ── Workspace access ──
+//
+// A workspace detail page answers "who is in this workspace". The question
+// governance gets asked is the other way round — what can this person reach, and
+// which workspaces has nobody responsible for — and neither can be answered one
+// workspace at a time.
+
+const workspaceAccess = require('../src/services/workspaceAccessService');
+const analysisScope = require('../src/services/analysisScopeService');
+const scheduleDue = require('../src/services/scheduleDueService');
+
+const ACCESS_FIXTURE = {
+  workspaces: [
+    { workspace_id: 'ws-1', name: 'Finance', state: 'Active', capacity_name: 'F64', item_count: 12, users_readable: 1 },
+    // Readable, and nobody can administer it.
+    { workspace_id: 'ws-2', name: 'Orphan', state: 'Active', item_count: 1, users_readable: 1 },
+    // The scan could not read this one's access list at all.
+    { workspace_id: 'ws-3', name: 'Marketing', state: 'Active', item_count: 3, users_readable: 0 },
+  ],
+  grants: [
+    { workspace_id: 'ws-1', principal_id: 'u1', principal_type: 'User', display_name: 'Ann', email: 'Ann@X.com', access_right: 'Admin' },
+    { workspace_id: 'ws-1', principal_id: 'sp1', principal_type: 'App', display_name: 'Scanner', email: null, access_right: 'Member' },
+    { workspace_id: 'ws-2', principal_id: 'u1', principal_type: 'User', display_name: 'Ann', email: 'ann@x.com', access_right: 'Viewer' },
+  ],
+};
+
+test('access grants roll up by workspace and by principal from one pass', () => {
+  const overview = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE);
+
+  assert.equal(overview.workspaces.length, 3);
+  assert.equal(overview.grants.length, 3);
+
+  const finance = overview.workspaces.find(w => w.workspaceId === 'ws-1');
+  assert.equal(finance.counts.admin, 1);
+  assert.equal(finance.counts.member, 1);
+
+  // Ann holds Admin on one workspace and Viewer on another: one principal, two grants.
+  const ann = overview.principals.find(p => p.email === 'Ann@X.com' || p.email === 'ann@x.com');
+  assert.equal(ann.workspaces.length, 2);
+  assert.equal(ann.counts.admin, 1);
+  assert.equal(ann.counts.viewer, 1);
+  assert.equal(ann.strongest, 'admin', 'the strongest access anywhere is what a review looks at first');
+});
+
+test('one principal is not split in two by the case of their email', () => {
+  const overview = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE);
+  assert.equal(overview.principals.length, 2, 'Ann@X.com and ann@x.com are the same person');
+});
+
+test('a principal with no email is identified by object id, not by display name', () => {
+  // Two service principals can share a display name; their object ids cannot.
+  const overview = workspaceAccess.buildAccessOverview({
+    workspaces: [{ workspace_id: 'w', name: 'W', users_readable: 1 }],
+    grants: [
+      { workspace_id: 'w', principal_id: 'sp-a', principal_type: 'App', display_name: 'Scanner', access_right: 'Admin' },
+      { workspace_id: 'w', principal_id: 'sp-b', principal_type: 'App', display_name: 'Scanner', access_right: 'Member' },
+    ],
+  });
+  assert.equal(overview.principals.length, 2);
+});
+
+test('an unreadable access list is not counted as a workspace nobody administers', () => {
+  const totals = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE).totals;
+  // Orphan has a viewer and no admin — a finding. Marketing was simply not read.
+  assert.equal(totals.withoutAdmin, 1);
+  assert.equal(totals.unreadable, 1);
+  assert.equal(totals.singleAdmin, 1);
+  assert.equal(totals.principals, 2);
+  assert.equal(totals.servicePrincipals, 1);
+  assert.equal(totals.adminPeople, 1);
+});
+
+test('a grant against a workspace the run did not record still counts', () => {
+  // Dropping it would understate what a principal can reach, which is the one
+  // direction this page must not be wrong in.
+  const overview = workspaceAccess.buildAccessOverview({
+    workspaces: [],
+    grants: [{ workspace_id: 'ghost', workspace_name: 'Ghost', principal_id: 'u1', email: 'a@b.c', access_right: 'Admin' }],
+  });
+  assert.equal(overview.grants.length, 1);
+  assert.equal(overview.principals[0].workspaces.length, 1);
+  assert.equal(overview.workspaces[0].name, 'Ghost');
+});
+
+test('an unrecognised role is shown as unknown rather than silently ranked', () => {
+  assert.equal(workspaceAccess.normalizeAccess('Admin'), 'admin');
+  assert.equal(workspaceAccess.normalizeAccess('  MEMBER '), 'member');
+  assert.equal(workspaceAccess.normalizeAccess('Wizard'), 'unknown');
+  assert.equal(workspaceAccess.accessLevel('Wizard').rank, 0);
+  assert.ok(workspaceAccess.accessLevel('admin').rank > workspaceAccess.accessLevel('viewer').rank);
+});
+
+test('the two names the APIs use for a service principal mean the same thing', () => {
+  assert.equal(workspaceAccess.normalizePrincipalType('App'), 'app');
+  assert.equal(workspaceAccess.normalizePrincipalType('ServicePrincipal'), 'app');
+  assert.equal(workspaceAccess.principalTypeLabel('Group'), 'Group');
+  assert.equal(workspaceAccess.principalTypeLabel(null), 'Unspecified');
+});
+
+test('the grant list says which workspaces already have the service principal', () => {
+  const overview = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE);
+  const marked = workspaceAccess.markServicePrincipalAccess(overview, 'SP1');
+
+  const finance = marked.find(w => w.workspaceId === 'ws-1');
+  assert.equal(finance.hasAccess, true, 'matching the object id must not be case-sensitive');
+  assert.equal(finance.accessRight, 'member');
+  assert.equal(marked.filter(w => !w.hasAccess).length, 2);
+});
+
+test('with no object id known, nothing is claimed to already have access', () => {
+  const overview = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE);
+  const marked = workspaceAccess.markServicePrincipalAccess(overview, '');
+  assert.ok(marked.every(w => w.hasAccess === false));
+});
+
+test('an empty or malformed run reshapes to nothing rather than throwing', () => {
+  for (const input of [undefined, {}, { workspaces: null, grants: null }, { grants: [{}] }]) {
+    const overview = workspaceAccess.buildAccessOverview(input);
+    assert.ok(Array.isArray(overview.workspaces));
+    assert.ok(Array.isArray(overview.principals));
+    assert.ok(Array.isArray(overview.grants));
+  }
+});
+
+test('a scan\'s compacted user shape is indexed with its identity, not as nulls', () => {
+  // The scan compacts each user to {name, email, role, type} before storing the
+  // run. Reading only the admin API's own names wrote every access row with nulls
+  // for the identity: the grant count was right and nobody in it could be named.
+  const shaped = analysisModel.shapeRun(4, {
+    workspaces: [{
+      id: 'ws-1', name: 'Finance', items: [],
+      users: [{ name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' }],
+    }],
+  });
+  assert.equal(shaped.users.length, 1);
+  assert.deepEqual(shaped.users[0], {
+    runId: 4, workspaceId: 'ws-1', principalId: null, principalType: 'User',
+    displayName: 'Ann', email: 'ann@x.com', accessRight: 'Admin',
+  });
+});
+
+test('the admin API\'s own user shape still indexes the same way', () => {
+  const shaped = analysisModel.shapeRun(4, {
+    workspaces: [{
+      id: 'ws-1', name: 'Finance', items: [],
+      users: [{ identifier: 'u1', displayName: 'Ann', emailAddress: 'ann@x.com', groupUserAccessRight: 'Admin', principalType: 'User' }],
+    }],
+  });
+  assert.equal(shaped.users[0].principalId, 'u1');
+  assert.equal(shaped.users[0].accessRight, 'Admin');
+});
+
+test('every access grant in a run is read in one query, not one per workspace', async () => {
+  const { executed } = await withFakeSql(() => [], () => analysisModel.listRunAccess(11));
+  assert.equal(executed.length, 1);
+  assert.match(executed[0].sql, /FROM analysis_workspace_users u/);
+  assert.match(executed[0].sql, /LEFT JOIN analysis_workspaces w/);
+  assert.equal(executed[0].params[0].value, 11);
+});
+
+test('the Grant Access page renders with and without a scan behind it', async () => {
+  const ejs = require('ejs');
+  const overview = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE);
+  const base = {
+    user: { name: 'T' }, currentUser: { name: 'T', email: 't@example.com' },
+    currentPath: '/settings/access', breadcrumb: [], availableRuns: [], globalRun: null,
+    hideRunSelector: true, title: 'Grant Access',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    fabricRoles: workspaceAccess.FABRIC_ROLES,
+    accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    partialScope: false,
+  };
+
+  const populated = await ejs.renderFile('src/views/access/index.ejs', {
+    ...base, overview, indexed: true, error: null, grantAuth: false,
+    runs: [{ id: 9, started_at: '2026-08-01T00:00:00Z' }, { id: 8, started_at: '2026-07-01T00:00:00Z' }],
+    run: { id: 9, started_at: '2026-08-01T00:00:00Z' },
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 'tid', enterprise_app_object_id: 'sp1' }],
+  });
+  assert.match(populated, /Who Has Access to What/);
+  assert.match(populated, /Grant Service Principal Access/);
+  assert.match(populated, /no admin/, 'a workspace nobody administers must be called out');
+  assert.match(populated, /not readable/, 'an unreadable access list must stay distinguishable');
+
+  // Nothing scanned yet: the page must explain that rather than showing an empty tenant.
+  const empty = await ejs.renderFile('src/views/access/index.ejs', {
+    ...base, overview: workspaceAccess.buildAccessOverview({}), indexed: false,
+    error: null, grantAuth: true, runs: [], run: null, servicePrincipals: [],
+  });
+  assert.match(empty, /No completed scan yet/);
+  assert.match(empty, /No service principal configured/);
+});
+
+test('the sidebar offers Grant Access under Settings', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/settings/access', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
+  });
+  assert.match(html, /href="\/settings\/access"[^>]*active/, 'the new page highlights itself');
+  assert.match(html, /<span>Grant Access<\/span>/);
+});
+
+test('the analysis page hands the grant flow over rather than keeping its own', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/analysis/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis',
+    breadcrumb: [], availableRuns: [], globalRun: null, title: 'Run Analysis',
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'e' }],
+    runs: [], error: null, schedules: [], scheduleTypes: scheduleDue.SCHEDULE_TYPES,
+  });
+  assert.doesNotMatch(html, /Grant SP Access to Workspaces/);
+  assert.doesNotMatch(html, /grantAccessModal/);
+  assert.match(html, /\/settings\/access/, 'and points at where it went');
+});
+
+// ── Scoped analysis scans ──
+//
+// A scan used to mean the whole tenant, always. On a large tenant that is hours of
+// API calls to answer a question about three workspaces. A scoped scan is a
+// smaller, faster answer — as long as nothing downstream mistakes it for the full
+// picture, which is what most of these tests are about.
+
+const analysisLauncher = require('../src/services/analysisLauncher');
+const analysisScheduleService = require('../src/services/analysisScheduleService');
+
+test('a scope with no workspaces selected falls back to the whole tenant', () => {
+  // A scan of nothing is never what anyone meant, and would look identical to a
+  // scan that found an empty tenant.
+  assert.equal(analysisScope.normalizeScope({ kind: 'workspaces', workspaceIds: [] }).kind, 'tenant');
+  assert.equal(analysisScope.normalizeScope(null).kind, 'tenant');
+  assert.equal(analysisScope.normalizeScope({ kind: 'nonsense', workspaceIds: ['a'] }).kind, 'tenant');
+});
+
+test('but asking for workspace scope is remembered even when nothing was selected', () => {
+  // Otherwise "selected workspaces, none ticked" is accepted as a nightly scan of
+  // the entire tenant — the exact surprise scoping exists to avoid.
+  assert.equal(analysisScope.requestedWorkspaceScope({ kind: 'workspaces', workspaceIds: [] }), true);
+  assert.equal(analysisScope.requestedWorkspaceScope({ scope: 'tenant' }), false);
+});
+
+test('a scope de-duplicates workspaces and keeps the names given', () => {
+  const scope = analysisScope.normalizeScope({
+    kind: 'workspaces',
+    workspaceIds: [{ id: 'ws-1', name: 'Finance' }, { id: 'WS-1' }, { id: 'ws-2', name: 'Sales' }, { id: '' }],
+  });
+  assert.equal(scope.workspaces.length, 2);
+  assert.deepEqual(scope.workspaces.map(w => w.id), ['ws-1', 'ws-2']);
+  assert.equal(scope.workspaces[0].name, 'Finance');
+});
+
+test('a scope survives a round trip through the columns it is stored in', () => {
+  const scope = analysisScope.normalizeScope({ kind: 'workspaces', workspaceIds: [{ id: 'ws-1', name: 'Finance' }] });
+  const row = analysisScope.scopeToRow(scope);
+  assert.equal(row.scopeKind, 'workspaces');
+  assert.deepEqual(analysisScope.scopeFromRow({ scope_kind: row.scopeKind, scope_workspaces: row.scopeWorkspaces }), scope);
+
+  // A tenant scan stores no list at all rather than an empty one.
+  assert.equal(analysisScope.scopeToRow({ kind: 'tenant' }).scopeWorkspaces, null);
+  // Corrupt JSON must not throw on a page that only wants a label.
+  assert.equal(analysisScope.scopeFromRow({ scope_kind: 'workspaces', scope_workspaces: '{oops' }).kind, 'tenant');
+});
+
+test('applying a scope names the workspaces it could not find', () => {
+  // A scheduled scoped run whose workspace was deleted would otherwise keep
+  // succeeding while quietly covering less every week.
+  const result = analysisScope.applyScope(
+    [{ id: 'ws-1', displayName: 'Finance' }, { id: 'ws-3', displayName: 'Other' }],
+    { kind: 'workspaces', workspaceIds: [{ id: 'ws-1', name: 'Finance' }, { id: 'ws-2', name: 'Gone' }] }
+  );
+  assert.deepEqual(result.selected.map(w => w.id), ['ws-1']);
+  assert.deepEqual(result.missing.map(w => w.name), ['Gone']);
+});
+
+test('a tenant scope selects everything and misses nothing', () => {
+  const all = [{ id: 'a' }, { id: 'b' }];
+  const result = analysisScope.applyScope(all, { kind: 'tenant' });
+  assert.equal(result.selected.length, 2);
+  assert.equal(result.missing.length, 0);
+});
+
+test('items are narrowed to the scope, so the totals describe what was scanned', () => {
+  // A scoped run reporting the tenant's item count would be worse than not scoping.
+  const items = [{ workspaceId: 'ws-1' }, { workspaceId: 'WS-1' }, { workspaceId: 'ws-9' }];
+  assert.equal(analysisScope.filterItemsToScope(items, [{ id: 'ws-1' }]).length, 2);
+  assert.equal(analysisScope.filterItemsToScope(items, []).length, 0);
+});
+
+test('a scope describes itself without ever being ambiguous about coverage', () => {
+  assert.equal(analysisScope.describeScope({ kind: 'tenant' }), 'Whole tenant');
+  assert.equal(
+    analysisScope.describeScope({ kind: 'workspaces', workspaceIds: [{ id: '1', name: 'Finance' }] }),
+    '1 workspace: Finance');
+  assert.match(
+    analysisScope.describeScope({
+      kind: 'workspaces',
+      workspaceIds: [{ id: '1', name: 'A' }, { id: '2', name: 'B' }, { id: '3', name: 'C' }, { id: '4', name: 'D' }],
+    }),
+    /4 workspaces: A, B, C and 1 more/);
+});
+
+test('anything tenant-wide picks the last tenant-wide run, not just the last run', () => {
+  const runs = [
+    { id: 12, status: 'completed', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a"}]' },
+    { id: 11, status: 'running', scope_kind: 'tenant' },
+    { id: 10, status: 'completed', scope_kind: 'tenant' },
+  ];
+  assert.equal(analysisScope.pickTenantWideRun(runs).id, 10);
+  // Runs recorded before scopes existed have no column, and were tenant-wide.
+  assert.equal(analysisScope.pickTenantWideRun([{ id: 3, status: 'completed' }]).id, 3);
+  assert.equal(analysisScope.pickTenantWideRun([{ id: 1, status: 'completed', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a"}]' }]), null);
+});
+
+// ── When a schedule is due ──
+
+const DUE_DAILY = { schedule_type: 'daily', schedule_hour: 7, schedule_minute: 30, timezone: 'UTC' };
+
+test('a daily schedule is due only at its own minute', () => {
+  const at = (hour, minute) => scheduleDue.isDueNow(DUE_DAILY, { hour, minute, dayOfWeek: 3, year: 2026, month: 8, day: 26 });
+  assert.equal(at(7, 30), true);
+  assert.equal(at(7, 31), false);
+  assert.equal(at(8, 30), false);
+});
+
+test('hourly ignores the hour, weekdays exclude the weekend, weekly picks its day', () => {
+  const local = (dayOfWeek, hour, minute) => ({ dayOfWeek, hour, minute, year: 2026, month: 8, day: 26 });
+  assert.equal(scheduleDue.isDueNow({ schedule_type: 'hourly', schedule_minute: 15 }, local(3, 23, 15)), true);
+  assert.equal(scheduleDue.isDueNow({ schedule_type: 'weekdays', schedule_hour: 7, schedule_minute: 0 }, local(6, 7, 0)), false);
+  assert.equal(scheduleDue.isDueNow({ schedule_type: 'weekdays', schedule_hour: 7, schedule_minute: 0 }, local(5, 7, 0)), true);
+  assert.equal(scheduleDue.isDueNow({ schedule_type: 'weekly', schedule_day: 'Tuesday', schedule_hour: 7, schedule_minute: 0 }, local(2, 7, 0)), true);
+  assert.equal(scheduleDue.isDueNow({ schedule_type: 'weekly', schedule_day: 'Tuesday', schedule_hour: 7, schedule_minute: 0 }, local(3, 7, 0)), false);
+});
+
+test('the catch-up window finds a slot the worker slept through, and says how late', () => {
+  // App Service recycles workers, and a schedule that fires at exactly one minute
+  // would otherwise be lost for the whole day.
+  const now = new Date('2026-08-26T07:45:00Z');
+  const due = scheduleDue.findDueSlot(DUE_DAILY, 'UTC', now, 60);
+  assert.ok(due, 'a schedule due 15 minutes ago is still within a 60 minute window');
+  assert.equal(due.minutesLate, 15);
+  assert.equal(due.slotKey, '2026-08-26T07:30');
+
+  // Outside the window it is not due, rather than being replayed from yesterday.
+  assert.equal(scheduleDue.findDueSlot(DUE_DAILY, 'UTC', now, 5), null);
+});
+
+test('a schedule reads back the way it was set, in its own timezone', () => {
+  assert.equal(scheduleDue.describeSchedule({ schedule_type: 'daily', schedule_hour: 2, schedule_minute: 5, timezone: 'Europe/Warsaw' }),
+    'Every day at 02:05 Europe/Warsaw');
+  assert.equal(scheduleDue.describeSchedule({ schedule_type: 'hourly', schedule_minute: 0, timezone: 'UTC' }),
+    'Every hour at :00 (UTC)');
+  assert.equal(scheduleDue.describeSchedule({ schedule_type: 'weekly', schedule_day: 'Sunday', schedule_hour: 23, schedule_minute: 0, timezone: 'UTC' }),
+    'Every Sunday at 23:00 UTC');
+  assert.equal(scheduleDue.describeSchedule({ schedule_type: 'weekdays', schedule_hour: 6, schedule_minute: 0, timezone: 'UTC' }),
+    'Weekdays at 06:00 UTC');
+});
+
+// ── Analysis schedules ──
+
+test('a schedule is refused with the reason, one problem at a time', () => {
+  const base = { name: 'Nightly', scheduleType: 'daily', hour: 2, minute: 0, scope: { kind: 'tenant' } };
+  assert.equal(analysisScheduleService.validateSchedule({ ...base }), null);
+  assert.match(analysisScheduleService.validateSchedule({ ...base, name: '  ' }), /needs a name/);
+  assert.match(analysisScheduleService.validateSchedule({ ...base, scheduleType: 'yearly' }), /how often/);
+  assert.match(analysisScheduleService.validateSchedule({ ...base, minute: 77 }), /minute must be/);
+  assert.match(analysisScheduleService.validateSchedule({ ...base, hour: 25 }), /hour must be/);
+  assert.match(analysisScheduleService.validateSchedule({ ...base, scheduleType: 'weekly', day: null }), /day of the week/);
+  // Hourly has no hour to be wrong about.
+  assert.equal(analysisScheduleService.validateSchedule({ ...base, scheduleType: 'hourly', hour: null }), null);
+});
+
+test('choosing workspace scope and selecting none is refused, not run tenant-wide', () => {
+  const problem = analysisScheduleService.validateSchedule({
+    name: 'Nightly', scheduleType: 'daily', hour: 2, minute: 0,
+    scope: { kind: 'workspaces', workspaceIds: [] },
+  });
+  assert.match(problem, /at least one workspace/);
+});
+
+test('a stored schedule drops the fields its frequency does not use', () => {
+  const hourly = analysisScheduleService.toStoredSchedule({
+    name: ' Hourly ', scheduleType: 'hourly', hour: 9, minute: 15, day: 'Monday',
+    timezone: 'Europe/Warsaw', scope: { kind: 'tenant' },
+  });
+  assert.equal(hourly.name, 'Hourly');
+  assert.equal(hourly.hour, null, 'an hourly schedule has no hour to store');
+  assert.equal(hourly.day, null, 'only a weekly schedule has a day');
+  assert.equal(hourly.scopeKind, 'tenant');
+  assert.equal(hourly.scopeWorkspaces, null);
+
+  const weekly = analysisScheduleService.toStoredSchedule({
+    name: 'W', scheduleType: 'weekly', hour: 3, minute: 0, day: 'Friday', timezone: 'UTC',
+    scope: { kind: 'workspaces', workspaceIds: [{ id: 'ws-1', name: 'Finance' }] },
+  });
+  assert.equal(weekly.day, 'Friday');
+  assert.deepEqual(JSON.parse(weekly.scopeWorkspaces), [{ id: 'ws-1', name: 'Finance' }]);
+});
+
+test('a schedule will not stack a scan on one of its own that is still running', async () => {
+  // Two scans of the same scope at once is double the API load for an answer
+  // neither of them is.
+  const runs = [
+    { id: 5, status: 'running', schedule_id: 2 },
+    { id: 4, status: 'completed', schedule_id: 2 },
+  ];
+  assert.equal(analysisScheduleService.findRunningRun(runs, 2).id, 5);
+  // A different schedule's run is not in the way: scoped schedules are meant to
+  // be able to run alongside each other.
+  assert.equal(analysisScheduleService.findRunningRun(runs, 3), null);
+  assert.equal(analysisScheduleService.findRunningRun([{ id: 1, status: 'completed', schedule_id: 2 }], 2), null);
+});
+
+test('a due schedule starts a scan through the launcher and records what it did', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    getAnalysisRuns: dbService.getAnalysisRuns,
+    logAnalysisScheduleRun: dbService.logAnalysisScheduleRun,
+  };
+  const logged = [];
+  const started = [];
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }, { id: 2, name: 'Other', tenant_id: 'u' }];
+  dbService.getAnalysisRuns = async () => [];
+  dbService.logAnalysisScheduleRun = async (...args) => { logged.push(args); };
+  analysisLauncher.register(async options => { started.push(options); return { runId: 77 }; });
+
+  try {
+    const result = await analysisScheduleService.executeSchedule({
+      id: 2, name: 'Nightly finance', sp_id: 2,
+      scope_kind: 'workspaces', scope_workspaces: '[{"id":"ws-1","name":"Finance"}]',
+    });
+    assert.equal(result.status, 'started');
+    assert.equal(result.runId, 77);
+    assert.equal(started.length, 1);
+    assert.equal(started[0].sp.id, 2, 'the schedule names its own service principal');
+    assert.equal(started[0].scheduleId, 2, 'the run records which schedule started it');
+    assert.equal(started[0].scope.workspaces[0].id, 'ws-1');
+    assert.match(started[0].runBy, /Nightly finance/);
+    assert.equal(logged[0][2], 'started');
+  } finally {
+    Object.assign(dbService, original);
+    analysisLauncher._reset();
+  }
+});
+
+test('with a scan of its own still running, the schedule records a skip', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    getAnalysisRuns: dbService.getAnalysisRuns,
+    logAnalysisScheduleRun: dbService.logAnalysisScheduleRun,
+  };
+  const logged = [];
+  let launched = 0;
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP' }];
+  dbService.getAnalysisRuns = async () => [{ id: 9, status: 'running', schedule_id: 2 }];
+  dbService.logAnalysisScheduleRun = async (...args) => { logged.push(args); };
+  analysisLauncher.register(async () => { launched += 1; return { runId: 1 }; });
+
+  try {
+    const result = await analysisScheduleService.executeSchedule({ id: 2, name: 'Nightly', scope_kind: 'tenant' });
+    assert.equal(result.status, 'skipped');
+    assert.equal(launched, 0, 'a skip must not also start a scan');
+    assert.equal(logged[0][2], 'skipped');
+    assert.match(logged[0][3], /#9/, 'the skip names the run that is in the way');
+  } finally {
+    Object.assign(dbService, original);
+    analysisLauncher._reset();
+  }
+});
+
+test('with no runner registered the schedule fails loudly rather than silently', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    getAnalysisRuns: dbService.getAnalysisRuns,
+    logAnalysisScheduleRun: dbService.logAnalysisScheduleRun,
+  };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP' }];
+  dbService.getAnalysisRuns = async () => [];
+  dbService.logAnalysisScheduleRun = async () => {};
+  analysisLauncher._reset();
+
+  try {
+    const result = await analysisScheduleService.executeSchedule({ id: 2, name: 'N', scope_kind: 'tenant' });
+    assert.equal(result.status, 'error');
+    assert.match(result.message, /No analysis runner/);
+  } finally {
+    Object.assign(dbService, original);
+  }
+});
+
+test('a run without a service principal is an error, not a scan under the wrong one', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    logAnalysisScheduleRun: dbService.logAnalysisScheduleRun,
+  };
+  dbService.getServicePrincipals = async () => [];
+  dbService.logAnalysisScheduleRun = async () => {};
+  try {
+    const result = await analysisScheduleService.executeSchedule({ id: 1, name: 'N', scope_kind: 'tenant' });
+    assert.equal(result.status, 'error');
+    assert.match(result.message, /No service principal/);
+  } finally {
+    Object.assign(dbService, original);
+  }
+});
+
+test('the launcher refuses rather than pretending a scan started', async () => {
+  analysisLauncher._reset();
+  try {
+    assert.equal(analysisLauncher.isRegistered(), false);
+    await assert.rejects(() => analysisLauncher.start({}), /No analysis runner is registered/);
+  } finally {
+    // The analysis route registered the real runner when it loaded; leaving the
+    // module empty would break any later test that starts a scan.
+    delete require.cache[require.resolve('../src/routes/analysis')];
+    require('../src/routes/analysis');
+  }
+  assert.equal(analysisLauncher.isRegistered(), true);
+});
+
+test('the analysis page offers a scope picker and its schedules', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/analysis/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis',
+    breadcrumb: [], availableRuns: [], globalRun: null, title: 'Run Analysis',
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'e' }],
+    liveProgress: {}, error: null,
+    scheduleTypes: scheduleDue.SCHEDULE_TYPES,
+    runs: [{
+      id: 4, sp_name: 'SP', status: 'completed', started_at: '2026-08-01T00:00:00Z', schedule_id: 3,
+      total_workspaces: 2, scope: { kind: 'workspaces', workspaces: [{ id: 'a', name: 'Finance' }] },
+      scopeLabel: '1 workspace: Finance',
+    }],
+    schedules: [analysisScheduleService.describeStoredSchedule({
+      id: 3, name: 'Nightly finance', sp_id: 1, enabled: true,
+      scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]',
+      schedule_type: 'daily', schedule_hour: 2, schedule_minute: 0, timezone: 'Europe/Warsaw',
+    })],
+  });
+  // The choice is made in a dialog now, not inline above the button — pressing Run
+  // Analysis without having read it is how a whole-tenant scan starts by accident.
+  assert.match(html, /id="scopeModal"/);
+  assert.match(html, /Selected workspaces only/);
+  assert.match(html, /id="scopeWorkspaceList"/);
+  assert.match(html, /onclick="startAnalysis\(\)"/);
+  // The schedule form opens the same dialog rather than carrying its own copy.
+  assert.match(html, /onclick="chooseScheduleScope\(\)"/);
+  assert.match(html, /id="schedScopeSummary"/);
+  assert.doesNotMatch(html, /id="schedWorkspaceList"/, 'the schedule form must not keep a second picker');
+
+  assert.match(html, /Scheduled Scans \(1\)/);
+  assert.match(html, /Nightly finance/);
+  assert.match(html, /Every day at 02:00 Europe\/Warsaw/);
+  // A run's coverage reads under the tenant name, where the row already says who
+  // ran it — a column of its own was a column of mostly "Whole tenant".
+  assert.match(html, /Scoped · 1 workspace/);
+  // The runs table no longer carries a Scope column of its own. (The schedules
+  // table still does — there the scope is the point of the row.)
+  assert.match(html, /<th>ID<\/th>\s*<th>Tenant<\/th>\s*<th>Status<\/th>/);
+});
+
+test('the Grant Access page says so when the scan behind it was scoped', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/access/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings/access',
+    breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Grant Access',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    fabricRoles: workspaceAccess.FABRIC_ROLES,
+    accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    overview: workspaceAccess.buildAccessOverview(ACCESS_FIXTURE), indexed: true, error: null, grantAuth: false,
+    runs: [], servicePrincipals: [],
+    run: { id: 12, started_at: '2026-08-01T00:00:00Z', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]' },
+    partialScope: true,
+  });
+  // Every figure on that page is about the tenant. A scoped scan is not wrong
+  // about the workspaces it covered — it is wrong about everything else.
+  assert.match(html, /not the\s+whole tenant/);
+  assert.match(html, /1 workspace: Finance/);
+});
+
+test('the scan scope dialog is one dialog, opened from both places', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/analysis/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis',
+    breadcrumb: [], availableRuns: [], globalRun: null, title: 'Run Analysis',
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'e' }],
+    liveProgress: {}, error: null, runs: [], schedules: [], scheduleTypes: scheduleDue.SCHEDULE_TYPES,
+  });
+
+  // One picker, one list, one filter. Two copies meant two places for the
+  // behaviour to drift and two places to fix a bug in.
+  assert.equal((html.match(/id="scopeWorkspaceList"/g) || []).length, 1);
+  assert.equal((html.match(/id="scopeFilter"/g) || []).length, 1);
+
+  // The dialog says what each choice costs, because the difference between them
+  // on a large tenant is hours.
+  assert.match(html, /hours of API calls/);
+  assert.match(html, /whole-tenant scan rather than this one/);
+
+  // Reading the list live is offered but is not the default — the stored list is
+  // free and the live one is an API call.
+  assert.match(html, /Refresh from tenant/);
+  assert.match(html, /onclick="loadScopeWorkspaces\(true\)"/);
+  assert.match(html, /loadScopeWorkspaces\(false\)/);
+});
+
+test('the run history shows a run without a scope as whole-tenant', async () => {
+  const ejs = require('ejs');
+  const scopeless = { id: 2, sp_name: 'SP', status: 'completed', started_at: '2026-07-01T00:00:00Z', total_workspaces: 40 };
+  const html = await ejs.renderFile('src/views/analysis/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis',
+    breadcrumb: [], availableRuns: [], globalRun: null, title: 'Run Analysis',
+    servicePrincipals: [], liveProgress: {}, error: null, schedules: [],
+    scheduleTypes: scheduleDue.SCHEDULE_TYPES,
+    // Exactly what the route hands over for a run recorded before scopes existed.
+    runs: [{ ...scopeless, scope: analysisScope.scopeFromRow(scopeless), scopeLabel: analysisScope.describeScope(analysisScope.scopeFromRow(scopeless)) }],
+  });
+  assert.match(html, /Whole tenant/);
+  assert.doesNotMatch(html, /Scoped ·/);
+});
+
+test('the run list reads every column its consumers depend on', () => {
+  // A scoped run kept reading as "Whole tenant" after it finished, because the run
+  // query names its columns and the scope was never added to the list. Three
+  // things were silently wrong, not one: the run history showed every run as
+  // tenant-wide; `pickTenantWideRun` could not tell a scoped run from a
+  // tenant-wide one, so the Grant Access page's protection never engaged at all;
+  // and the schedule overlap check compared an undefined `schedule_id`, so a
+  // schedule could stack scans on itself.
+  //
+  // Each entry below is read by name somewhere. Adding a column to a run means
+  // adding it here, and this test is what says so.
+  const needed = [
+    'id', 'sp_id', 'sp_name', 'tenant_id', 'status',
+    'total_workspaces', 'total_reports', 'total_datasets', 'total_dashboards', 'total_users',
+    'started_at', 'completed_at', 'run_by',
+    'scope_kind', 'scope_workspaces', 'schedule_id',
+  ];
+  const columns = dbPrivate.RUN_META_COLUMNS.split(',').map(name => name.trim());
+  for (const column of needed) {
+    assert.ok(columns.includes(column), 'the run query must read ' + column);
+  }
+  // results_json is the scan document and can be megabytes; a run list must not
+  // drag it along.
+  assert.ok(!columns.includes('results_json'));
+});
+
+test('the pre-scoping fallback names only columns the full read also names', () => {
+  // The fallback exists for a database that has not migrated yet. It must be a
+  // strict subset: a column in the fallback but not the main list would be one
+  // nothing ever verified.
+  const columns = dbPrivate.RUN_META_COLUMNS.split(',').map(name => name.trim());
+  const legacy = dbPrivate.RUN_META_COLUMNS_LEGACY.split(',').map(name => name.trim());
+  for (const column of legacy) assert.ok(columns.includes(column), column + ' is not in the full read');
+  // And it must drop exactly the columns the migration adds.
+  assert.deepEqual(columns.filter(c => !legacy.includes(c)), ['scope_kind', 'scope_workspaces', 'schedule_id']);
+});
+
+test('a run gets a two-letter coverage tag for the run selector', () => {
+  // The selector already carries an SP name, a run number and a timestamp. There
+  // is no room for "3 workspaces: Finance, Sales and 1 more" — but which of two
+  // scans covered everything is exactly what someone picking between them needs.
+  assert.equal(analysisScope.scopeTag({ scope_kind: 'tenant' }), 'WT');
+  assert.equal(analysisScope.scopeTag({ scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]' }), 'SC');
+  // A run recorded before scopes existed was tenant-wide.
+  assert.equal(analysisScope.scopeTag({ id: 4 }), 'WT');
+
+  assert.equal(analysisScope.scopeTagTitle({ scope_kind: 'tenant' }), 'WT — whole tenant');
+  assert.equal(
+    analysisScope.scopeTagTitle({ scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]' }),
+    'SC — scoped to 1 workspace: Finance');
+});
+
+test('the run selector shows each scan\'s coverage, and the current one carries a badge', async () => {
+  const ejs = require('ejs');
+  const decorate = run => ({ ...run, scopeTag: analysisScope.scopeTag(run), scopeTagTitle: analysisScope.scopeTagTitle(run) });
+  const scoped = decorate({ id: 7, sp_name: 'Contoso SP', status: 'completed', started_at: '2026-08-26T02:00:00Z', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]' });
+  const wide = decorate({ id: 6, sp_name: 'Contoso SP', status: 'completed', started_at: '2026-08-25T02:00:00Z', scope_kind: 'tenant' });
+
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [], title: 'x',
+    availableRuns: [scoped, wide], globalRun: scoped, selectedRunId: 7,
+  });
+
+  assert.match(html, /\[SC\] Contoso SP: Run#7/);
+  assert.match(html, /\[WT\] Contoso SP: Run#6/);
+  assert.match(html, /title="SC — scoped to 1 workspace: Finance"/);
+});
+
+test('a run list with no scope decoration still renders the selector', async () => {
+  // The middleware decorates the runs, but the partial is rendered from several
+  // places and must not depend on it having happened.
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [], title: 'x',
+    availableRuns: [{ id: 1, sp_name: 'SP', status: 'completed', started_at: '2026-08-01T00:00:00Z' }],
+    globalRun: null, selectedRunId: 1,
+  });
+  assert.match(html, /\[WT\] SP: Run#1/, 'an undecorated run reads as whole tenant, which is what it was');
+});
+
+test('the middleware decorates every run it hands the selector', async () => {
+  const { clearRunCache } = require('../src/middleware/loadRuns');
+  const loadRuns = require('../src/middleware/loadRuns').loadRuns;
+  const original = dbService.getAnalysisRuns;
+  clearRunCache();
+  dbService.getAnalysisRuns = async () => ([
+    { id: 7, status: 'completed', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]' },
+    { id: 6, status: 'completed', scope_kind: 'tenant' },
+    { id: 5, status: 'failed', scope_kind: 'tenant' },
+  ]);
+
+  try {
+    const res = { locals: {} };
+    await new Promise(resolve => loadRuns({ query: {}, session: {}, user: null }, res, resolve));
+    assert.deepEqual(res.locals.availableRuns.map(r => r.scopeTag), ['SC', 'WT'], 'only completed runs, each tagged');
+    assert.match(res.locals.availableRuns[0].scopeTagTitle, /Finance/);
+  } finally {
+    dbService.getAnalysisRuns = original;
+    clearRunCache();
+  }
+});
+
+test('comparing two scans of different coverage says so before the numbers', async () => {
+  // Comparing a one-workspace scan with a whole-tenant one produces "-47
+  // workspaces", which reads as the estate having shrunk. The page still shows
+  // the comparison — refusing would be worse — but it must not be read as change.
+  const ejs = require('ejs');
+  const scoped = { id: 7, sp_name: 'SP', tenant_id: 't', started_at: '2026-08-26T00:00:00Z', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]', total_workspaces: 1 };
+  const wide = { id: 6, sp_name: 'SP', tenant_id: 't', started_at: '2026-08-25T00:00:00Z', scope_kind: 'tenant', total_workspaces: 48 };
+  const base = {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis/compare',
+    breadcrumb: [], availableRuns: [], globalRun: null, title: 'Compare Runs',
+    scopeTag: analysisScope.scopeTag, scopeTagTitle: analysisScope.scopeTagTitle,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    runs: [scoped, wide], metrics: [], changedMetrics: [], error: null, tenantSettingsComparable: true,
+  };
+
+  const mismatched = await ejs.renderFile('src/views/analysis/compare.ejs', { ...base, fromRun: wide, toRun: scoped });
+  assert.match(mismatched, /did not cover the same thing/);
+  assert.match(mismatched, /1 workspace: Finance/);
+
+  // Two scans of the same coverage need no such warning.
+  const matched = await ejs.renderFile('src/views/analysis/compare.ejs', { ...base, fromRun: wide, toRun: { ...wide, id: 5 } });
+  assert.doesNotMatch(matched, /did not cover the same thing/);
+
+  // And the picker leads with the coverage either way.
+  assert.match(mismatched, /\[SC\] Run #7/);
+  assert.match(mismatched, /\[WT\] Run #6/);
+});
+
+// ── Fabric artifact naming conventions ──
+//
+// Fabric imposes no naming rules of its own and everything lands in the same
+// workspace, so without a convention nobody can tell which lakehouse holds bronze
+// data without opening it. The default here is the convention from the supplied
+// document; every part of it is configurable.
+
+const namingService = require('../src/services/namingConventionService');
+
+const NAMING = { ...namingService.DEFAULT_CONVENTION, enabled: true };
+
+test('the document\'s own examples pass the default convention', () => {
+  for (const [name, type] of [
+    ['DE_LH_100_BRONZE_SALES', 'Lakehouse'],
+    ['DW_WH_300_GOLD_SALES', 'Warehouse'],
+    ['DF_PL_100_BRONZE_RUN_DATA_INGESTION', 'DataPipeline'],
+  ]) {
+    const result = namingService.checkName(name, type, NAMING);
+    assert.ok(result.ok, name + ': ' + result.problems.join(' '));
+  }
+  assert.equal(namingService.describeConvention(NAMING), 'EXPERIENCE_ARTIFACT_[INDEX]_[STAGE]_DESCRIPTION');
+  assert.equal(namingService.exampleName(NAMING), 'DE_LH_100_BRONZE_SALES');
+});
+
+test('optional parts may be absent, in any combination', () => {
+  // Not every artifact belongs to a medallion layer and not everything needs
+  // ordering, so a checker that demanded both would flag correct names.
+  for (const name of ['DE_LH_SALES', 'DE_LH_100_SALES', 'DE_LH_BRONZE_SALES', 'DE_LH_100_BRONZE_SALES']) {
+    assert.ok(namingService.checkName(name, 'Lakehouse', NAMING).ok, name);
+  }
+});
+
+test('a description may contain the separator, because business text does', () => {
+  // SOURCE_TO_BRONZE is one description, not three parts.
+  const result = namingService.checkName('DF_PL_100_BRONZE_SOURCE_TO_BRONZE', 'DataPipeline', NAMING);
+  assert.ok(result.ok, result.problems.join(' '));
+  assert.equal(result.matched.description, 'SOURCE_TO_BRONZE');
+});
+
+test('each problem names the part at fault, not just "invalid"', () => {
+  const wrongExperience = namingService.checkName('XX_LH_SALES', 'Lakehouse', NAMING);
+  assert.match(wrongExperience.problems[0], /Experience should be one of/);
+
+  const wrongCase = namingService.checkName('de_lh_100_bronze_sales', 'Lakehouse', NAMING);
+  assert.deepEqual(wrongCase.problems, ['Should be upper case.']);
+
+  const noName = namingService.checkName('', 'Lakehouse', NAMING);
+  assert.match(noName.problems[0], /no name/);
+});
+
+test('the artifact code has to agree with what the item actually is', () => {
+  // Otherwise a lakehouse named DE_PL_100_SALES passes a check that means nothing.
+  const result = namingService.checkName('DE_PL_100_BRONZE_SALES', 'Lakehouse', NAMING);
+  assert.ok(!result.ok);
+  assert.match(result.problems[0], /This is a Lakehouse, so the artifact code should be "LH"/);
+});
+
+test('a suggested name keeps the meaning already in the name', () => {
+  // The point is a name someone will actually use, so the business words survive
+  // and only the codes are added.
+  assert.equal(namingService.suggestName({ name: 'Sales Bronze Lakehouse', type: 'Lakehouse' }, NAMING), 'DE_LH_BRONZE_SALES');
+  assert.equal(namingService.suggestName({ name: '100 Silver Ingest Pipeline', type: 'DataPipeline' }, NAMING), 'DF_PL_100_SILVER_INGEST');
+  // "Finance DW" — DW is the experience code, so it is not repeated as description.
+  assert.equal(namingService.suggestName({ name: 'Finance DW', type: 'Warehouse' }, NAMING), 'DW_WH_FINANCE');
+  // Nothing left to describe is said plainly rather than produced as DE_LH.
+  assert.equal(namingService.suggestName({ name: 'Lakehouse', type: 'Lakehouse' }, NAMING), 'DE_LH_RENAME_ME');
+});
+
+test('a type the convention says nothing about gets no suggestion and no finding', () => {
+  // A suggestion nobody could act on is worse than none, and judging an item by a
+  // rule that does not cover it is not a finding.
+  assert.equal(namingService.suggestName({ name: 'thing', type: 'MirroredDatabase' }, NAMING), null);
+  const workspace = { items: [{ id: '1', name: 'whatever', type: 'MirroredDatabase' }] };
+  const result = namingService.checkWorkspace(workspace, NAMING);
+  assert.equal(result.checked, 0);
+  assert.equal(result.offenders.length, 0);
+});
+
+test('checking a workspace reports only the artifacts that break the rules', () => {
+  const workspace = {
+    items: [
+      { id: '1', name: 'DE_LH_100_BRONZE_SALES', type: 'Lakehouse' },
+      { id: '2', name: 'Sales Report', type: 'Report' },
+      { id: '3', name: 'finance dw', type: 'Warehouse' },
+    ],
+  };
+  const result = namingService.checkWorkspace(workspace, NAMING);
+  assert.equal(result.checked, 3);
+  assert.deepEqual(result.offenders.map(o => o.name), ['Sales Report', 'finance dw']);
+  assert.equal(result.offenders[0].suggestion, 'PBI_RPT_SALES');
+  assert.equal(result.offenders[1].suggestion, 'DW_WH_FINANCE');
+});
+
+test('an item type the convention is told to skip is not checked', () => {
+  // For artifacts nobody names by hand — a finding nobody can clear is noise.
+  const convention = { ...NAMING, ignoredItemTypes: ['report'] };
+  const workspace = { items: [{ id: '2', name: 'Sales Report', type: 'Report' }] };
+  assert.equal(namingService.checkWorkspace(workspace, convention).checked, 0);
+});
+
+test('a convention is configurable down to the separator and the case', () => {
+  const dashed = namingService.normalizeConvention({
+    ...NAMING, separator: '-', letterCase: 'lower',
+    segments: [{ key: 'artifact', required: true }, { key: 'description', required: true }],
+  });
+  assert.ok(namingService.checkName('lh-sales', 'Lakehouse', dashed).ok);
+  assert.ok(!namingService.checkName('LH-SALES', 'Lakehouse', dashed).ok);
+  assert.equal(namingService.suggestName({ name: 'Sales Lakehouse', type: 'Lakehouse' }, dashed), 'lh-sales');
+  assert.equal(namingService.describeConvention(dashed), 'ARTIFACT-DESCRIPTION');
+});
+
+test('a half-written convention falls back to the default rather than to no rules', () => {
+  // A convention with no codes would report every name as fine, which is worse
+  // than not checking at all.
+  const empty = namingService.normalizeConvention({ enabled: true, experiences: [], artifacts: [], segments: [] });
+  assert.ok(empty.experiences.length > 0);
+  assert.ok(empty.artifacts.length > 0);
+  assert.ok(empty.segments.length > 0);
+  assert.equal(namingService.normalizeConvention(null).enabled, false);
+});
+
+test('a broken index pattern is reported, not silently ignored', () => {
+  const broken = { ...NAMING, indexPattern: '([' };
+  const result = namingService.checkName('DE_LH_100_SALES', 'Lakehouse', broken);
+  assert.ok(result.problems.some(p => /not a valid regular expression/.test(p)));
+});
+
+test('the settings form parses into a convention', () => {
+  const convention = namingService.conventionFromForm({
+    enabled: 'true', separator: '_', letterCase: 'upper', indexPattern: '^[1-9]00$',
+    segment: ['experience', 'artifact', 'description'],
+    required_experience: 'true', required_artifact: 'true', required_description: 'true',
+    experiences: 'PBI = Power BI\nDE = Data Engineering\n\n  ',
+    artifacts: 'LH = Lakehouse | DE | Lakehouse\nRPT = Report | PBI | Report, PaginatedReport',
+    stages: '', ignoredItemTypes: 'Dashboard\n',
+  });
+
+  assert.equal(convention.enabled, true);
+  assert.deepEqual(convention.segments.map(s => s.key), ['experience', 'artifact', 'description']);
+  assert.deepEqual(convention.experiences.map(e => e.code), ['PBI', 'DE']);
+  assert.deepEqual(convention.artifacts[1].itemTypes, ['Report', 'PaginatedReport']);
+  assert.deepEqual(convention.ignoredItemTypes, ['dashboard']);
+  // Segments keep the definition order, not the order the checkboxes arrived in.
+  const reordered = namingService.conventionFromForm({
+    segment: ['description', 'experience'], required_description: 'true', required_experience: 'true',
+  });
+  assert.deepEqual(reordered.segments.map(s => s.key), ['experience', 'description']);
+});
+
+test('a convention that could never be satisfied is refused', () => {
+  const problems = namingService.validateConvention(namingService.normalizeConvention({
+    segments: [{ key: 'stage', required: false }],
+    indexPattern: '([',
+    stages: [],
+    experiences: [{ code: 'DE', label: 'Data Engineering' }],
+    artifacts: [
+      { code: 'X', experience: 'NOPE', itemTypes: ['Lakehouse'] },
+      { code: 'Y', experience: 'DE', itemTypes: ['lakehouse'] },
+    ],
+  }));
+
+  assert.ok(problems.some(p => /At least one part of the name must be required/.test(p)));
+  assert.ok(problems.some(p => /not a valid regular expression/.test(p)));
+  assert.ok(problems.some(p => /no stages are listed/.test(p)));
+  assert.ok(problems.some(p => /refers to experience "NOPE"/.test(p)));
+  // The same item type under two codes would make the suggestion arbitrary.
+  assert.ok(problems.some(p => /claimed by both/.test(p)));
+
+  assert.deepEqual(namingService.validateConvention(NAMING), []);
+});
+
+test('triage flags off-convention names only when a convention is switched on', () => {
+  const results = { workspaces: [{
+    id: 'a', name: 'Finance',
+    users: [{ name: 'Ann', email: 'a@x.com', role: 'Admin', type: 'User' }],
+    items: [
+      { id: '1', name: 'DE_LH_100_BRONZE_SALES', type: 'Lakehouse' },
+      { id: '2', name: 'Sales Report', type: 'Report' },
+    ],
+  }] };
+
+  // An unconfigured convention would flag an entire tenant on its first scan.
+  const off = insights.computeWorkspaceInsights(results, {});
+  assert.equal(off.byFinding.namingConvention, 0);
+  assert.equal(off.namingConventionEnabled, false);
+
+  const on = insights.computeWorkspaceInsights(results, { namingConvention: NAMING });
+  assert.equal(on.byFinding.namingConvention, 1);
+  assert.equal(on.namingConventionEnabled, true);
+  const finding = on.workspaces[0].findings.find(f => f.key === 'namingConvention');
+  assert.match(finding.detail, /1 of 2 checked artifact\(s\)/);
+  assert.match(finding.detail, /Sales Report/);
+
+  // A convention that exists but is switched off changes nothing.
+  const disabled = insights.computeWorkspaceInsights(results, { namingConvention: { ...NAMING, enabled: false } });
+  assert.equal(disabled.byFinding.namingConvention, 0);
+});
+
+test('the governance configuration page offers the convention, and triage explains it', async () => {
+  const ejs = require('ejs');
+  const convention = namingService.normalizeConvention(NAMING);
+  const page = await ejs.renderFile('src/views/governance-config/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings/governance', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Governance Configuration',
+    success: [], error: [],
+    naming: convention, segmentDefs: namingService.SEGMENT_DEFS, letterCases: namingService.LETTER_CASES,
+    namingPattern: namingService.describeConvention(convention),
+    namingExample: namingService.exampleName(convention),
+  });
+  assert.match(page, /Fabric Artifact Naming Convention/);
+  assert.match(page, /EXPERIENCE_ARTIFACT/);
+  assert.match(page, /DE_LH_100_BRONZE_SALES/);
+  assert.match(page, /action="\/settings\/governance\/naming"/);
+
+  const triage = await ejs.renderFile('src/views/workspaces/list.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Workspaces', fromSavedData: true, run: null,
+    insights: insights.computeWorkspaceInsights({ workspaces: [] }, { namingConvention: NAMING }),
+    findingDefs: insights.FINDING_DEFS,
+    namingPattern: namingService.describeConvention(convention),
+  });
+  assert.match(triage, /Off-convention names/);
+  assert.match(triage, /Artifact names are checked as/);
+});
+
+test('the triage card for naming is hidden when nothing is enforced', async () => {
+  // A permanent zero reads as "clean" rather than "not looked at".
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/workspaces/list.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Workspaces', fromSavedData: true, run: null,
+    insights: insights.computeWorkspaceInsights({ workspaces: [] }, {}),
+    findingDefs: insights.FINDING_DEFS, namingPattern: null,
+  });
+  // The label still appears in the filter's lookup table, which is JSON for the
+  // page's own script — what must be absent is the card.
+  assert.doesNotMatch(html, /setFindingFilter\('namingConvention'\)/);
+  assert.match(html, /No naming convention is being enforced/);
+});
+
+test('the workspace page lists each off-convention artifact with its suggestion', async () => {
+  const ejs = require('ejs');
+  const workspace = {
+    id: 'a', name: 'Finance',
+    items: [
+      { id: '1', name: 'DE_LH_100_BRONZE_SALES', type: 'Lakehouse' },
+      { id: '2', name: 'Sales Report', type: 'Report' },
+    ],
+    users: [],
+  };
+  const html = await ejs.renderFile('src/views/workspaces/detail.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces/a', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Finance',
+    workspace, items: workspace.items, users: [], sourceRun: null,
+    reports: [workspace.items[1]], datasets: [], dashboards: [], dataflows: [],
+    lakehouses: [workspace.items[0]], notebooks: [], pipelines: [], warehouses: [], others: [],
+    naming: namingService.checkWorkspace(workspace, NAMING),
+    namingPattern: namingService.describeConvention(NAMING),
+  });
+
+  assert.match(html, /tab-naming/);
+  assert.match(html, /PBI_RPT_SALES/);
+  // The compliant lakehouse is not listed as an offender.
+  const table = (html.match(/id="naming-offenders-table"[\s\S]*?<\/table>/) || [''])[0];
+  assert.ok(!/DE_LH_100_BRONZE_SALES/.test(table));
+  // Renaming happens in the Fabric portal; the page must not imply otherwise.
+  assert.match(html, /Nothing is renamed here/);
+});
+
+test('a workspace page with no convention configured has no naming tab', async () => {
+  const ejs = require('ejs');
+  const workspace = { id: 'a', name: 'Finance', items: [], users: [] };
+  const html = await ejs.renderFile('src/views/workspaces/detail.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces/a', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Finance',
+    workspace, items: [], users: [], sourceRun: null,
+    reports: [], datasets: [], dashboards: [], dataflows: [],
+    lakehouses: [], notebooks: [], pipelines: [], warehouses: [], others: [],
+    naming: null, namingPattern: null,
+  });
+  assert.doesNotMatch(html, /tab-naming/);
+});
+
+test('a name in no recognisable shape gets one problem, not five restatements of it', () => {
+  // Walking the segments against an unsegmented name derives "Experience should be
+  // one of…", "Artifact is missing", "Description is missing" — a wall of text
+  // saying one thing. The suggested name is what the reader needs next.
+  const result = namingService.checkName('Sales Report', 'Report', NAMING);
+  assert.equal(result.problems.length, 2);
+  assert.match(result.problems[0], /upper case/);
+  assert.match(result.problems[1], /Not in the form EXPERIENCE_ARTIFACT/);
+
+  // A name that *is* in the right shape still gets the specific problem.
+  const specific = namingService.checkName('XX_LH_SALES', 'Lakehouse', NAMING);
+  assert.deepEqual(specific.problems.length, 1);
+  assert.match(specific.problems[0], /Experience should be one of/);
+});
+
+test('the convention lives on its own page, not on Settings', async () => {
+  // Settings is about reaching the tenant — which service principal, whose secret.
+  // A convention deciding whether a lakehouse is named acceptably is a different
+  // question with a different audience, and Settings should not carry both.
+  const ejs = require('ejs');
+  const settings = await ejs.renderFile('src/views/config.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Settings',
+    servicePrincipals: [], secretEncryptionReady: true, success: [], error: [],
+  });
+
+  // No form, and no locals it would need — the page renders without them at all.
+  assert.doesNotMatch(settings, /action="\/settings\/(governance\/)?naming"/);
+  assert.doesNotMatch(settings, /Experience codes/);
+  // But it still says where the convention went, rather than leaving no trace.
+  assert.match(settings, /Governance Configuration/);
+  assert.match(settings, /href="\/settings\/governance"/);
+});
+
+test('the sidebar lists Governance Configuration under Settings, with its own icon', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/settings/governance', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
+  });
+
+  assert.match(html, /<span>Governance Configuration<\/span>/);
+  assert.match(html, /href="\/settings\/governance"[^>]*active/, 'the page highlights itself');
+  // Settings matches its own path exactly, so it does not also light up here.
+  assert.doesNotMatch(html, /href="\/settings" class="sidebar-link active"/);
+
+  // Governance Overview already uses bi-shield-check; two identical icons in one
+  // sidebar is the confusion Master Data and Deployment Pipelines already caused.
+  const icons = (html.match(/bi bi-[a-z0-9-]+"><\/i> <span>/g) || []);
+  assert.equal(new Set(icons).size, icons.length, 'every sidebar icon must be distinct: ' + icons.join(', '));
+});
+
+// ── Which workspaces the service principal cannot reach ──
+//
+// A scan reads the admin APIs, which see every workspace whether the principal is
+// a member or not. It can say who the scan observed holding access; it cannot say
+// what the principal can reach right now, and a grant made since the scan would
+// not show up at all. So this is asked live.
+
+test('the workspaces missing access are the difference between two live lists', () => {
+  const result = workspaceAccess.missingServicePrincipalAccess(
+    [
+      { id: 'ws-1', displayName: 'Finance' },
+      { id: 'ws-2', displayName: 'Marketing' },
+      { id: 'ws-3', name: 'Sales Ops' },
+    ],
+    // What the principal itself can see. Case differs from the admin list, as the
+    // two endpoints do not agree on it.
+    [{ id: 'WS-1' }]
+  );
+
+  assert.equal(result.total, 3);
+  assert.equal(result.withAccess, 1);
+  assert.deepEqual(result.missing.map(w => w.name), ['Marketing', 'Sales Ops']);
+  // The id is carried through as the tenant spelled it, because it is what the
+  // grant call posts back.
+  assert.deepEqual(result.missing.map(w => w.id), ['ws-2', 'ws-3']);
+});
+
+test('personal and deleted workspaces are left out of the list entirely', () => {
+  // A service principal cannot be added to a personal workspace at all, and a
+  // deleted or deleting one is on its way out. Offering either produces a failure
+  // nobody can fix, so neither is offered.
+  const result = workspaceAccess.missingServicePrincipalAccess(
+    [
+      { id: 'w', displayName: 'Finance' },
+      { id: 'p', displayName: 'Personal of Ann', type: 'PersonalGroup' },
+      { id: 'd', displayName: 'Old', state: 'Deleted' },
+      { id: 'r', displayName: 'Archive', state: 'Removing' },
+      { id: 'g', displayName: 'Going', state: 'Deleting' },
+    ],
+    []
+  );
+  assert.deepEqual(result.missing.map(w => w.id), ['w']);
+  // Counted rather than silently dropped: "12 of 40 unreachable" beside a list of
+  // 9 would look like a bug rather than like workspaces nothing can be done about.
+  assert.equal(result.skipped, 4);
+  assert.equal(result.total, 5);
+});
+
+test('a workspace with no state at all is treated as live', () => {
+  // The Fabric endpoint does not return a state for ordinary workspaces, and
+  // reading its absence as "deleted" would hide most of the tenant.
+  const result = workspaceAccess.missingServicePrincipalAccess([{ id: 'a', displayName: 'Finance' }], []);
+  assert.equal(result.missing.length, 1);
+  assert.equal(result.skipped, 0);
+  assert.equal(workspaceAccess.isRetiredWorkspace({ id: 'a' }), false);
+  assert.equal(workspaceAccess.isRetiredWorkspace({ state: 'Active' }), false);
+  assert.equal(workspaceAccess.isRetiredWorkspace({ state: 'deleted' }), true);
+});
+
+test('a duplicated workspace is offered once, not twice', () => {
+  const result = workspaceAccess.missingServicePrincipalAccess(
+    [{ id: 'a', displayName: 'Finance' }, { id: 'a', displayName: 'Finance again' }, { id: '' }],
+    []
+  );
+  assert.equal(result.total, 1);
+  assert.equal(result.missing.length, 1);
+});
+
+test('reaching everything leaves nothing to grant, and reaching nothing leaves all of it', () => {
+  const all = [{ id: 'a', displayName: 'A' }, { id: 'b', displayName: 'B' }];
+  assert.deepEqual(workspaceAccess.missingServicePrincipalAccess(all, all).missing, []);
+  assert.equal(workspaceAccess.missingServicePrincipalAccess(all, []).missing.length, 2);
+  assert.equal(workspaceAccess.missingServicePrincipalAccess(all, [{ id: 'a' }]).withAccess, 1);
+  // Nothing at all is an empty answer, not a crash.
+  assert.deepEqual(workspaceAccess.missingServicePrincipalAccess(null, null),
+    { total: 0, withAccess: 0, skipped: 0, personalLikely: 0, missing: [] });
+});
+
+test('the access check asks the tenant, not a scan', async () => {
+  const original = { getServicePrincipals: dbService.getServicePrincipals, createPowerBIService: pbi.createPowerBIService };
+  const calls = [];
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'sp1' }];
+  pbi.createPowerBIService = () => ({
+    getWorkspaces: async () => { calls.push('all'); return [{ id: 'a', displayName: 'A' }, { id: 'b', displayName: 'B' }]; },
+    getMyWorkspaces: async () => { calls.push('mine'); return [{ id: 'a' }]; },
+  });
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/settings/access/check', { spId: 1 });
+    assert.equal(body.success, true);
+    assert.equal(body.total, 2);
+    assert.equal(body.withAccess, 1);
+    assert.deepEqual(body.missing.map(w => w.id), ['b']);
+    assert.equal(body.objectIdKnown, true);
+    assert.ok(body.checkedAt, 'the answer is dated, because it is a point-in-time reading');
+    // Two calls whatever the size of the tenant — not one per workspace.
+    assert.deepEqual(calls, ['all', 'mine']);
+  } finally {
+    Object.assign(dbService, { getServicePrincipals: original.getServicePrincipals });
+    pbi.createPowerBIService = original.createPowerBIService;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('the check says when the principal has no object id to grant with', async () => {
+  // Without one nothing can be added, and saying so after forty workspaces have
+  // been chosen is too late.
+  const original = { getServicePrincipals: dbService.getServicePrincipals, createPowerBIService: pbi.createPowerBIService };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: null }];
+  pbi.createPowerBIService = () => ({ getWorkspaces: async () => [{ id: 'a' }], getMyWorkspaces: async () => [] });
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const body = await postJson(server, '/settings/access/check', {});
+    assert.equal(body.objectIdKnown, false);
+  } finally {
+    Object.assign(dbService, { getServicePrincipals: original.getServicePrincipals });
+    pbi.createPowerBIService = original.createPowerBIService;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('the grant section lists nothing until the tenant has been asked', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/access/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings/access',
+    breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Grant Access',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    fabricRoles: workspaceAccess.FABRIC_ROLES,
+    accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    overview: workspaceAccess.buildAccessOverview(ACCESS_FIXTURE), indexed: true, error: null,
+    grantAuth: false, partialScope: false, runs: [],
+    run: { id: 9, started_at: '2026-08-01T00:00:00Z', scope_kind: 'tenant' },
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 'tid', enterprise_app_object_id: 'sp1' }],
+  });
+
+  // The list is hidden and empty on load — asking the tenant costs API calls, so
+  // it happens when the operator asks for it.
+  assert.match(html, /id="missingAccessPanel" *class="[^"]*d-none|class="mt-3 d-none" id="missingAccessPanel"/);
+  assert.match(html, /Not checked yet/);
+  assert.match(html, /onclick="checkServicePrincipalAccess\(\)"/);
+  assert.match(html, /Checked live, not read from a scan/);
+
+  // The modal it replaced is gone: two lists of workspaces that could disagree
+  // about the same question is exactly what this change removes.
+  assert.doesNotMatch(html, /grantAccessModal/);
+  assert.doesNotMatch(html, /openGrantAccess/);
+
+  // "Who has access to what" is unchanged — that view is what the scan observed.
+  assert.match(html, /Who Has Access to What/);
+  assert.match(html, /id="grantsTable"/);
+});
+
+test('a code already in the name is never repeated as description', () => {
+  // Reported: a pipeline named DE_PL_100_LOAD_ALL_TABLES was suggested as
+  // DF_PL_100_DE_LOAD_ALL_TABLES. The DE is an experience code — the wrong one for
+  // a pipeline, which is why the fix is DF — and stripping only the *expected*
+  // code left it behind to be read as business text.
+  assert.equal(
+    namingService.suggestName({ name: 'DE_PL_100_LOAD_ALL_TABLES', type: 'DataPipeline' }, NAMING),
+    'DF_PL_100_LOAD_ALL_TABLES');
+
+  // Any configured code counts, wherever it sits and whichever segment it belongs
+  // to: a token that is a code in this convention was meant as one.
+  assert.equal(namingService.suggestName({ name: '100_DE_LOAD_ALL_TABLES', type: 'DataPipeline' }, NAMING), 'DF_PL_100_LOAD_ALL_TABLES');
+  assert.equal(namingService.suggestName({ name: 'LH_100_LOAD_ALL_TABLES', type: 'DataPipeline' }, NAMING), 'DF_PL_100_LOAD_ALL_TABLES');
+  assert.equal(namingService.suggestName({ name: 'DS_SALES', type: 'Lakehouse' }, NAMING), 'DE_LH_SALES');
+
+  // A name that is nothing but codes has no description left, and says so rather
+  // than producing a name with a part missing.
+  assert.equal(namingService.suggestName({ name: 'DF_PL', type: 'DataPipeline' }, NAMING), 'DF_PL_RENAME_ME');
+
+  // The cases that already worked keep working.
+  assert.equal(namingService.suggestName({ name: 'Sales Bronze Lakehouse', type: 'Lakehouse' }, NAMING), 'DE_LH_BRONZE_SALES');
+  assert.equal(namingService.suggestName({ name: 'Finance DW', type: 'Warehouse' }, NAMING), 'DW_WH_FINANCE');
+});
+
+test('only the codes this convention actually defines are stripped', () => {
+  // A convention with a short code list must not strip words that are codes in
+  // some other convention — the stripping is defined by what is configured.
+  const narrow = namingService.normalizeConvention({
+    ...NAMING,
+    experiences: [{ code: 'DF', label: 'Data Factory' }],
+    artifacts: [{ code: 'PL', label: 'Pipeline', experience: 'DF', itemTypes: ['DataPipeline'] }],
+  });
+  // DE is not a code here, so it stays as description.
+  assert.equal(namingService.suggestName({ name: 'DE_LOAD_ALL', type: 'DataPipeline' }, narrow), 'DF_PL_DE_LOAD_ALL');
+});
+
+test('an interrupted grant is remembered across the administrator sign-in', async () => {
+  // Otherwise the operator picks workspaces, is sent away to authorize, comes back
+  // to an empty page and has to pick them all again — the second time being the
+  // only one that does anything.
+  const original = { getServicePrincipals: dbService.getServicePrincipals, getAnalysisRuns: dbService.getAnalysisRuns };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'sp1' }];
+  dbService.getAnalysisRuns = async () => [];
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const { port } = server.address();
+    // The session cookie is what carries the stash, so the two calls have to share one.
+    const stored = await new Promise((resolve, reject) => {
+      const body = JSON.stringify({ spId: '1', workspaceIds: ['ws-2', ' ws-3 ', '', null] });
+      const req = http.request({
+        hostname: '127.0.0.1', port, path: '/settings/access/pending', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, res => {
+        let text = '';
+        res.on('data', c => { text += c; });
+        res.on('end', () => resolve({ body: JSON.parse(text), cookie: (res.headers['set-cookie'] || [])[0] }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+
+    // Blanks are dropped and ids are trimmed before anything is remembered.
+    assert.equal(stored.body.success, true);
+    assert.equal(stored.body.stored, 2);
+    assert.ok(stored.cookie, 'a session is needed to remember anything');
+
+    const get = query => new Promise((resolve, reject) => {
+      http.get({
+        hostname: '127.0.0.1', port, path: '/settings/access' + query,
+        headers: { Cookie: stored.cookie.split(';')[0] },
+      }, res => {
+        let text = '';
+        res.on('data', c => { text += c; });
+        res.on('end', () => resolve(text));
+      }).on('error', reject);
+    });
+
+    const resumed = await get('?grantAuth=success');
+    assert.match(resumed, /var pendingGrant = \{"spId":"1","workspaceIds":\["ws-2","ws-3"\]\}/);
+
+    // Handed back exactly once: a refresh must not grant the same workspaces again.
+    const refreshed = await get('?grantAuth=success');
+    assert.match(refreshed, /var pendingGrant = null/);
+  } finally {
+    Object.assign(dbService, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('a stash is only acted on when the sign-in actually succeeded', async () => {
+  // An abandoned attempt leaves one behind; picking it up on an ordinary visit
+  // would grant workspaces nobody asked for at that moment.
+  const original = { getServicePrincipals: dbService.getServicePrincipals, getAnalysisRuns: dbService.getAnalysisRuns };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'sp1' }];
+  dbService.getAnalysisRuns = async () => [];
+
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try {
+    const { port } = server.address();
+    const stored = await new Promise((resolve, reject) => {
+      const body = JSON.stringify({ spId: '1', workspaceIds: ['ws-9'] });
+      const req = http.request({
+        hostname: '127.0.0.1', port, path: '/settings/access/pending', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, res => {
+        let text = '';
+        res.on('data', c => { text += c; });
+        res.on('end', () => resolve({ cookie: (res.headers['set-cookie'] || [])[0] }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+
+    const plain = await new Promise((resolve, reject) => {
+      http.get({
+        hostname: '127.0.0.1', port, path: '/settings/access',
+        headers: { Cookie: stored.cookie.split(';')[0] },
+      }, res => {
+        let text = '';
+        res.on('data', c => { text += c; });
+        res.on('end', () => resolve(text));
+      }).on('error', reject);
+    });
+    assert.match(plain, /var pendingGrant = null/);
+  } finally {
+    Object.assign(dbService, original);
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+// ── Personal workspaces, workspace status, and granting roles ──────────────────
+//
+// A workspace that belongs to one person is not a workspace governance can
+// manage: a confirmed personal one takes no members at all, and one merely named
+// after a person is somebody's private working area holding organisational
+// content. The distinction between those two is the whole point — the first is a
+// fact from the API, the second is a guess from a name, and presenting a guess as
+// a fact is how a legitimate workspace ends up excluded from a grant.
+
+test('the API saying PersonalGroup is a fact; a name that reads like a person is not', () => {
+  const confirmed = workspaceAccess.classifyWorkspacePersonal({ name: 'Ann Smith', type: 'PersonalGroup' });
+  assert.equal(confirmed.personal, true);
+  assert.equal(confirmed.confidence, 'confirmed');
+  assert.equal(confirmed.grantable, false, 'a personal workspace rejects every member add');
+
+  const guessed = workspaceAccess.classifyWorkspacePersonal({ name: 'Ann Smith' });
+  assert.equal(guessed.personal, true);
+  assert.equal(guessed.confidence, 'likely');
+  assert.equal(guessed.grantable, true, 'refusing to grant on a guess blocks work nothing else can do');
+  assert.match(guessed.reasons[0], /Named after a person/);
+});
+
+test('a mailbox for a name is personal; a subject area is not', () => {
+  assert.equal(workspaceAccess.classifyWorkspacePersonal({ name: 'ann.smith@contoso.com' }).personal, true);
+
+  // The false positives that matter: two capitalized words that are a subject
+  // area, an acronym, anything with a digit, and a single word.
+  for (const name of ['Finance Reporting', 'Global Sales', 'EMEA Sales', 'DWH Prod', 'Finance 2026', 'Finance', 'Sales_Ops']) {
+    assert.equal(workspaceAccess.classifyWorkspacePersonal({ name }).personal, false, name + ' is not a person');
+  }
+});
+
+test('nobody holding Admin is evidence a workspace is somebody\'s own, but only when the list was read', () => {
+  const noAdmin = workspaceAccess.classifyWorkspacePersonal({ name: 'Project Alpha', adminCount: 0, usersReadable: true });
+  assert.equal(noAdmin.personal, true);
+  assert.match(noAdmin.reasons[0], /Nobody holds Admin/);
+
+  // "We could not see who holds Admin" is the opposite claim to "nobody does".
+  const unreadable = workspaceAccess.classifyWorkspacePersonal({ name: 'Project Alpha', adminCount: null, usersReadable: false });
+  assert.equal(unreadable.personal, false);
+});
+
+test('workspace status names what the API said, including states it has not heard of', () => {
+  assert.equal(workspaceAccess.workspaceStatus({ state: 'Active' }).key, 'active');
+  assert.equal(workspaceAccess.workspaceStatus({ state: 'Deleted' }).key, 'deleted');
+  assert.equal(workspaceAccess.workspaceStatus({ state: 'Removing' }).key, 'removing');
+  assert.equal(workspaceAccess.workspaceStatus({ state: 'Orphaned' }).key, 'orphaned');
+  assert.equal(workspaceAccess.workspaceStatus({ type: 'PersonalGroup' }).key, 'personal');
+  // No state is not a state. The Fabric endpoint returns none for live workspaces.
+  assert.equal(workspaceAccess.workspaceStatus({}).key, 'unknown');
+  assert.equal(workspaceAccess.workspaceStatus({ state: 'Provisioning' }).label, 'Provisioning');
+});
+
+test('the access overview carries a status and a personal verdict for every workspace', () => {
+  const overview = workspaceAccess.buildAccessOverview(ACCESS_FIXTURE);
+
+  const finance = overview.workspaces.find(w => w.workspaceId === 'ws-1');
+  assert.equal(finance.status.key, 'active');
+  assert.equal(finance.personal.personal, false);
+
+  // Nobody administers this one, which is the supporting signal.
+  const orphan = overview.workspaces.find(w => w.workspaceId === 'ws-2');
+  assert.equal(orphan.personal.personal, true);
+  assert.match(orphan.personal.reasons.join(' '), /Nobody holds Admin/);
+
+  // Unreadable: no user data, so no verdict drawn from user data.
+  const marketing = overview.workspaces.find(w => w.workspaceId === 'ws-3');
+  assert.equal(marketing.personal.personal, false);
+
+  assert.equal(overview.totals.personal, 1);
+  assert.equal(overview.totals.personalConfirmed, 0);
+});
+
+test('the live check annotates what it offers rather than dropping it', () => {
+  const result = workspaceAccess.missingServicePrincipalAccess(
+    [
+      { id: 'a', displayName: 'Finance Reporting' },
+      { id: 'b', displayName: 'Anna Nowak' },
+      { id: 'c', displayName: 'Ann Smith', type: 'PersonalGroup' },
+    ],
+    []
+  );
+
+  // The confirmed personal one is skipped — nothing can be granted on it. The one
+  // that merely reads like a person is still offered, with the reason attached.
+  // Sorted by name, so "Anna Nowak" comes before "Finance Reporting".
+  assert.deepEqual(result.missing.map(w => w.id), ['b', 'a']);
+  assert.equal(result.skipped, 1);
+  assert.equal(result.personalLikely, 1);
+
+  const anna = result.missing.find(w => w.id === 'b');
+  assert.equal(anna.personal.personal, true);
+  assert.match(anna.personal.reasons[0], /Named after a person/);
+  assert.equal(anna.status.key, 'unknown', 'the tenant listing reports no state for a live workspace');
+});
+
+test('access held only by named people is a finding; a security group clears it', () => {
+  const result = insights.computeWorkspaceInsights({
+    workspaces: [
+      ws({ name: 'ByPeople', users: [
+        { name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' },
+        { name: 'Bob', email: 'bob@x.com', role: 'Admin', type: 'User' },
+      ] }),
+      ws({ name: 'ByGroup', users: [
+        { name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' },
+        { name: 'Bob', email: 'bob@x.com', role: 'Admin', type: 'User' },
+        { name: 'BI Admins', role: 'Member', type: 'Group' },
+      ] }),
+    ],
+  }, { referenceDate: SCAN_DATE });
+
+  assert.ok(findingKeys(result, 'ByPeople').includes('personalAccess'));
+  assert.ok(!findingKeys(result, 'ByGroup').includes('personalAccess'));
+
+  const detail = result.workspaces.find(w => w.name === 'ByPeople').findings
+    .find(f => f.key === 'personalAccess').detail;
+  assert.match(detail, /2 individual account\(s\)/);
+  assert.match(detail, /Ann/);
+});
+
+test('a workspace whose access could not be read is not accused of lacking a group', () => {
+  // No user list is a gap in the evidence, not an access model made of people.
+  const result = insights.computeWorkspaceInsights({
+    workspaces: [ws({ name: 'Unreadable', users: [] })],
+  }, { referenceDate: SCAN_DATE });
+  assert.ok(!findingKeys(result, 'Unreadable').includes('personalAccess'));
+});
+
+test('the risk score is the sum of the weights of what was found', () => {
+  const result = insights.computeWorkspaceInsights({
+    workspaces: [ws({ name: 'Bad', users: [{ name: 'Bob', email: 'b@x.com', role: 'Viewer', type: 'User' }] })],
+  }, { referenceDate: SCAN_DATE });
+
+  const bad = result.workspaces.find(w => w.name === 'Bad');
+  assert.equal(bad.score, bad.findings.reduce((sum, f) => sum + f.weight, 0),
+    'the number on the badge has to be the sum of the rows behind it');
+  assert.equal(bad.band.key, insights.riskBand(bad.score).key);
+
+  // The bands are read off the total, not off the worst single finding.
+  assert.equal(insights.riskBand(0).key, 'clean');
+  assert.equal(insights.riskBand(1).key, 'low');
+  assert.equal(insights.riskBand(35).key, 'medium');
+  assert.equal(insights.riskBand(80).key, 'high');
+  assert.equal(insights.riskBand(150).key, 'critical');
+
+  // The page explains the score from these, so they have to reach it.
+  assert.ok(result.riskBands.length);
+  assert.equal(result.maxScore, insights.FINDING_DEFS.reduce((sum, def) => sum + def.weight, 0));
+});
+
+// ── Granting a user or a group a role ─────────────────────────────────────────
+//
+// A different operation from adding the service principal itself, and the
+// difference is the whole reason this has its own page: adding the principal is
+// an admin-API call made on behalf of a signed-in administrator, while granting
+// anyone else a role is an ordinary workspace role assignment the principal makes
+// itself — and only where it is a workspace Admin.
+
+async function withServer(fn) {
+  const server = await new Promise(resolve => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  try { return await fn(server); } finally { await new Promise(resolve => server.close(resolve)); }
+}
+
+test('the role page names the roles, explains the Admin requirement and links the group guide', async () => {
+  const original = dbService.getServicePrincipals;
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 'tid' }];
+  try {
+    const html = await withServer(server => request(server, '/settings/access/roles').then(r => r.body));
+    for (const role of ['Admin', 'Member', 'Contributor', 'Viewer']) {
+      assert.match(html, new RegExp('>' + role + '<'), role + ' has to be offered');
+    }
+    // The one thing that makes this page fail in practice, said before it does.
+    assert.match(html, /workspace Admin/);
+    // Designing the groups comes before granting them anything, and that guidance
+    // is a page in this application rather than a link off it.
+    assert.match(html, /\/quality\/security-groups/);
+  } finally {
+    dbService.getServicePrincipals = original;
+  }
+});
+
+test('the workspaces offered are the live ones, with the last scan marking where it is Admin', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    getAnalysisRuns: dbService.getAnalysisRuns,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'sp1' }];
+  dbService.getAnalysisRuns = async () => [];
+  pbi.createPowerBIService = () => ({
+    getMyWorkspaces: async () => [
+      { id: 'w1', name: 'Finance' },
+      { id: 'w2', name: 'Ann Smith', type: 'PersonalGroup' },
+      { id: 'w3', name: 'Old', state: 'Deleted' },
+      { id: 'w4', name: 'Anna Nowak' },
+    ],
+  });
+
+  try {
+    const body = await withServer(async server => {
+      const res = await request(server, '/settings/access/roles/candidates?spId=1');
+      return JSON.parse(res.body);
+    });
+
+    assert.equal(body.success, true);
+    // Nothing can be granted in a personal workspace and nothing should be granted
+    // in a deleted one, so neither is offered.
+    assert.deepEqual(body.workspaces.map(w => w.id), ['w4', 'w1']);
+    // The one named after a person is offered, with the reason attached.
+    assert.equal(body.workspaces.find(w => w.id === 'w4').personal.personal, true);
+    // No scan to read roles from is said plainly rather than reported as "none".
+    assert.equal(body.rolesFromScan, false);
+  } finally {
+    Object.assign(dbService, {
+      getServicePrincipals: original.getServicePrincipals,
+      getAnalysisRuns: original.getAnalysisRuns,
+    });
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('a 403 reading role assignments is reported as "not an Admin there", not as a status code', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({
+    getRoleAssignments: async () => {
+      const err = new Error('Request failed with status code 403');
+      err.response = { status: 403 };
+      throw err;
+    },
+  });
+
+  try {
+    const body = await withServer(async server => {
+      const res = await request(server, '/settings/access/roles/w1/assignments?spId=1');
+      return JSON.parse(res.body);
+    });
+    assert.equal(body.success, false);
+    assert.equal(body.canManage, false, 'the failure is the answer to "can it manage roles here"');
+    assert.match(body.message, /not an Admin/);
+  } finally {
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('role assignments are flattened so the page can show who the principal is', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({
+    getRoleAssignments: async () => [
+      { id: 'ra1', role: 'Admin', principal: { id: 'u1', type: 'User', displayName: 'Ann', userDetails: { userPrincipalName: 'ann@x.com' } } },
+      { id: 'ra2', role: 'Viewer', principal: { id: 'g1', type: 'Group', displayName: 'BI Readers', groupDetails: { email: 'bi@x.com' } } },
+    ],
+  });
+
+  try {
+    const body = await withServer(async server => {
+      const res = await request(server, '/settings/access/roles/w1/assignments?spId=1');
+      return JSON.parse(res.body);
+    });
+    assert.equal(body.success, true);
+    // The identifier is nested differently per principal type; the page should not
+    // have to know that.
+    assert.deepEqual(body.assignments.map(a => a.detail), ['ann@x.com', 'bi@x.com']);
+    assert.deepEqual(body.assignments.map(a => a.role), ['Admin', 'Viewer']);
+  } finally {
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('granting a role posts the principal and role through, and refuses an unknown role', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  const calls = [];
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({
+    addRoleAssignment: async (...args) => { calls.push(args); return {}; },
+  });
+
+  try {
+    await withServer(async server => {
+      const granted = await postJson(server, '/settings/access/roles/w1',
+        { spId: 1, principalId: 'g1', principalType: 'Group', role: 'Contributor' });
+      assert.equal(granted.success, true);
+      assert.deepEqual(calls[0], ['w1', 'g1', 'Group', 'Contributor']);
+
+      // A role the API does not have would fail at the far end with nothing useful
+      // said; it is refused here instead.
+      const bogus = await postJson(server, '/settings/access/roles/w1',
+        { spId: 1, principalId: 'g1', principalType: 'Group', role: 'Owner' });
+      assert.equal(bogus.success, false);
+      assert.match(bogus.message, /Unknown role/);
+
+      const incomplete = await postJson(server, '/settings/access/roles/w1', { spId: 1, role: 'Viewer' });
+      assert.equal(incomplete.success, false);
+      assert.equal(calls.length, 1, 'nothing is posted for an incomplete form');
+    });
+  } finally {
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('a mail group is found and offered, with a nudge towards a security group', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({
+    searchEntraGroups: async () => [
+      { id: 'g1', displayName: 'BI Readers', securityEnabled: true },
+      { id: 'g2', displayName: 'BI Newsletter', securityEnabled: false },
+    ],
+  });
+
+  try {
+    const body = await withServer(async server => {
+      const res = await request(server, '/settings/access/roles/entra/search?q=BI&type=Group&spId=1');
+      return JSON.parse(res.body);
+    });
+    // Fabric accepts these, so the choice stays open — the mail group is marked
+    // rather than blocked. Claiming it cannot hold a role would be wrong.
+    assert.deepEqual(body.results.map(r => r.usable), [true, true]);
+    assert.equal(body.results[0].warning, null);
+    assert.match(body.results[1].warning, /Prefer a security group/);
+  } finally {
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('a one-character search does not reach Entra ID at all', async () => {
+  const original = {
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  let searched = false;
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({ searchEntraUsers: async () => { searched = true; return []; } });
+
+  try {
+    const body = await withServer(async server => {
+      const res = await request(server, '/settings/access/roles/entra/search?q=a&spId=1');
+      return JSON.parse(res.body);
+    });
+    assert.deepEqual(body.results, []);
+    assert.equal(searched, false, 'a prefix search on one character returns most of the directory');
+  } finally {
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('the triage page explains the risk score rather than asking for it to be trusted', async () => {
+  const ejs = require('ejs');
+  const computed = insights.computeWorkspaceInsights({
+    workspaces: [{
+      id: 'a', name: 'Solo', state: 'Active', items: [],
+      users: [{ name: 'Ann', email: 'ann@x.com', role: 'Admin', type: 'User' }],
+    }],
+  }, { referenceDate: SCAN_DATE });
+
+  const html = await ejs.renderFile('src/views/workspaces/list.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Workspaces', fromSavedData: true, run: null,
+    insights: computed, findingDefs: insights.FINDING_DEFS, namingPattern: null,
+  });
+
+  // How the number is arrived at, what it is out of, and what a given number means.
+  assert.match(html, /How the Risk score works/);
+  assert.match(html, /adds its weight/);
+  assert.match(html, new RegExp('is ' + computed.maxScore));
+  for (const band of computed.riskBands) assert.match(html, new RegExp('>\\s*' + band.label));
+
+  // Every check, with its weight, so the sum can be checked by hand.
+  for (const def of insights.FINDING_DEFS) assert.match(html, new RegExp('\\+' + def.weight + '<'));
+
+  // And the score on the row spells out its own arithmetic.
+  const solo = computed.workspaces[0];
+  assert.match(html, new RegExp('title="' + solo.band.label + ' risk — ' + solo.score + ' = '));
+});
+
+test('the access page shows workspace status, marks personal ones and offers the role page', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/access/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/settings/access',
+    breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Grant Access',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    fabricRoles: workspaceAccess.FABRIC_ROLES,
+    accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    overview: workspaceAccess.buildAccessOverview({
+      workspaces: [
+        { workspace_id: 'w1', name: 'Finance', state: 'Active', item_count: 2, users_readable: 1 },
+        { workspace_id: 'w2', name: 'Ann Smith', type: 'PersonalGroup', state: 'Active', users_readable: 1 },
+      ],
+      grants: [
+        { workspace_id: 'w1', principal_id: 'u1', principal_type: 'User', display_name: 'Ann', email: 'ann@x.com', access_right: 'Admin' },
+      ],
+    }),
+    indexed: true, error: null, grantAuth: false, partialScope: false, runs: [],
+    run: { id: 9, started_at: '2026-08-01T00:00:00Z', scope_kind: 'tenant' },
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 'tid', enterprise_app_object_id: 'sp1' }],
+  });
+
+  assert.match(html, /<th>Status<\/th>/);
+  assert.match(html, />Active</);
+  // The personal one is named as such, and offers no way to grant a role in it.
+  assert.match(html, />\s*personal\s*</);
+  assert.match(html, /takes no members/);
+  // The one that can take a role carries the button that grants one, beside its
+  // name and opening over the table rather than navigating away from it.
+  assert.match(html, /openRoleGrantModal\('w1', "Finance"\)/);
+  assert.match(html, /id="roleGrantModal"/);
+  assert.match(html, /Grant a user or group a role/);
+});
+
+// ── Which security groups should exist ────────────────────────────────────────
+//
+// Granting a role is the easy half. Which groups exist before anyone grants
+// anything is the half that decides whether access stays manageable, and it
+// cannot be retrofitted once the forty individual grants are in place.
+
+const securityGroups = require('../src/services/securityGroupGuideService');
+
+test('the group plan is a group per role per environment, plus one for the applications', () => {
+  const plan = securityGroups.securityGroupPlan({ domain: 'Finance', environments: ['dev', 'prod'] });
+
+  assert.deepEqual(plan.groups.map(group => group.name), [
+    'FAB-FINANCE-DEV-ADMIN', 'FAB-FINANCE-DEV-MEMBER', 'FAB-FINANCE-DEV-CONTRIBUTOR', 'FAB-FINANCE-DEV-VIEWER',
+    'FAB-FINANCE-PROD-ADMIN', 'FAB-FINANCE-PROD-MEMBER', 'FAB-FINANCE-PROD-CONTRIBUTOR', 'FAB-FINANCE-PROD-VIEWER',
+    // An application is one identity whatever environment it reads, so its group
+    // is per domain rather than per environment.
+    'FAB-FINANCE-SP',
+  ]);
+
+  // Every row says what to do with the group, not just what to call it.
+  assert.ok(plan.groups.every(group => group.holds && group.assignTo));
+  assert.match(plan.groups[0].assignTo, /DEV FINANCE/);
+});
+
+test('a domain nobody typed still produces a usable plan', () => {
+  const plan = securityGroups.securityGroupPlan({});
+  assert.equal(plan.domain, 'DOMAIN');
+  assert.deepEqual(plan.environments, ['DEV', 'TEST', 'PROD']);
+  assert.equal(plan.groups.length, 13, 'four roles across three environments, and the application group');
+});
+
+test('group names cannot carry whatever was typed into them', () => {
+  // These names are pasted into a directory. A separator or a space arriving from
+  // the form would produce a name that does not match the pattern it claims to.
+  const plan = securityGroups.securityGroupPlan({
+    domain: 'fin ance/2!', prefix: '  fab  ', environments: ['Pro d'], separator: '_',
+  });
+  assert.equal(plan.groups[0].name, 'FAB_FINANCE2_PROD_ADMIN');
+  assert.equal(securityGroups.plainGroupList(plan).split('\n')[0], 'FAB_FINANCE2_PROD_ADMIN');
+});
+
+test('an environment list of nothing but noise still names the roles', () => {
+  // Otherwise a stray comma in the form empties the plan, which reads as "no
+  // groups are needed".
+  const plan = securityGroups.securityGroupPlan({ domain: 'HR', environments: ['', '  ', '!!'] });
+  assert.deepEqual(plan.groups.map(group => group.name), [
+    'FAB-HR-ADMIN', 'FAB-HR-MEMBER', 'FAB-HR-CONTRIBUTOR', 'FAB-HR-VIEWER', 'FAB-HR-SP',
+  ]);
+});
+
+test('the security group page is part of the application, and generates from the form', async () => {
+  const html = await withServer(server =>
+    request(server, '/quality/security-groups?domain=Finance&environments=DEV,PROD').then(r => r.body));
+
+  assert.match(html, /FAB-FINANCE-PROD-CONTRIBUTOR/);
+  // The reasoning, not just the names.
+  assert.match(html, /Grant roles to groups, never to people/);
+  assert.match(html, /Service principals allowed to use Fabric APIs/);
+  // And the way back to acting on it.
+  assert.match(html, /\/settings\/access\/roles/);
+  // Nothing in the design tab touches the tenant, which it says rather than implies.
+  assert.match(html, /Nothing in this tab reads or changes your tenant/);
+});
+
+test('the role panel is one panel, reached from the page and from the table', async () => {
+  const ejs = require('ejs');
+  const common = {
+    user: { name: 'T' }, currentUser: { name: 'T' }, breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true,
+    servicePrincipals: [{ id: 1, name: 'SP', tenant_id: 't', enterprise_app_object_id: 'sp1' }],
+    fabricRoles: workspaceAccess.FABRIC_ROLES,
+  };
+
+  const page = await ejs.renderFile('src/views/access/roles.ejs', {
+    ...common, currentPath: '/settings/access/roles', title: 'Grant Workspace Roles',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, workspaceId: null, error: null,
+  });
+
+  const table = await ejs.renderFile('src/views/access/index.ejs', {
+    ...common, currentPath: '/settings/access', title: 'Grant Access',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    overview: workspaceAccess.buildAccessOverview(ACCESS_FIXTURE), indexed: true, error: null,
+    grantAuth: false, partialScope: false, runs: [],
+    run: { id: 9, started_at: '2026-08-01T00:00:00Z', scope_kind: 'tenant' },
+  });
+
+  // Both carry the same panel — two copies of it would drift within a release.
+  for (const html of [page, table]) {
+    assert.match(html, /function roleGrantOpen\(/);
+    assert.match(html, /id="assignmentsBody"/);
+    assert.match(html, /list-group-item list-group-item-action/,
+      'search results are a list, not a stack of full-width outlined buttons');
+  }
+
+  // Each names the select holding the acting principal, and they are not the same
+  // one: the page has a picker, the modal has its own.
+  assert.match(page, /ROLE_GRANT_SP_SELECT = 'roleSpSelect'/);
+  assert.match(table, /ROLE_GRANT_SP_SELECT = 'modalRoleSpSelect'/);
+
+  // The grant button sits with the label it belongs to rather than at the foot of
+  // the form.
+  assert.match(page, /Grant a role<\/span>[\s\S]{0,400}id="grantRoleBtn"/);
+});
+
+// ── People → security groups → workspaces ─────────────────────────────────────
+//
+// The mapping is mechanical: who somebody is decides which groups they belong to
+// and what those groups should hold. Doing it by hand across three environments
+// is where the inconsistencies come from, and an inconsistency in access is not a
+// typo — it is somebody who can publish to production.
+
+const sgMapping = require('../src/services/securityGroupMappingService');
+const sgRepo = require('../src/services/securityGroupRepository');
+
+test('a group name is stream, role and environment, and nothing that was typed by hand', () => {
+  assert.equal(sgMapping.groupName('IBP', 'DE', 'DEV'), 'SG-IBP-DE-DEV');
+  // These names are created in a directory and then matched against what is there,
+  // so a stray space produces a name that does not match the pattern it claims to.
+  assert.equal(sgMapping.groupName(' i b p ', 'de', 'dev'), 'SG-IBP-DE-DEV');
+  assert.equal(sgMapping.groupName('', '', ''), 'SG-STREAM-ROLE-ENV');
+});
+
+test('production takes no builders, whatever their project role', () => {
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'DE', 'DEV').role, 'Contributor');
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'DE', 'TEST').role, 'Contributor');
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'DE', 'PROD').role, 'Viewer');
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'BI', 'PROD').role, 'Viewer');
+  // The exception is the person who administers the platform.
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'ADMIN', 'PROD').role, 'Admin');
+  // And the rule can be turned off, in which case a builder builds in production.
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'DE', 'PROD', { prodViewerNonAdmin: false }).role, 'Contributor');
+});
+
+test('project managers read and administrators administer, in every environment', () => {
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'PM', 'DEV').role, 'Viewer');
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'ADMIN', 'DEV').role, 'Admin');
+  assert.equal(sgMapping.fabricRoleFor('IBP', 'UX', 'DEV').role, 'Contributor');
+});
+
+test('central platform work is granted across workspaces rather than within one stream', () => {
+  const admin = sgMapping.fabricRoleFor('CORP', 'ADMIN', 'PROD');
+  assert.equal(admin.role, 'Admin');
+  assert.equal(admin.allWorkspaces, true);
+  assert.equal(admin.label, 'Admin (All)');
+
+  // And the production rule does not override it — CORP is decided first.
+  const engineer = sgMapping.fabricRoleFor('CORP', 'DE', 'PROD');
+  assert.equal(engineer.label, 'Contributor (All)');
+  assert.equal(sgMapping.fabricRoleFor('CORP', 'PM', 'DEV').label, 'Viewer (All)');
+});
+
+test('an assignment with no environment covers development, not nothing', () => {
+  // A row that grants nothing is never what was meant by leaving the boxes alone.
+  assert.deepEqual(sgMapping.normalizeEnvironments([]), ['DEV']);
+  assert.deepEqual(sgMapping.normalizeEnvironments(['prod', 'dev']), ['DEV', 'PROD'],
+    'listed in the order work moves through them, not the order they were ticked');
+  assert.deepEqual(sgMapping.normalizeEnvironments(['nonsense']), ['DEV']);
+});
+
+test('the same group gathers everyone the assignments put in it', () => {
+  const mappingResult = sgMapping.buildMapping([
+    { id: 1, name: 'Anna', stream: 'IBP', projectRole: 'DE', environments: ['DEV', 'PROD'] },
+    { id: 2, name: 'Bob', stream: 'IBP', projectRole: 'DE', environments: ['DEV'] },
+    { id: 3, name: 'Cleo', stream: 'CORP', projectRole: 'ADMIN', environments: ['PROD'] },
+  ]);
+
+  assert.deepEqual(mappingResult.groups.map(group => group.name),
+    ['SG-CORP-ADMIN-PROD', 'SG-IBP-DE-DEV', 'SG-IBP-DE-PROD']);
+
+  const dev = mappingResult.groups.find(group => group.name === 'SG-IBP-DE-DEV');
+  assert.deepEqual(dev.members.map(member => member.name), ['Anna', 'Bob']);
+  assert.equal(dev.fabricRole.role, 'Contributor');
+
+  const prod = mappingResult.groups.find(group => group.name === 'SG-IBP-DE-PROD');
+  assert.deepEqual(prod.members.map(member => member.name), ['Anna']);
+  assert.equal(prod.fabricRole.role, 'Viewer');
+});
+
+test('the justification says what was decided and why, not just what was decided', () => {
+  const why = sgMapping.personJustification(
+    { name: 'Anna', stream: 'IBP', projectRole: 'DE', environments: ['DEV', 'PROD'] });
+  assert.match(why, /Anna/);
+  assert.match(why, /IBP/);
+  assert.match(why, /Contributor \(DEV\)/);
+  assert.match(why, /Viewer \(PROD\)/);
+
+  const prodGroup = { stream: 'IBP', projectRole: 'DE', environment: 'PROD' };
+  assert.match(sgMapping.groupJustification(prodGroup), /Production is read-only/);
+});
+
+test('a CSV keeps names that contain commas, and names the rows it could not read', () => {
+  const parsed = sgMapping.parseMappingCsv([
+    'Stream,Project Role,Name,Email,Environments',
+    'IBP,DE,"Nowak, Anna",anna@x.com,DEV;PROD',
+    'RGM,WIZARD,Bob,,TEST',
+    ',DE,Nobody,,DEV',
+    'IBP,DE,"Nowak, Anna",anna@x.com,DEV',
+  ].join('\n'));
+
+  assert.equal(parsed.error, null);
+  assert.deepEqual(parsed.assignments.map(a => a.name), ['Nowak, Anna', 'Bob']);
+  assert.deepEqual(parsed.assignments[0].environments, ['DEV', 'PROD']);
+  // An unknown project role still describes somebody who needs access.
+  assert.equal(parsed.assignments[1].projectRole, 'OTHER');
+  assert.ok(parsed.skipped.some(note => /Unknown project role/.test(note.reason)));
+  // And the two that cannot be used are named rather than dropped in silence.
+  assert.ok(parsed.skipped.some(note => /Needs both a stream and a name/.test(note.reason)));
+  assert.ok(parsed.skipped.some(note => /Already in this file/.test(note.reason)));
+});
+
+test('a CSV without the columns it needs is refused, not half-read', () => {
+  const parsed = sgMapping.parseMappingCsv('Person,Team\nAnna,IBP');
+  assert.match(parsed.error, /Stream, Project Role and Name/);
+  assert.deepEqual(parsed.assignments, []);
+});
+
+test('the export carries the derived columns, not only what was typed', () => {
+  const csv = sgMapping.toMappingCsv([
+    { name: 'Anna', email: 'a@x.com', stream: 'IBP', projectRole: 'DE', environments: ['DEV', 'PROD'] },
+  ]);
+  const [header, row] = csv.split('\n');
+  assert.match(header, /Security Groups/);
+  assert.match(row, /SG-IBP-DE-DEV;SG-IBP-DE-PROD/);
+  assert.match(row, /Contributor \(DEV\);Viewer \(PROD\)/);
+
+  // What went out comes back in.
+  const back = sgMapping.parseMappingCsv(csv);
+  assert.equal(back.assignments.length, 1);
+  assert.deepEqual(back.assignments[0].environments, ['DEV', 'PROD']);
+});
+
+test('checking a workspace tells apart absent, wrong, unlinked and unreadable', () => {
+  const roles = [
+    { id: 'ra1', role: 'Contributor', principal: { id: 'G-1', type: 'Group', displayName: 'BI Builders' } },
+  ];
+
+  assert.equal(sgMapping.compareAssignment({ entraGroupId: 'g-1', intendedRole: 'Contributor' }, roles).state, 'present');
+  const wrong = sgMapping.compareAssignment({ entraGroupId: 'g-1', intendedRole: 'Viewer' }, roles);
+  assert.equal(wrong.state, 'wrong-role');
+  assert.equal(wrong.actualRole, 'Contributor');
+  assert.equal(sgMapping.compareAssignment({ entraGroupId: 'other', intendedRole: 'Viewer' }, roles).state, 'missing');
+  // Never linked cannot be looked for, and is not the same as being absent.
+  assert.equal(sgMapping.compareAssignment({ entraGroupId: null }, roles).state, 'unlinked');
+  // And "could not read the workspace" is not the tenant disagreeing with you.
+  assert.equal(sgMapping.compareAssignment({ entraGroupId: 'g-1' }, null).state, 'unreadable');
+
+  const summary = sgMapping.summarizeChecks([
+    { state: 'present' }, { state: 'missing' }, { state: 'wrong-role' }, { state: 'unreadable' },
+  ]);
+  assert.equal(summary.actionable, 2, 'only what somebody can act on');
+  assert.equal(summary.total, 4);
+});
+
+test('saving a person creates the lookups, the assignment, its environments and its groups', async () => {
+  // Lookup rows are created on demand because a tenant invents streams as it goes
+  // — a fixed list somebody maintains by hand means an import fails on a stream
+  // nobody thought of.
+  const { result, executed } = await withFakeSql(sql => {
+    if (/OUTPUT INSERTED\.id/.test(sql)) return [{ id: 7 }];
+    return [];
+  }, () => sgRepo.saveAssignment(
+    { stream: 'IBP', projectRole: 'DE', name: 'Anna', email: 'A@X.com', environments: ['DEV', 'PROD'] }, 'tester'));
+
+  assert.equal(result.created, true);
+  const statements = executed.map(entry => entry.sql).join('\n');
+  assert.match(statements, /INSERT INTO sg_streams/);
+  assert.match(statements, /INSERT INTO sg_project_roles/);
+  assert.match(statements, /INSERT INTO sg_people/);
+  assert.match(statements, /INSERT INTO sg_assignments/);
+  // One environment row and one group row per environment.
+  assert.equal(executed.filter(e => /INSERT INTO sg_assignment_environments/.test(e.sql)).length, 2);
+  assert.equal(executed.filter(e => /INSERT INTO sg_groups/.test(e.sql)).length, 2);
+
+  // Email is stored folded, so the same person typed two ways is one person.
+  const person = executed.find(entry => /INSERT INTO sg_people/.test(entry.sql));
+  assert.equal(person.params.find(p => p.name === 'email').value, 'a@x.com');
+});
+
+test('the same person, stream and role is updated rather than duplicated', async () => {
+  const { result, executed } = await withFakeSql(sql => {
+    // Every lookup and the assignment itself already exist.
+    if (/SELECT id FROM/.test(sql)) return [{ id: 3 }];
+    if (/OUTPUT INSERTED\.id/.test(sql)) return [{ id: 3 }];
+    return [];
+  }, () => sgRepo.saveAssignment(
+    { stream: 'IBP', projectRole: 'DE', name: 'Anna', environments: ['TEST'] }, 'tester'));
+
+  assert.equal(result.created, false);
+  const statements = executed.map(entry => entry.sql).join('\n');
+  assert.match(statements, /UPDATE sg_assignments/);
+  assert.doesNotMatch(statements, /INSERT INTO sg_assignments/);
+  // Environments are replaced, not merged: unticking a box has to mean something.
+  assert.match(statements, /DELETE FROM sg_assignment_environments/);
+});
+
+test('an assignment refuses to be saved without the two things that identify it', async () => {
+  await assert.rejects(() => sgRepo.saveAssignment({ projectRole: 'DE', name: 'Anna' }), /stream is required/);
+  await assert.rejects(() => sgRepo.saveAssignment({ stream: 'IBP', projectRole: 'DE' }), /name is required/);
+});
+
+test('removing the last assignment removes the person, and an earlier one does not', async () => {
+  const lonely = await withFakeSql(sql => {
+    if (/SELECT person_id/.test(sql)) return [{ person_id: 4 }];
+    if (/COUNT\(\*\)/.test(sql)) return [{ total: 0 }];
+    return [];
+  }, () => sgRepo.deleteAssignment(1));
+  assert.match(lonely.executed.map(e => e.sql).join('\n'), /DELETE FROM sg_people/);
+
+  const stillUsed = await withFakeSql(sql => {
+    if (/SELECT person_id/.test(sql)) return [{ person_id: 4 }];
+    if (/COUNT\(\*\)/.test(sql)) return [{ total: 2 }];
+    return [];
+  }, () => sgRepo.deleteAssignment(1));
+  assert.doesNotMatch(stillUsed.executed.map(e => e.sql).join('\n'), /DELETE FROM sg_people/);
+});
+
+test('a group carries its directory link and the latest answer for each workspace', async () => {
+  const { result } = await withFakeSql(sql => {
+    if (/FROM sg_groups/.test(sql)) {
+      return [{
+        id: 5, stream: 'IBP', project_role: 'DE', environment: 'PROD',
+        entra_group_id: 'g-1', entra_group_name: 'BI Prod Readers', entra_group_type: 'Security group',
+      }];
+    }
+    if (/FROM sg_group_workspaces/.test(sql)) {
+      return [{
+        id: 11, group_id: 5, workspace_id: 'w1', workspace_name: 'Finance', intended_role: 'Viewer',
+        state: 'missing', actual_role: null, message: 'The group holds no role in this workspace.',
+        checked_at: '2026-08-20T10:00:00Z',
+      }];
+    }
+    return [];
+  }, () => sgRepo.listGroups());
+
+  assert.equal(result[0].entraGroupName, 'BI Prod Readers');
+  assert.equal(result[0].workspaces[0].lastCheck.state, 'missing');
+  // The latest answer only. A row showing five checks would bury the current state.
+  assert.equal(result[0].workspaces.length, 1);
+});
+
+test('the mapping page shows people, their derived groups and what the tenant said', async () => {
+  const original = {
+    loadMapping: sgRepo.loadMapping,
+    getServicePrincipals: dbService.getServicePrincipals,
+  };
+  sgRepo.loadMapping = async () => ({
+    assignments: [
+      { id: 1, personId: 1, name: 'Anna Nowak', email: 'anna@x.com', stream: 'IBP', projectRole: 'DE', environments: ['DEV', 'PROD'] },
+    ],
+    groups: [
+      { id: 5, stream: 'IBP', projectRole: 'DE', environment: 'PROD', entraGroupId: 'g-1',
+        entraGroupName: 'BI Prod Readers', workspaces: [
+          { id: 11, workspaceId: 'w1', workspaceName: 'Finance', intendedRole: 'Viewer',
+            lastCheck: { state: 'missing', message: 'The group holds no role in this workspace.', checkedAt: '2026-08-20T10:00:00Z' } },
+        ] },
+    ],
+  });
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+
+  try {
+    const html = await withServer(server => request(server, '/quality/security-groups').then(r => r.body));
+    assert.match(html, /Anna Nowak/);
+    // The derived columns, computed from the rules rather than read from a table.
+    assert.match(html, /SG-IBP-DE-DEV/);
+    assert.match(html, /Viewer \(PROD\)/);
+    // The directory group, and that its name differs from the suggested one.
+    assert.match(html, /BI Prod Readers/);
+    assert.match(html, /named differently/);
+    // And the workspace it should be in, with what the last check found.
+    assert.match(html, /Finance/);
+    assert.match(html, /holds no role in this workspace/);
+  } finally {
+    sgRepo.loadMapping = original.loadMapping;
+    dbService.getServicePrincipals = original.getServicePrincipals;
+  }
+});
+
+test('the check reads each workspace once, however many groups point at it', async () => {
+  const original = {
+    listGroups: sgRepo.listGroups,
+    recordChecks: sgRepo.recordChecks,
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  const reads = [];
+  let recorded = null;
+
+  sgRepo.listGroups = async () => [
+    { id: 1, stream: 'IBP', projectRole: 'DE', environment: 'DEV', entraGroupId: 'g-1', entraGroupName: 'Builders',
+      workspaces: [{ id: 11, workspaceId: 'w1', workspaceName: 'Finance', intendedRole: 'Contributor' }] },
+    { id: 2, stream: 'IBP', projectRole: 'PM', environment: 'DEV', entraGroupId: 'g-2', entraGroupName: 'Managers',
+      workspaces: [{ id: 12, workspaceId: 'w1', workspaceName: 'Finance', intendedRole: 'Viewer' }] },
+    // Never linked: nothing to look for, and no call to make.
+    { id: 3, stream: 'RGM', projectRole: 'DE', environment: 'DEV', entraGroupId: null, entraGroupName: null,
+      workspaces: [{ id: 13, workspaceId: 'w2', workspaceName: 'Sales', intendedRole: 'Contributor' }] },
+  ];
+  sgRepo.recordChecks = async results => { recorded = results; return { recorded: results.length }; };
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({
+    getRoleAssignments: async workspaceId => {
+      reads.push(workspaceId);
+      return [{ id: 'ra1', role: 'Contributor', principal: { id: 'g-1', type: 'Group', displayName: 'Builders' } }];
+    },
+  });
+
+  try {
+    const body = await withServer(server => postJson(server, '/quality/security-groups/verify', { spId: 1 }));
+
+    assert.equal(body.success, true);
+    // Two groups point at Finance; reading it twice would turn a plan of forty rows
+    // into forty calls. The unlinked group needs no call at all.
+    assert.deepEqual(reads, ['w1']);
+    assert.equal(body.workspacesRead, 1);
+
+    const states = body.results.map(result => result.state);
+    assert.deepEqual(states, ['present', 'missing', 'unlinked']);
+    assert.equal(body.summary.actionable, 1, 'unlinked is not the tenant disagreeing with you');
+    // What was found is kept, so drift is visible over time rather than only now.
+    assert.equal(recorded.length, 3);
+  } finally {
+    Object.assign(sgRepo, { listGroups: original.listGroups, recordChecks: original.recordChecks });
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('a workspace that cannot be read is reported as unreadable, not as missing', async () => {
+  const original = {
+    listGroups: sgRepo.listGroups,
+    recordChecks: sgRepo.recordChecks,
+    getServicePrincipals: dbService.getServicePrincipals,
+    createPowerBIService: pbi.createPowerBIService,
+  };
+  sgRepo.listGroups = async () => [
+    { id: 1, stream: 'IBP', projectRole: 'DE', environment: 'DEV', entraGroupId: 'g-1', entraGroupName: 'Builders',
+      workspaces: [{ id: 11, workspaceId: 'w1', workspaceName: 'Finance', intendedRole: 'Contributor' }] },
+  ];
+  sgRepo.recordChecks = async () => ({ recorded: 1 });
+  dbService.getServicePrincipals = async () => [{ id: 1, name: 'SP', tenant_id: 't' }];
+  pbi.createPowerBIService = () => ({
+    getRoleAssignments: async () => { throw new Error('Request failed with status code 403'); },
+  });
+
+  try {
+    const body = await withServer(server => postJson(server, '/quality/security-groups/verify', {}));
+    assert.equal(body.results[0].state, 'unreadable');
+    assert.equal(body.summary.actionable, 0);
+  } finally {
+    Object.assign(sgRepo, { listGroups: original.listGroups, recordChecks: original.recordChecks });
+    dbService.getServicePrincipals = original.getServicePrincipals;
+    pbi.createPowerBIService = original.createPowerBIService;
+  }
+});
+
+test('importing a CSV saves the rows it could read and names the ones it could not', async () => {
+  const original = sgRepo.saveAssignment;
+  const saved = [];
+  sgRepo.saveAssignment = async assignment => { saved.push(assignment); return { id: saved.length, created: true }; };
+
+  try {
+    const body = await withServer(server => postJson(server, '/quality/security-groups/import', {
+      csv: [
+        'Stream,Project Role,Name,Environments',
+        'IBP,DE,Anna,DEV;PROD',
+        ',DE,Nobody,DEV',
+        'RGM,PM,Bob,TEST',
+      ].join('\n'),
+    }));
+
+    assert.equal(body.success, true);
+    assert.equal(body.imported, 2);
+    assert.deepEqual(saved.map(entry => entry.name), ['Anna', 'Bob']);
+    // The row that could not be used is named, with its line number.
+    assert.equal(body.skipped.length, 1);
+    assert.equal(body.skipped[0].line, 3);
+  } finally {
+    sgRepo.saveAssignment = original;
+  }
+});
+
+test('the export is a file, not a page', async () => {
+  const original = sgRepo.listAssignments;
+  sgRepo.listAssignments = async () => [
+    { name: 'Anna', email: 'a@x.com', stream: 'IBP', projectRole: 'DE', environments: ['DEV'] },
+  ];
+  try {
+    const response = await withServer(server => request(server, '/quality/security-groups/export.csv'));
+    assert.match(response.headers['content-type'], /text\/csv/);
+    assert.match(response.headers['content-disposition'], /attachment; filename="fabric-security-mapping\.csv"/);
+    assert.match(response.body, /SG-IBP-DE-DEV/);
+  } finally {
+    sgRepo.listAssignments = original;
   }
 });

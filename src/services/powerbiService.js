@@ -6,6 +6,7 @@ const {
   getSqlTokenForSP,
 } = require('./authService');
 const { explainStatus } = require('./httpErrorService');
+const { buildSelectSql } = require('./reconciliationService');
 
 const PBI_BASE = 'https://api.powerbi.com/v1.0/myorg';
 const PBI_ADMIN = PBI_BASE + '/admin';
@@ -286,6 +287,24 @@ function createPowerBIService(spConfig, authOptions = {}) {
     return data.value || [];
   }
 
+  /**
+   * The workspaces the service principal itself can reach.
+   *
+   * Deliberately the *non-admin* endpoint. `/admin/groups` returns every workspace
+   * in the tenant regardless of membership — that is what makes a tenant-wide scan
+   * possible, and it is also why a scan cannot answer "does the principal have
+   * access". `/groups` returns only what the caller is a member of, so the
+   * difference between the two lists is exactly the workspaces it cannot reach.
+   *
+   * Two calls, whatever the size of the tenant. Asking the admin users endpoint per
+   * workspace would answer the same question in several hundred.
+   */
+  async function getMyWorkspaces() {
+    const token = await getToken();
+    const data = await safeGet(token, PBI_BASE + '/groups', { $top: 5000 });
+    return data.value || [];
+  }
+
   // ── Single workspace detail ──
   async function getWorkspaceById(workspaceId) {
     const fabricData = await tryFabricGet('/workspaces/' + workspaceId);
@@ -538,6 +557,19 @@ function createPowerBIService(spConfig, authOptions = {}) {
       }
     }
     return [...tables.values()].sort((a, b) => a.schema.localeCompare(b.schema) || a.name.localeCompare(b.name));
+  }
+
+  // Reads business rows from a SQL analytics endpoint for reconciliation.
+  //
+  // Identifiers are validated and bracket-quoted rather than interpolated raw:
+  // dataset and column names arrive from user-authored rules, so they are treated
+  // as untrusted input even though only readers can reach this path.
+  // The projection is built by the reconciliation layer so a Fabric endpoint and a
+  // registered external database read exactly the same shape.
+  async function readSqlEndpointRows(endpoint, { dataset, selections, columns, rowLimit }) {
+    const sql = buildSelectSql({ dataset, selections, columns, rowLimit });
+    const token = await getSqlTokenForSP(spConfig);
+    return querySqlEndpoint(endpoint.connectionString, endpoint.database, token, sql);
   }
 
   // ── Tenant settings: Fabric Admin API ──
@@ -1047,6 +1079,7 @@ function createPowerBIService(spConfig, authOptions = {}) {
 
   return {
     getWorkspaces,
+    getMyWorkspaces,
     getWorkspaceById,
     getItemsByWorkspace,
     getItemsByType,
@@ -1063,6 +1096,7 @@ function createPowerBIService(spConfig, authOptions = {}) {
     getOneLakeBreakdown,
     getSqlEndpointInfo,
     getSqlEndpointSchema,
+    readSqlEndpointRows,
     scanWorkspaces,
     getScanStatus,
     getScanResult,

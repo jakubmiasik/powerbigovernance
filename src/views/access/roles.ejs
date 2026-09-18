@@ -1,0 +1,230 @@
+<%- include('../partials/header') %>
+
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-person-plus me-2"></i>Grant Workspace Roles</h2>
+    <p class="text-muted mb-0">
+      Give a user, a security group or another service principal a role in a workspace the service principal administers.
+    </p>
+  </div>
+  <div class="d-flex gap-2">
+    <a href="/quality/security-groups" class="btn btn-sm btn-outline-primary">
+      <i class="bi bi-people me-1"></i>Which groups should exist
+    </a>
+    <a href="/settings/access" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Grant Access</a>
+  </div>
+</div>
+
+<% if (error) { %>
+  <div class="alert alert-danger"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div>
+<% } %>
+
+<div class="alert alert-info">
+  <i class="bi bi-info-circle me-2"></i>
+  This is a different operation from adding the service principal itself. Adding the principal needs a
+  <strong>tenant administrator</strong> signing in, because it uses the Power BI admin API. Granting anyone
+  <em>else</em> a role is an ordinary workspace role assignment the service principal makes on its own — but only
+  where it is a <strong>workspace Admin</strong>, which is what the Fabric role APIs require. Workspaces it only has
+  Member or Contributor on will refuse, and say so.
+</div>
+
+<% if (!(servicePrincipals || []).length) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-exclamation-triangle me-2"></i>No service principal configured.
+    <a href="/settings">Add one in Settings</a> first.
+  </div>
+<% } else { %>
+
+<div class="row g-3">
+  <div class="col-lg-8">
+
+    <!-- ── Which workspace ── -->
+    <div class="card mb-3">
+      <div class="card-header"><i class="bi bi-1-circle me-2"></i>Choose a workspace</div>
+      <div class="card-body py-3">
+        <div class="row g-2 align-items-end">
+          <div class="col-md-5">
+            <label class="form-label small" for="roleSpSelect">Acting as</label>
+            <select class="form-select form-select-sm" id="roleSpSelect" onchange="onRoleSpChanged()">
+              <% servicePrincipals.forEach(function(sp) { %>
+                <option value="<%= sp.id %>"><%= sp.name %> (<%= sp.tenant_id %>)</option>
+              <% }) %>
+            </select>
+          </div>
+          <div class="col-md-3">
+            <button class="btn btn-sm btn-primary w-100" id="loadWorkspacesBtn" onclick="loadCandidateWorkspaces()">
+              <i class="bi bi-arrow-repeat me-1"></i>Load workspaces
+            </button>
+          </div>
+          <div class="col-md-4">
+            <div class="form-text mb-0" id="candidateStatus">Not loaded yet.</div>
+          </div>
+        </div>
+
+        <div class="row g-2 align-items-end mt-1 d-none" id="workspacePickerRow">
+          <div class="col-md-4">
+            <label class="form-label small" for="workspaceFilter">Filter</label>
+            <input type="text" class="form-control form-control-sm" id="workspaceFilter"
+                   placeholder="Workspace name..." oninput="renderCandidateWorkspaces()">
+          </div>
+          <div class="col-md-8">
+            <label class="form-label small" for="workspaceSelect">Workspace</label>
+            <select class="form-select form-select-sm" id="workspaceSelect" onchange="onWorkspaceChosen()"></select>
+          </div>
+          <div class="col-12">
+            <div class="form-text mb-0" id="roleGrantNote"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <%- include('../partials/roleGrantPanel', { spSelectId: 'roleSpSelect' }) %>
+  </div>
+
+  <!-- ── Designing the groups first ── -->
+  <div class="col-lg-4">
+    <div class="card mb-3">
+      <div class="card-header"><i class="bi bi-people me-2"></i>Which groups should exist</div>
+      <div class="card-body py-3">
+        <p class="small mb-2">
+          Granting roles is the easy half. The half that decides whether access stays manageable is which security
+          groups exist in the first place — one per role per environment is the usual shape, so that a workspace grants
+          four groups rather than forty people.
+        </p>
+        <a href="/quality/security-groups" class="btn btn-sm btn-primary w-100 mb-2">
+          <i class="bi bi-diagram-3 me-1"></i>Design the groups
+        </a>
+        <div class="form-text mb-0">
+          Principles, the groups one domain needs generated for you, the tenant-wide ones, and what goes wrong.
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><i class="bi bi-shield-lock me-2"></i>What each role can do</div>
+      <ul class="list-group list-group-flush">
+        <% fabricRoles.forEach(function(role) { %>
+          <li class="list-group-item py-2">
+            <span class="badge bg-<%= role.color %> me-2"><%= role.label %></span>
+            <span class="small"><%= role.description %></span>
+          </li>
+        <% }) %>
+      </ul>
+      <div class="card-footer small text-muted">
+        Only an <strong>Admin</strong> can change who has access, which is why this page needs the service principal to
+        be one.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Choosing the workspace ──
+//
+// The panel above handles one workspace; this handles which one. Reachability is
+// one call, and whether the principal is Admin there is not in that answer — so
+// the last scan marks the likely ones and the panel settles it, because listing
+// role assignments only succeeds for a workspace Admin.
+var candidateWorkspaces = [];
+var lastLoadedWorkspaceId = null;
+var preselectWorkspaceId = <%- JSON.stringify(workspaceId || null) %>;
+
+function currentWorkspace() {
+  var id = document.getElementById('workspaceSelect').value;
+  return candidateWorkspaces.find(function(w) { return w.id === id; }) || null;
+}
+
+function onRoleSpChanged() {
+  // A different principal administers a different set of workspaces. Keeping the
+  // old list would offer workspaces this one cannot manage.
+  candidateWorkspaces = [];
+  lastLoadedWorkspaceId = null;
+  document.getElementById('workspacePickerRow').classList.add('d-none');
+  document.getElementById('candidateStatus').textContent = 'Not loaded yet.';
+  roleGrantReset();
+}
+
+async function loadCandidateWorkspaces() {
+  var button = document.getElementById('loadWorkspacesBtn');
+  var status = document.getElementById('candidateStatus');
+  button.disabled = true;
+  status.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Asking the tenant...';
+
+  try {
+    var resp = await fetch('/settings/access/roles/candidates?spId=' + encodeURIComponent(spId()));
+    var data = await resp.json();
+    if (!data.success) {
+      status.innerHTML = '<span class="text-danger">' + esc(data.message) + '</span>';
+      return;
+    }
+
+    candidateWorkspaces = data.workspaces || [];
+    status.innerHTML = esc(candidateWorkspaces.length + ' workspace(s) reachable')
+      + (data.rolesFromScan
+        ? '<br><span class="text-muted">' + esc(data.adminByScan + ' Admin according to the last scan') + '</span>'
+        : '<br><span class="text-muted">No scan to say where it is Admin — pick one and find out</span>');
+
+    document.getElementById('workspacePickerRow').classList.remove('d-none');
+    renderCandidateWorkspaces();
+  } catch (e) {
+    status.innerHTML = '<span class="text-danger">' + esc(e.message) + '</span>';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderCandidateWorkspaces() {
+  var select = document.getElementById('workspaceSelect');
+  var needle = (document.getElementById('workspaceFilter').value || '').trim().toLowerCase();
+  var previous = select.value;
+
+  var shown = candidateWorkspaces.filter(function(ws) {
+    return !needle || (ws.name || '').toLowerCase().indexOf(needle) !== -1;
+  });
+
+  select.innerHTML = shown.length
+    ? shown.map(function(ws) {
+        var mark = ws.scanRole === 'admin' ? ' — Admin' : (ws.scanRole ? ' — ' + ws.scanRole : '');
+        var personal = ws.personal && ws.personal.personal ? ' — looks personal' : '';
+        return '<option value="' + esc(ws.id) + '">' + esc(ws.name) + esc(mark + personal) + '</option>';
+      }).join('')
+    : '<option value="">Nothing matches that filter</option>';
+
+  // A filter should narrow the list, not silently move the selection.
+  if (previous && shown.some(function(ws) { return ws.id === previous; })) select.value = previous;
+  else if (preselectWorkspaceId && shown.some(function(ws) { return ws.id === preselectWorkspaceId; })) {
+    select.value = preselectWorkspaceId;
+    preselectWorkspaceId = null;
+  }
+  onWorkspaceChosen();
+}
+
+function onWorkspaceChosen() {
+  var workspace = currentWorkspace();
+  if (!workspace) {
+    lastLoadedWorkspaceId = null;
+    roleGrantOpen(null);
+    return;
+  }
+
+  // Typing in the filter re-renders the list, which must not re-read the same
+  // workspace once per keystroke.
+  if (workspace.id === lastLoadedWorkspaceId) return;
+  lastLoadedWorkspaceId = workspace.id;
+
+  var note = workspace.personal && workspace.personal.personal
+    ? '<span class="text-warning"><i class="bi bi-person-exclamation me-1"></i>'
+      + esc(workspace.personal.reasons.join(' ')) + '</span>'
+    : '';
+  roleGrantOpen(workspace.id, workspace.name, note);
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  // Arriving from a workspace row on the access page: load straight away so the
+  // first thing on screen is that workspace, not an empty form.
+  if (preselectWorkspaceId) loadCandidateWorkspaces();
+});
+</script>
+<% } %>
+
+<%- include('../partials/footer') %>

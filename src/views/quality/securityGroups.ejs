@@ -1,0 +1,971 @@
+<%- include('../partials/header') %>
+<%
+  var checkStyles = {
+    'present': { color: 'success', icon: 'check-circle', label: 'In the workspace' },
+    'wrong-role': { color: 'warning', icon: 'exclamation-triangle', label: 'Wrong role' },
+    'missing': { color: 'danger', icon: 'x-circle', label: 'Not in the workspace' },
+    'unlinked': { color: 'secondary', icon: 'link-45deg', label: 'No directory group linked' },
+    'unreadable': { color: 'secondary', icon: 'eye-slash', label: 'Could not be read' },
+  };
+  var linkedGroups = (groups || []).filter(function(g) { return g.entraGroupId; }).length;
+  var attachmentCount = (groups || []).reduce(function(sum, g) { return sum + g.workspaces.length; }, 0);
+%>
+
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-people me-2"></i>Security Groups</h2>
+    <p class="text-muted mb-0">
+      Who belongs in which group, which directory group that really is, and whether the workspaces agree.
+    </p>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    <a href="/settings/access/roles" class="btn btn-sm btn-outline-primary">
+      <i class="bi bi-person-plus me-1"></i>Grant a group a role
+    </a>
+    <a href="/quality" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Quality</a>
+  </div>
+</div>
+
+<% if (error) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-exclamation-triangle me-2"></i>The stored mapping could not be read: <%= error %>
+    <div class="small mt-1">The design guidance below needs no database and is unaffected.</div>
+  </div>
+<% } %>
+
+<ul class="nav nav-tabs mb-3" role="tablist">
+  <li class="nav-item">
+    <button class="nav-link <%= tab === 'mapping' ? 'active' : '' %>" data-bs-toggle="tab" data-bs-target="#tabMapping" type="button">
+      <i class="bi bi-diagram-3 me-1"></i>Mapping
+    </button>
+  </li>
+  <li class="nav-item">
+    <button class="nav-link <%= tab === 'design' ? 'active' : '' %>" data-bs-toggle="tab" data-bs-target="#tabDesign" type="button">
+      <i class="bi bi-lightbulb me-1"></i>Design guidance
+    </button>
+  </li>
+</ul>
+
+<div class="tab-content">
+<!-- ══ Mapping ══════════════════════════════════════════════════════════════ -->
+<div class="tab-pane fade <%= tab === 'mapping' ? 'show active' : '' %>" id="tabMapping">
+
+  <div class="row g-3 mb-4">
+    <div class="col-6 col-lg-3">
+      <div class="card h-100"><div class="card-body py-3">
+        <div class="text-muted small">People</div>
+        <div class="h4 mb-0"><%= assignments.length %></div>
+        <div class="small text-muted">assignment(s) across streams</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-lg-3">
+      <div class="card h-100"><div class="card-body py-3">
+        <div class="text-muted small">Groups</div>
+        <div class="h4 mb-0"><%= groups.length %></div>
+        <div class="small text-muted"><%= linkedGroups %> linked to Entra ID</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-lg-3">
+      <div class="card h-100"><div class="card-body py-3">
+        <div class="text-muted small">Workspace attachments</div>
+        <div class="h4 mb-0"><%= attachmentCount %></div>
+        <div class="small text-muted">group × workspace</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-lg-3">
+      <div class="card h-100" id="verifySummaryCard"><div class="card-body py-3">
+        <div class="text-muted small">Needs attention</div>
+        <div class="h4 mb-0" id="verifyActionable">—</div>
+        <div class="small text-muted" id="verifyCheckedAt">Not verified yet</div>
+      </div></div>
+    </div>
+  </div>
+
+  <div class="row g-3">
+    <!-- ── Add / edit a person ── -->
+    <div class="col-lg-4">
+      <div class="card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-person-plus me-2"></i>Add or edit a person</span>
+          <span class="badge bg-light text-dark border" id="modeBadge">Add</span>
+        </div>
+        <div class="card-body py-3">
+          <input type="hidden" id="assignmentId" value="">
+          <div class="mb-2">
+            <label class="form-label small" for="inpStream">Stream</label>
+            <input class="form-control form-control-sm text-uppercase" id="inpStream" placeholder="IBP, RGM, CORP" maxlength="32">
+            <div class="form-text">The delivery stream. <code>CORP</code> is treated as central platform work.</div>
+          </div>
+          <div class="mb-2">
+            <label class="form-label small" for="inpRole">Project role</label>
+            <select class="form-select form-select-sm" id="inpRole">
+              <% projectRoles.forEach(function(role) { %>
+                <option value="<%= role.code %>"><%= role.code %> — <%= role.label %></option>
+              <% }) %>
+            </select>
+          </div>
+          <div class="mb-2">
+            <label class="form-label small" for="inpName">Name</label>
+            <input class="form-control form-control-sm" id="inpName" placeholder="Anna Nowak" maxlength="200">
+          </div>
+          <div class="mb-2">
+            <label class="form-label small" for="inpEmail">Email <span class="text-muted">(optional)</span></label>
+            <input class="form-control form-control-sm" id="inpEmail" placeholder="anna.nowak@contoso.com" maxlength="200">
+            <div class="form-text">Two people with the same name are one row without it.</div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small">Environments</label>
+            <div class="d-flex flex-wrap gap-3">
+              <% environments.forEach(function(environment) { %>
+                <div class="form-check">
+                  <input class="form-check-input env-check" type="checkbox" value="<%= environment.code %>"
+                         id="env<%= environment.code %>" <%= environment.code === 'DEV' ? 'checked' : '' %>>
+                  <label class="form-check-label small" for="env<%= environment.code %>"><%= environment.code %></label>
+                </div>
+              <% }) %>
+            </div>
+          </div>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-primary" onclick="saveAssignment()"><i class="bi bi-check2-circle me-1"></i>Save</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="clearAssignmentForm()"><i class="bi bi-x-circle me-1"></i>Clear</button>
+            <button class="btn btn-sm btn-outline-danger" id="btnDeleteAssignment" onclick="deleteAssignment()" disabled>
+              <i class="bi bi-trash3 me-1"></i>Delete
+            </button>
+          </div>
+          <div class="small mt-2" id="assignmentResult"></div>
+        </div>
+      </div>
+
+      <div class="card mb-3">
+        <div class="card-header"><i class="bi bi-filetype-csv me-2"></i>Load a CSV</div>
+        <div class="card-body py-3">
+          <div class="border border-2 border-dashed rounded p-3 mb-2 text-center" id="dropzone"
+               style="border-style: dashed !important; cursor: pointer;" onclick="document.getElementById('fileCsv').click()">
+            <i class="bi bi-cloud-arrow-up text-primary fs-4"></i>
+            <div class="small">Drop a CSV here, or click to choose one</div>
+          </div>
+          <input class="form-control form-control-sm d-none" type="file" id="fileCsv" accept=".csv,text/csv">
+          <div class="form-text">
+            Header: <code>Stream, Project Role, Name, Email, Environments</code>. Environments separated by
+            <code>;</code>. A row that cannot be read is named rather than dropped quietly.
+          </div>
+          <div class="small mt-2" id="importResult"></div>
+          <a href="/quality/security-groups/export.csv" class="btn btn-sm btn-outline-secondary mt-2">
+            <i class="bi bi-download me-1"></i>Export the mapping
+          </a>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><i class="bi bi-sliders me-2"></i>The rules that derive this</div>
+        <div class="card-body py-3 small">
+          <div class="mb-2">
+            <span class="badge bg-secondary me-1">Naming</span>
+            <code><%= rules.prefix %><%= rules.separator %>{STREAM}<%= rules.separator %>{ROLE}<%= rules.separator %>{ENV}</code>
+          </div>
+          <div class="mb-2">
+            <span class="badge bg-secondary me-1">Production</span>
+            Anyone who is not an administrator gets <strong>Viewer</strong> in PROD. Production is where a mistake costs
+            something, so building rights stop at the door.
+          </div>
+          <div class="mb-2">
+            <span class="badge bg-secondary me-1"><%= rules.prefix %>-CORP</span>
+            Central platform work is not scoped to one stream: ADMIN → Admin (All), PM → Viewer (All), everyone else →
+            Contributor (All).
+          </div>
+          <div>
+            <span class="badge bg-secondary me-1">Otherwise</span>
+            ADMIN → Admin, PM → Viewer, everyone else → Contributor.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── People → groups ── -->
+    <div class="col-lg-8">
+      <div class="card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span><i class="bi bi-table me-2"></i>People → Security Groups</span>
+          <input type="text" class="form-control form-control-sm" style="max-width:260px;"
+                 id="assignmentSearch" placeholder="Stream, role, name or group..." oninput="filterAssignments()">
+        </div>
+        <div class="table-responsive" style="max-height:420px;">
+          <table class="table table-sm table-hover mb-0" id="assignmentsTable">
+            <thead class="sticky-top"><tr>
+              <th>Stream</th><th>Role</th><th>Name</th><th>Envs</th><th>Security groups</th><th>Fabric roles</th><th></th>
+            </tr></thead>
+            <tbody>
+              <% if (!assignments.length) { %>
+                <tr><td colspan="7" class="text-muted small py-3">
+                  Nobody mapped yet. Add a person on the left, or load a CSV.
+                </td></tr>
+              <% } %>
+              <% assignments.forEach(function(row, index) { %>
+                <tr data-search="<%= [row.stream, row.projectRole, row.name, row.email || '', row.groups.join(' ')].join(' ').toLowerCase() %>">
+                  <td class="small"><span class="badge bg-light text-dark border"><%= row.stream %></span></td>
+                  <td class="small"><%= row.projectRole %></td>
+                  <td class="small">
+                    <strong><%= row.name %></strong>
+                    <% if (row.email) { %><div class="text-muted" style="font-size:0.7rem;"><%= row.email %></div><% } %>
+                  </td>
+                  <td class="small">
+                    <% row.environments.forEach(function(environment) { %>
+                      <span class="badge bg-light text-dark border me-1"><%= environment %></span>
+                    <% }) %>
+                  </td>
+                  <td class="small">
+                    <% row.groups.forEach(function(group) { %>
+                      <span class="badge bg-primary-subtle text-primary-emphasis border me-1"><%= group %></span>
+                    <% }) %>
+                  </td>
+                  <td class="small">
+                    <% row.fabricRoles.forEach(function(role) { %>
+                      <span class="badge bg-light text-dark border me-1"><%= role %></span>
+                    <% }) %>
+                  </td>
+                  <td class="text-nowrap">
+                    <button class="btn btn-sm btn-outline-secondary p-0 px-1" title="Edit"
+                            onclick="editAssignment(<%= index %>)"><i class="bi bi-pencil"></i></button>
+                    <button class="btn btn-sm btn-outline-primary p-0 px-1" title="Why these groups?"
+                            onclick="showJustification(<%= index %>)"><i class="bi bi-info-circle"></i></button>
+                  </td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+        <div class="card-footer small text-muted">
+          Groups and Fabric roles are <strong>derived</strong>, never stored: they follow from the stream, the role and
+          the environments, so changing a rule changes every row at once instead of leaving old rows contradicting it.
+        </div>
+      </div>
+
+      <!-- ── Groups → Entra ID → workspaces ── -->
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span><i class="bi bi-shield-lock me-2"></i>Groups, their Entra ID link and their workspaces</span>
+          <div class="d-flex gap-2 align-items-center flex-wrap">
+            <% if ((servicePrincipals || []).length) { %>
+              <select class="form-select form-select-sm" id="sgSpSelect" style="max-width:220px;">
+                <% servicePrincipals.forEach(function(sp) { %>
+                  <option value="<%= sp.id %>"><%= sp.name %></option>
+                <% }) %>
+              </select>
+              <button class="btn btn-sm btn-primary" id="verifyBtn" onclick="verifyGroups()">
+                <i class="bi bi-check2-square me-1"></i>Check the tenant
+              </button>
+            <% } %>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm mb-0" id="groupsTable">
+            <thead><tr>
+              <th>Suggested group</th><th>Fabric role</th><th class="text-end">Members</th>
+              <th>Entra ID group</th><th>Workspaces</th><th></th>
+            </tr></thead>
+            <tbody>
+              <% if (!groups.length) { %>
+                <tr><td colspan="6" class="text-muted small py-3">
+                  No groups yet. They appear as soon as somebody is assigned to a stream and role.
+                </td></tr>
+              <% } %>
+              <% groups.forEach(function(group) { %>
+                <tr>
+                  <td class="small">
+                    <code><%= group.suggestedName %></code>
+                    <div class="text-muted" style="font-size:0.7rem;">
+                      <%= group.stream %> · <%= group.projectRole %> · <%= group.environment %>
+                    </div>
+                  </td>
+                  <td class="small">
+                    <span class="badge bg-secondary"><%= group.fabricRole.label %></span>
+                  </td>
+                  <td class="text-end small">
+                    <% if (group.members.length) { %>
+                      <span class="badge bg-light text-dark border"
+                            title="<%= group.members.map(function(m) { return m.name; }).join(', ') %>">
+                        <%= group.members.length %>
+                      </span>
+                    <% } else { %>
+                      <span class="text-muted">0</span>
+                    <% } %>
+                  </td>
+                  <td class="small">
+                    <% if (group.entraGroupId) { %>
+                      <div>
+                        <i class="bi bi-check-circle text-success me-1"></i><strong><%= group.entraGroupName %></strong>
+                      </div>
+                      <div class="text-muted" style="font-size:0.7rem;"><%= group.entraGroupId %></div>
+                      <% if (group.entraGroupName !== group.suggestedName) { %>
+                        <span class="badge bg-warning text-dark" title="The directory name differs from the suggested one, which is normal and is why the link is stored">
+                          named differently
+                        </span>
+                      <% } %>
+                    <% } else { %>
+                      <span class="text-muted">Not linked</span>
+                    <% } %>
+                  </td>
+                  <td class="small">
+                    <% if (!group.workspaces.length) { %>
+                      <span class="text-muted">None attached</span>
+                    <% } %>
+                    <% group.workspaces.forEach(function(attachment) {
+                         var style = attachment.lastCheck ? checkStyles[attachment.lastCheck.state] : null;
+                    %>
+                      <div class="d-flex align-items-center gap-1 mb-1">
+                        <% if (style) { %>
+                          <i class="bi bi-<%= style.icon %> text-<%= style.color %>"
+                             title="<%= attachment.lastCheck.message %> (checked <%= new Date(attachment.lastCheck.checkedAt).toLocaleString() %>)"></i>
+                        <% } else { %>
+                          <i class="bi bi-dash-circle text-muted" title="Not checked yet"></i>
+                        <% } %>
+                        <span><%= attachment.workspaceName || attachment.workspaceId %></span>
+                        <span class="badge bg-light text-dark border"><%= attachment.intendedRole %></span>
+                        <button class="btn btn-sm btn-link text-danger p-0 px-1" title="Detach"
+                                onclick="detachWorkspace(<%= attachment.id %>)"><i class="bi bi-x"></i></button>
+                      </div>
+                    <% }) %>
+                  </td>
+                  <td class="text-nowrap">
+                    <button class="btn btn-sm btn-outline-primary p-0 px-1" title="Link the Entra ID group"
+                            onclick="openLinkModal(<%= group.id %>, <%- JSON.stringify(group.suggestedName) %>)">
+                      <i class="bi bi-link-45deg"></i>
+                    </button>
+                    <% if (group.entraGroupId) { %>
+                      <button class="btn btn-sm btn-outline-secondary p-0 px-1" title="Remove the link"
+                              onclick="unlinkGroup(<%= group.id %>)"><i class="bi bi-slash-circle"></i></button>
+                    <% } %>
+                    <button class="btn btn-sm btn-outline-primary p-0 px-1" title="Attach workspaces"
+                            onclick="openAttachModal(<%= group.id %>, <%- JSON.stringify(group.suggestedName) %>, <%- JSON.stringify(group.fabricRole.role) %>)">
+                      <i class="bi bi-collection"></i>
+                    </button>
+                  </td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+        <div class="card-footer small text-muted">
+          <strong>Check the tenant</strong> reads each attached workspace's role assignments and compares them against
+          this plan. The answers are kept apart: in the workspace, in it with the wrong role, absent, never linked, or
+          unreadable — the last two are not the tenant disagreeing with you.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Design guidance ═══════════════════════════════════════════════════════ -->
+<div class="tab-pane fade <%= tab === 'design' ? 'show active' : '' %>" id="tabDesign">
+
+  <div class="alert alert-light border">
+    <i class="bi bi-info-circle me-2"></i>
+    Nothing in this tab reads or changes your tenant. It produces a <strong>list of groups to create in Entra ID</strong>,
+    and the reasoning behind it. Once they exist, link them on the Mapping tab and
+    <a href="/settings/access/roles">grant them a role</a>.
+  </div>
+
+  <div class="row g-3 mb-4">
+    <% principles.forEach(function(principle, index) { %>
+      <div class="col-md-6">
+        <div class="card h-100">
+          <div class="card-body py-3">
+            <h6 class="mb-2"><span class="badge bg-primary me-2"><%= index + 1 %></span><%= principle.title %></h6>
+            <p class="small text-muted mb-0"><%= principle.body %></p>
+          </div>
+        </div>
+      </div>
+    <% }) %>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span><i class="bi bi-magic me-2"></i>The groups one domain needs</span>
+      <span class="small text-muted">A group per role per environment, named the same way every time</span>
+    </div>
+    <div class="card-body py-3">
+      <form method="get" action="/quality/security-groups" class="row g-2 align-items-end mb-3">
+        <input type="hidden" name="tab" value="design">
+        <div class="col-6 col-md-2">
+          <label class="form-label small" for="prefixInput">Prefix</label>
+          <input type="text" class="form-control form-control-sm" id="prefixInput" name="prefix" value="<%= plan.prefix %>" maxlength="24">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label small" for="domainInput">Domain or workspace set</label>
+          <input type="text" class="form-control form-control-sm" id="domainInput" name="domain" value="<%= plan.domain %>" maxlength="24" placeholder="FINANCE">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label small" for="environmentsInput">Environments</label>
+          <input type="text" class="form-control form-control-sm" id="environmentsInput" name="environments" value="<%= plan.environments.join(',') %>" placeholder="DEV,TEST,PROD">
+        </div>
+        <div class="col-6 col-md-2">
+          <label class="form-label small" for="separatorInput">Separator</label>
+          <input type="text" class="form-control form-control-sm" id="separatorInput" name="separator" value="<%= plan.separator %>" maxlength="3">
+        </div>
+        <div class="col-6 col-md-2">
+          <button type="submit" class="btn btn-sm btn-primary w-100"><i class="bi bi-arrow-repeat me-1"></i>Generate</button>
+        </div>
+      </form>
+
+      <div class="table-responsive">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Group</th><th>Role</th><th>Who belongs in it</th><th>What to assign it to</th></tr></thead>
+          <tbody>
+            <% plan.groups.forEach(function(group) { %>
+              <tr>
+                <td class="small"><code><%= group.name %></code></td>
+                <td class="small">
+                  <% if (group.role) { %><span class="badge bg-secondary"><%= group.role %></span><% } else { %>
+                    <span class="text-muted">—</span>
+                  <% } %>
+                </td>
+                <td class="small text-muted"><%= group.holds %></td>
+                <td class="small text-muted"><%= group.assignTo %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="d-flex gap-2 align-items-center flex-wrap mt-3">
+        <button class="btn btn-sm btn-outline-secondary" type="button" onclick="copyGroupNames(this)">
+          <i class="bi bi-clipboard me-1"></i>Copy the names
+        </button>
+        <span class="small text-muted">
+          <%= plan.groups.length %> group(s). Create them in Entra ID as <strong>security</strong> groups, then link
+          them on the Mapping tab.
+        </span>
+      </div>
+      <pre class="d-none" id="groupNames"><%= plan.groups.map(function(g) { return g.name; }).join('\n') %></pre>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header"><i class="bi bi-shield-lock me-2"></i>The four workspace roles, as groups</div>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Role</th><th>Who belongs in the group</th><th>What it grants</th><th>Guidance</th></tr></thead>
+        <tbody>
+          <% roleGroups.forEach(function(role) { %>
+            <tr>
+              <td class="small"><span class="badge bg-secondary"><%= role.role %></span></td>
+              <td class="small"><%= role.holds %></td>
+              <td class="small text-muted"><%= role.grants %></td>
+              <td class="small text-muted"><%= role.guidance %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header"><i class="bi bi-building me-2"></i>Groups the tenant needs once, not per workspace</div>
+    <ul class="list-group list-group-flush">
+      <% tenantGroups.forEach(function(group) { %>
+        <li class="list-group-item py-3">
+          <div class="fw-semibold small"><%= group.name %></div>
+          <div class="small text-muted"><%= group.purpose %></div>
+          <div class="small mt-1"><i class="bi bi-people me-1"></i><%= group.holds %></div>
+        </li>
+      <% }) %>
+    </ul>
+    <div class="card-footer small text-muted">
+      The service principal group is the one this application depends on: without a security group holding it, the
+      tenant setting allowing service principals to use the Fabric APIs cannot be applied to it, and every scan fails at
+      authentication. See the prerequisites on the <a href="/">home page</a>.
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header"><i class="bi bi-exclamation-triangle me-2"></i>What goes wrong</div>
+    <ul class="list-group list-group-flush">
+      <% antiPatterns.forEach(function(pattern) { %>
+        <li class="list-group-item py-3">
+          <div class="fw-semibold small text-warning-emphasis"><%= pattern.title %></div>
+          <div class="small text-muted"><%= pattern.body %></div>
+        </li>
+      <% }) %>
+    </ul>
+  </div>
+
+  <div class="small text-muted mb-4">
+    Written for this application, following the approach set out at
+    <a href="<%= sourceUrl %>" target="_blank" rel="noopener"><%= sourceUrl %></a>. The specifics of what a role permits
+    are Microsoft's to define and change; what is here is how to organise around them.
+  </div>
+</div>
+</div>
+
+<!-- ── Why this person is in these groups ── -->
+<div class="modal fade" id="justificationModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="justificationTitle">Why these groups</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <div class="fw-semibold small mb-1">Person</div>
+          <div id="justificationPerson" class="font-monospace small">—</div>
+          <div id="justificationWhy" class="small text-muted mt-2">—</div>
+        </div>
+        <div>
+          <div class="fw-semibold small mb-1">Groups</div>
+          <div id="justificationGroups" class="font-monospace small">—</div>
+          <div id="justificationGroupWhy" class="small text-muted mt-2">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Link a directory group ── -->
+<div class="modal fade" id="linkGroupModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Link <span id="linkGroupName" class="font-monospace"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted">
+          The suggested name and the group that exists often differ — somebody created it before the convention, or the
+          directory has its own. Linking stores which one this is, so the check looks for the right object rather than
+          reporting every group missing.
+        </p>
+        <input type="text" class="form-control form-control-sm mb-2" id="linkSearch"
+               placeholder="Search Entra ID groups..." oninput="onLinkSearchInput()">
+        <div class="list-group list-group-flush border rounded d-none"
+             style="max-height:280px; overflow-y:auto;" id="linkResults"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Attach workspaces ── -->
+<div class="modal fade" id="attachModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Attach workspaces to <span id="attachGroupName" class="font-monospace"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-2 align-items-end mb-2">
+          <div class="col-md-6">
+            <label class="form-label small" for="attachFilter">Filter</label>
+            <input type="text" class="form-control form-control-sm" id="attachFilter"
+                   placeholder="Workspace name..." oninput="renderAttachList()">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small" for="attachRole">Role the group should hold</label>
+            <select class="form-select form-select-sm" id="attachRole">
+              <% fabricRoles.forEach(function(role) { %>
+                <option value="<%= role %>"><%= role %></option>
+              <% }) %>
+            </select>
+          </div>
+        </div>
+        <div class="border rounded p-2" style="max-height:320px; overflow-y:auto;" id="attachList">
+          <div class="small text-muted">Loading workspaces...</div>
+        </div>
+        <div class="form-text">
+          Workspaces come from the last completed scan — attaching is planning, so it does not need a live call.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <span class="small text-muted me-auto" id="attachCount">0 selected</span>
+        <button class="btn btn-sm btn-primary" id="attachBtn" onclick="attachWorkspaces()" disabled>Attach</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+var assignmentRows = <%- JSON.stringify(assignments || []) %>;
+var checkStyles = <%- JSON.stringify(checkStyles) %>;
+var linkTargetId = null;
+var attachTargetId = null;
+var attachWorkspacesAll = [];
+var attachSelected = new Set();
+var linkSearchTimer = null;
+
+function esc(value) { var d = document.createElement('div'); d.textContent = value == null ? '' : value; return d.innerHTML; }
+function sgSpId() {
+  var select = document.getElementById('sgSpSelect');
+  return select ? select.value : '';
+}
+
+async function postJsonTo(url, payload) {
+  var resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload || {}),
+  });
+  return resp.json();
+}
+
+// ── People ──
+function clearAssignmentForm() {
+  document.getElementById('assignmentId').value = '';
+  document.getElementById('inpStream').value = '';
+  document.getElementById('inpRole').value = 'DE';
+  document.getElementById('inpName').value = '';
+  document.getElementById('inpEmail').value = '';
+  document.querySelectorAll('.env-check').forEach(function(box) { box.checked = box.value === 'DEV'; });
+  document.getElementById('modeBadge').textContent = 'Add';
+  document.getElementById('modeBadge').className = 'badge bg-light text-dark border';
+  document.getElementById('btnDeleteAssignment').disabled = true;
+  document.getElementById('assignmentResult').innerHTML = '';
+}
+
+function editAssignment(index) {
+  var row = assignmentRows[index];
+  if (!row) return;
+  document.getElementById('assignmentId').value = row.id;
+  document.getElementById('inpStream').value = row.stream;
+  document.getElementById('inpRole').value = row.projectRole;
+  document.getElementById('inpName').value = row.name;
+  document.getElementById('inpEmail').value = row.email || '';
+  document.querySelectorAll('.env-check').forEach(function(box) {
+    box.checked = (row.environments || []).indexOf(box.value) !== -1;
+  });
+  document.getElementById('modeBadge').textContent = 'Edit';
+  document.getElementById('modeBadge').className = 'badge bg-warning text-dark';
+  document.getElementById('btnDeleteAssignment').disabled = false;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function saveAssignment() {
+  var environments = [];
+  document.querySelectorAll('.env-check').forEach(function(box) { if (box.checked) environments.push(box.value); });
+
+  var result = document.getElementById('assignmentResult');
+  result.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Saving...';
+
+  var data = await postJsonTo('/quality/security-groups/assignments', {
+    stream: document.getElementById('inpStream').value,
+    projectRole: document.getElementById('inpRole').value,
+    name: document.getElementById('inpName').value,
+    email: document.getElementById('inpEmail').value,
+    environments: environments,
+  });
+
+  if (!data.success) {
+    result.innerHTML = '<span class="text-danger">' + esc(data.message) + '</span>';
+    return;
+  }
+  // Reloaded rather than patched in: the groups, their members and the derived
+  // roles all move with one assignment, and patching five places by hand is how
+  // the screen starts disagreeing with the database.
+  window.location.reload();
+}
+
+async function deleteAssignment() {
+  var id = document.getElementById('assignmentId').value;
+  if (!id) return;
+  showConfirmAction({
+    title: 'Remove this person',
+    message: 'Remove this assignment? The groups it implies stay, along with anything attached to them.',
+    confirmText: 'Remove',
+    confirmClass: 'btn-danger',
+    onConfirm: async function() {
+      var data = await postJsonTo('/quality/security-groups/assignments/' + encodeURIComponent(id) + '/delete', {});
+      if (!data.success) { showToast(data.message, 'error'); return; }
+      window.location.reload();
+    },
+  });
+}
+
+function filterAssignments() {
+  var needle = document.getElementById('assignmentSearch').value.trim().toLowerCase();
+  document.querySelectorAll('#assignmentsTable tbody tr').forEach(function(row) {
+    if (!row.hasAttribute('data-search')) return;
+    row.style.display = !needle || row.getAttribute('data-search').indexOf(needle) !== -1 ? '' : 'none';
+  });
+}
+
+function showJustification(index) {
+  var row = assignmentRows[index];
+  if (!row) return;
+  document.getElementById('justificationTitle').textContent = 'Why these groups: ' + row.name;
+  document.getElementById('justificationPerson').textContent =
+    row.name + ' • ' + row.stream + '/' + row.projectRole + ' • ' + (row.environments || []).join(', ');
+  document.getElementById('justificationWhy').textContent = row.justification || '';
+  document.getElementById('justificationGroups').textContent = (row.groups || []).join('  ');
+  document.getElementById('justificationGroupWhy').textContent = row.groupJustification || '';
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('justificationModal')).show();
+}
+
+// ── CSV ──
+function readCsvFile(file) {
+  var result = document.getElementById('importResult');
+  var reader = new FileReader();
+  reader.onload = async function() {
+    result.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Importing...';
+    var data = await postJsonTo('/quality/security-groups/import', { csv: String(reader.result || '') });
+    if (!data.success) {
+      result.innerHTML = '<span class="text-danger">' + esc(data.message) + '</span>';
+      return;
+    }
+    // Rows that could not be read are named. An import that silently drops eleven
+    // of forty rows produces an access model wrong in a way nobody looks for.
+    var notes = (data.skipped || []).concat(data.failed || []);
+    if (notes.length) {
+      sessionStorage.setItem('sgImportNotes', JSON.stringify({ imported: data.imported, notes: notes }));
+    }
+    window.location.reload();
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
+// ── Linking a directory group ──
+function openLinkModal(groupId, suggestedName) {
+  linkTargetId = groupId;
+  document.getElementById('linkGroupName').textContent = suggestedName;
+  document.getElementById('linkSearch').value = suggestedName;
+  document.getElementById('linkResults').classList.add('d-none');
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('linkGroupModal')).show();
+  searchDirectoryGroups();
+}
+
+function onLinkSearchInput() {
+  clearTimeout(linkSearchTimer);
+  linkSearchTimer = setTimeout(searchDirectoryGroups, 350);
+}
+
+async function searchDirectoryGroups() {
+  var query = document.getElementById('linkSearch').value.trim();
+  var results = document.getElementById('linkResults');
+  if (query.length < 2) { results.classList.add('d-none'); return; }
+
+  results.classList.remove('d-none');
+  results.innerHTML = '<div class="list-group-item small">'
+    + '<span class="spinner-border spinner-border-sm me-1"></span>Searching Entra ID...</div>';
+
+  try {
+    // The same search the role granting page uses — one endpoint for one question.
+    var resp = await fetch('/settings/access/roles/entra/search?type=Group&q='
+      + encodeURIComponent(query) + '&spId=' + encodeURIComponent(sgSpId()));
+    var data = await resp.json();
+    if (!data.success) {
+      results.innerHTML = '<div class="list-group-item small text-danger">' + esc(data.message) + '</div>';
+      return;
+    }
+    if (!(data.results || []).length) {
+      results.innerHTML = '<div class="list-group-item small text-muted">Nothing found. '
+        + 'Search matches the start of the name.</div>';
+      return;
+    }
+    window.__linkResults = data.results;
+    results.innerHTML = data.results.map(function(item, index) {
+      return '<button type="button" class="list-group-item list-group-item-action py-2" onclick="chooseDirectoryGroup(' + index + ')">'
+        + '<span class="small"><strong>' + esc(item.displayName) + '</strong></span>'
+        + (item.detail ? '<span class="small text-muted ms-2">' + esc(item.detail) + '</span>' : '')
+        + (item.warning ? '<span class="badge bg-warning text-dark ms-2">' + esc(item.warning) + '</span>' : '')
+        + '</button>';
+    }).join('');
+  } catch (e) {
+    results.innerHTML = '<div class="list-group-item small text-danger">' + esc(e.message) + '</div>';
+  }
+}
+
+async function chooseDirectoryGroup(index) {
+  var chosen = (window.__linkResults || [])[index];
+  if (!chosen || !linkTargetId) return;
+  var data = await postJsonTo('/quality/security-groups/groups/' + encodeURIComponent(linkTargetId) + '/link', {
+    id: chosen.id, displayName: chosen.displayName, groupType: chosen.detail,
+  });
+  if (!data.success) { showToast(data.message, 'error'); return; }
+  window.location.reload();
+}
+
+async function unlinkGroup(groupId) {
+  var data = await postJsonTo('/quality/security-groups/groups/' + encodeURIComponent(groupId) + '/unlink', {});
+  if (!data.success) { showToast(data.message, 'error'); return; }
+  window.location.reload();
+}
+
+// ── Attaching workspaces ──
+async function openAttachModal(groupId, suggestedName, defaultRole) {
+  attachTargetId = groupId;
+  attachSelected = new Set();
+  document.getElementById('attachGroupName').textContent = suggestedName;
+  document.getElementById('attachFilter').value = '';
+  if (defaultRole) document.getElementById('attachRole').value = defaultRole;
+  document.getElementById('attachList').innerHTML = '<div class="small text-muted">Loading workspaces...</div>';
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('attachModal')).show();
+
+  try {
+    var resp = await fetch('/quality/security-groups/workspaces');
+    var data = await resp.json();
+    if (!data.success) {
+      document.getElementById('attachList').innerHTML = '<div class="small text-danger">' + esc(data.message) + '</div>';
+      return;
+    }
+    attachWorkspacesAll = data.workspaces || [];
+    renderAttachList();
+  } catch (e) {
+    document.getElementById('attachList').innerHTML = '<div class="small text-danger">' + esc(e.message) + '</div>';
+  }
+}
+
+function renderAttachList() {
+  var list = document.getElementById('attachList');
+  if (!attachWorkspacesAll.length) {
+    list.innerHTML = '<div class="small text-muted">No workspaces yet — run an analysis first.</div>';
+    return;
+  }
+  var needle = (document.getElementById('attachFilter').value || '').trim().toLowerCase();
+  var shown = attachWorkspacesAll.filter(function(ws) {
+    return !needle || (ws.name || '').toLowerCase().indexOf(needle) !== -1;
+  });
+
+  list.innerHTML = shown.map(function(ws) {
+    return '<div class="form-check">'
+      + '<input class="form-check-input attach-cb" type="checkbox" value="' + esc(ws.id) + '" id="att-' + esc(ws.id) + '"'
+      + (attachSelected.has(ws.id) ? ' checked' : '') + ' onchange="onAttachToggled(this)">'
+      + '<label class="form-check-label small" for="att-' + esc(ws.id) + '">' + esc(ws.name) + '</label></div>';
+  }).join('') || '<div class="small text-muted">Nothing matches that filter.</div>';
+  updateAttachCount();
+}
+
+function onAttachToggled(input) {
+  // Held in a Set rather than read off the DOM, so a selection survives filtering.
+  if (input.checked) attachSelected.add(input.value);
+  else attachSelected.delete(input.value);
+  updateAttachCount();
+}
+
+function updateAttachCount() {
+  document.getElementById('attachCount').textContent = attachSelected.size + ' selected';
+  document.getElementById('attachBtn').disabled = attachSelected.size === 0;
+}
+
+async function attachWorkspaces() {
+  if (!attachTargetId || !attachSelected.size) return;
+  var byId = {};
+  attachWorkspacesAll.forEach(function(ws) { byId[ws.id] = ws.name; });
+
+  var data = await postJsonTo('/quality/security-groups/groups/' + encodeURIComponent(attachTargetId) + '/workspaces', {
+    intendedRole: document.getElementById('attachRole').value,
+    workspaces: Array.from(attachSelected).map(function(id) { return { id: id, name: byId[id] || null }; }),
+  });
+  if (!data.success) { showToast(data.message, 'error'); return; }
+  window.location.reload();
+}
+
+async function detachWorkspace(attachmentId) {
+  var data = await postJsonTo('/quality/security-groups/attachments/' + encodeURIComponent(attachmentId) + '/detach', {});
+  if (!data.success) { showToast(data.message, 'error'); return; }
+  window.location.reload();
+}
+
+// ── Does the tenant agree? ──
+async function verifyGroups() {
+  var button = document.getElementById('verifyBtn');
+  button.disabled = true;
+  button.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Reading workspaces...';
+
+  try {
+    var data = await postJsonTo('/quality/security-groups/verify', { spId: sgSpId() });
+    if (!data.success) { showToast(data.message, 'error'); return; }
+
+    var summary = data.summary || {};
+    document.getElementById('verifyActionable').textContent = summary.actionable || 0;
+    document.getElementById('verifyCheckedAt').textContent =
+      summary.present + ' correct · ' + summary.missing + ' missing · ' + summary['wrong-role'] + ' wrong role'
+      + (summary.unlinked ? ' · ' + summary.unlinked + ' unlinked' : '')
+      + (summary.unreadable ? ' · ' + summary.unreadable + ' unreadable' : '');
+    document.getElementById('verifySummaryCard').className =
+      'card h-100 ' + (summary.actionable ? 'border-danger' : 'border-success');
+
+    showToast(data.results.length
+      ? 'Checked ' + data.results.length + ' attachment(s) across ' + data.workspacesRead + ' workspace(s).'
+      : 'Nothing to check yet — attach a group to a workspace first.',
+      summary.actionable ? 'info' : 'success');
+
+    // Reloaded so every row shows its own answer rather than only the totals.
+    if (data.results.length) setTimeout(function() { window.location.reload(); }, 900);
+  } catch (e) {
+    showToast(e.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.innerHTML = '<i class="bi bi-check2-square me-1"></i>Check the tenant';
+  }
+}
+
+// ── Design tab ──
+function copyGroupNames(button) {
+  var text = document.getElementById('groupNames').textContent;
+  function done() {
+    var original = button.innerHTML;
+    button.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied';
+    setTimeout(function() { button.innerHTML = original; }, 1500);
+  }
+  function fallback() {
+    // The clipboard API is unavailable over plain HTTP, which is how this runs
+    // locally — the fallback is what makes the button work there.
+    var area = document.createElement('textarea');
+    area.value = text;
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand('copy'); done(); } catch (e) { showToast('Could not copy: ' + e.message, 'error'); }
+    document.body.removeChild(area);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(fallback);
+  } else {
+    fallback();
+  }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  var file = document.getElementById('fileCsv');
+  if (file) {
+    file.addEventListener('change', function(event) {
+      var chosen = event.target.files && event.target.files[0];
+      if (chosen) readCsvFile(chosen);
+    });
+  }
+
+  var dropzone = document.getElementById('dropzone');
+  if (dropzone) {
+    ['dragenter', 'dragover'].forEach(function(name) {
+      dropzone.addEventListener(name, function(event) {
+        event.preventDefault();
+        dropzone.classList.add('border-primary');
+      });
+    });
+    ['dragleave', 'drop'].forEach(function(name) {
+      dropzone.addEventListener(name, function(event) {
+        event.preventDefault();
+        dropzone.classList.remove('border-primary');
+      });
+    });
+    dropzone.addEventListener('drop', function(event) {
+      var dropped = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+      if (dropped) readCsvFile(dropped);
+    });
+  }
+
+  // An import's rejected rows survive the reload that shows the imported ones.
+  var stored = sessionStorage.getItem('sgImportNotes');
+  if (stored) {
+    sessionStorage.removeItem('sgImportNotes');
+    try {
+      var parsed = JSON.parse(stored);
+      document.getElementById('importResult').innerHTML =
+        '<div class="text-success">' + parsed.imported + ' row(s) imported.</div>'
+        + '<ul class="mb-0 ps-3">' + parsed.notes.slice(0, 12).map(function(note) {
+            return '<li class="text-warning-emphasis">'
+              + (note.line ? 'Line ' + note.line + ': ' : '') + esc(note.reason) + '</li>';
+          }).join('') + '</ul>';
+    } catch (e) { /* a malformed stash is not worth a message */ }
+  }
+});
+</script>
+
+<%- include('../partials/footer') %>

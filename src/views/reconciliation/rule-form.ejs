@@ -1,0 +1,486 @@
+<%- include('../partials/header') %>
+<%
+  var isNew = !rule;
+  var r = rule || {};
+  var compareFields = r.compareFields || [];
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-pencil-square me-2"></i><%= isNew ? 'New Reconciliation Rule' : r.name %></h2>
+    <p class="text-muted mb-0">
+      <% if (isNew) { %>Define which records must agree between two systems, and what counts as agreement.
+      <% } else { %>Version <%= r.version %> · <span class="badge bg-<%= r.status === 'active' ? 'success' : r.status === 'draft' ? 'secondary' : 'dark' %>"><%= r.status %></span><% } %>
+    </p>
+  </div>
+  <a href="/reconciliation/rules" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+</div>
+
+<% if (!sources.length) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-exclamation-triangle me-2"></i>No sources registered yet.
+    <a href="/quality/sources">Register the two systems</a> you want to compare first.
+  </div>
+<% } %>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-info-circle me-2"></i>Purpose and Ownership</div>
+  <div class="card-body py-3">
+    <div class="row g-2">
+      <div class="col-md-6">
+        <label class="form-label small" for="ruleName">Rule name</label>
+        <input type="text" class="form-control form-control-sm" id="ruleName" value="<%= r.name || '' %>" placeholder="Invoice Reconciliation between ERP and Reporting Platform">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="businessArea">Business area</label>
+        <input type="text" class="form-control form-control-sm" id="businessArea" value="<%= r.business_area || '' %>" placeholder="Finance">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="owner">Business owner</label>
+        <input type="text" class="form-control form-control-sm" id="owner" value="<%= r.owner || '' %>" placeholder="name@company.com">
+      </div>
+      <div class="col-md-6">
+        <label class="form-label small" for="description">Business purpose</label>
+        <input type="text" class="form-control form-control-sm" id="description" value="<%= r.description || '' %>" placeholder="Confirm that all invoices processed in the ERP are available for financial reporting.">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="ruleGroup">Group of rules</label>
+        <select class="form-select form-select-sm" id="ruleGroup" onchange="describeGroup()">
+          <% ruleGroupDefs.forEach(function(g) { %>
+            <option value="<%= g.key %>" <%= (r.rule_group || 'ungrouped') === g.key ? 'selected' : '' %>><%= g.label %></option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="priority">Priority</label>
+        <select class="form-select form-select-sm" id="priority">
+          <% ['high','medium','low'].forEach(function(p) { %>
+            <option value="<%= p %>" <%= (r.priority || 'medium') === p ? 'selected' : '' %>><%= p %></option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-12">
+        <div class="form-text" id="groupHelp"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-arrow-left-right me-2"></i>Datasets and Business Key</div>
+  <div class="card-body py-3">
+    <div class="row g-3">
+      <div class="col-md-6">
+        <div class="fw-bold small mb-2">Source A</div>
+        <label class="form-label small" for="sourceA">System</label>
+        <select class="form-select form-select-sm mb-2" id="sourceA" onchange="loadDatasets('A')">
+          <option value="">Select...</option>
+          <% sources.forEach(function(s) { %>
+            <option value="<%= s.id %>" <%= String(r.source_a_id) === String(s.id) ? 'selected' : '' %>><%= s.system_label ? s.system_label + ' — ' : '' %><%= s.name %></option>
+          <% }) %>
+        </select>
+        <label class="form-label small" for="datasetFilterA">Dataset</label>
+        <div class="input-group input-group-sm mb-1">
+          <span class="input-group-text"><i class="bi bi-search"></i></span>
+          <input type="text" class="form-control" id="datasetFilterA" placeholder="Filter by schema or table"
+                 oninput="renderDatasetOptions('A')" disabled>
+        </div>
+        <select class="form-select form-select-sm mb-1" id="datasetA" onchange="loadFields('A')"><option value="">Select a system first</option></select>
+        <div class="form-text mb-2" id="datasetCountA"></div>
+        <label class="form-label small" for="keyFieldA">Business key field</label>
+        <select class="form-select form-select-sm" id="keyFieldA"><option value="">Select a dataset first</option></select>
+      </div>
+      <div class="col-md-6">
+        <div class="fw-bold small mb-2">Source B</div>
+        <label class="form-label small" for="sourceB">System</label>
+        <select class="form-select form-select-sm mb-2" id="sourceB" onchange="loadDatasets('B')">
+          <option value="">Select...</option>
+          <% sources.forEach(function(s) { %>
+            <option value="<%= s.id %>" <%= String(r.source_b_id) === String(s.id) ? 'selected' : '' %>><%= s.system_label ? s.system_label + ' — ' : '' %><%= s.name %></option>
+          <% }) %>
+        </select>
+        <label class="form-label small" for="datasetFilterB">Dataset</label>
+        <div class="input-group input-group-sm mb-1">
+          <span class="input-group-text"><i class="bi bi-search"></i></span>
+          <input type="text" class="form-control" id="datasetFilterB" placeholder="Filter by schema or table"
+                 oninput="renderDatasetOptions('B')" disabled>
+        </div>
+        <select class="form-select form-select-sm mb-1" id="datasetB" onchange="loadFields('B')"><option value="">Select a system first</option></select>
+        <div class="form-text mb-2" id="datasetCountB"></div>
+        <label class="form-label small" for="keyFieldB">Business key field</label>
+        <select class="form-select form-select-sm" id="keyFieldB"><option value="">Select a dataset first</option></select>
+      </div>
+    </div>
+    <div class="form-text mt-2"><i class="bi bi-info-circle me-1"></i>The business key identifies corresponding records — Invoice Number, Customer ID, Order Number, Employee ID.</div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span><i class="bi bi-check2-square me-2"></i>Values to Compare</span>
+    <button class="btn btn-sm btn-outline-primary" onclick="addCompareField()"><i class="bi bi-plus me-1"></i>Add value</button>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0" id="compareFieldsTable">
+      <thead><tr><th>Label</th><th style="min-width:210px;">Source A</th><th style="min-width:210px;">Source B</th><th>Type</th><th>Tolerance</th><th></th></tr></thead>
+      <tbody id="compareFieldsBody"></tbody>
+    </table>
+  </div>
+  <div class="card-footer small text-muted">
+    <div id="aggregateWarning" class="mb-2"></div>
+    Each side can be a <strong>field</strong>, a <strong>SQL expression</strong> evaluated by that source
+    (<code>TRIM(Customer)</code>, <code>CASE WHEN Status = 1 THEN 'Posted' ELSE 'Draft' END</code>), a
+    fixed <strong>value</strong> to check a column against, or an <strong>aggregate</strong>.<br>
+    An aggregate compares systems held at different grains: an analytical ledger with one row per posting
+    against a synthetic balance with one row per account is <code>Sum of Amount</code> on the left and the plain
+    <code>Amount</code> field on the right, with <em>Account</em> as the business key. The side that aggregates is
+    grouped by the key by the source database, so only one row per key comes back and duplicates on that side
+    cannot arise. Every value read from that side must then aggregate as well.<br>
+    Tolerance accepts differences the business has agreed are immaterial — a rounding difference on tax, or a date that may land a day either side.
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-shield-exclamation me-2"></i>Handling Imperfect Data</div>
+  <div class="card-body py-3">
+    <div class="row g-2">
+      <div class="col-md-4">
+        <label class="form-label small" for="duplicateHandling">Duplicate business keys</label>
+        <select class="form-select form-select-sm" id="duplicateHandling">
+          <option value="exception" <%= (r.duplicate_handling || 'exception') === 'exception' ? 'selected' : '' %>>Raise an exception</option>
+          <option value="first" <%= r.duplicate_handling === 'first' ? 'selected' : '' %>>Compare the first record</option>
+          <option value="ignore" <%= r.duplicate_handling === 'ignore' ? 'selected' : '' %>>Ignore duplicated keys</option>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small" for="incompleteKeyHandling">Missing or invalid keys</label>
+        <select class="form-select form-select-sm" id="incompleteKeyHandling">
+          <option value="exception" <%= (r.incomplete_key_handling || 'exception') === 'exception' ? 'selected' : '' %>>Raise an exception</option>
+          <option value="ignore" <%= r.incomplete_key_handling === 'ignore' ? 'selected' : '' %>>Ignore those records</option>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small" for="rowLimit">Row limit per source (optional)</label>
+        <input type="number" min="1" class="form-control form-control-sm" id="rowLimit" value="<%= r.row_limit || '' %>" placeholder="all rows">
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="d-flex gap-2 mb-4">
+  <button class="btn btn-primary" onclick="saveRule()"><i class="bi bi-save me-1"></i><%= isNew ? 'Create as draft' : 'Save new version' %></button>
+  <% if (!isNew) { %>
+    <input type="text" class="form-control form-control-sm" style="max-width:320px;" id="changeNote" placeholder="What changed and why (recorded for audit)">
+  <% } %>
+</div>
+
+<% if (!isNew && versions.length) { %>
+  <div class="card mb-4">
+    <div class="card-header"><i class="bi bi-clock-history me-2"></i>Change History</div>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Version</th><th>Change</th><th>By</th><th>When</th></tr></thead>
+        <tbody>
+          <% versions.forEach(function(v) { %>
+            <tr>
+              <td>v<%= v.version %></td>
+              <td class="small"><%= v.change_note || '-' %></td>
+              <td class="small"><%= v.changed_by || '-' %></td>
+              <td class="small"><%= v.changed_at ? new Date(v.changed_at).toLocaleString() : '-' %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+<% } %>
+
+<script>
+var ruleId = <%= isNew ? 'null' : r.id %>;
+var savedFields = <%- JSON.stringify(compareFields) %>;
+var saved = {
+  datasetA: <%- JSON.stringify(r.dataset_a || '') %>,
+  datasetB: <%- JSON.stringify(r.dataset_b || '') %>,
+  keyFieldA: <%- JSON.stringify(r.key_field_a || '') %>,
+  keyFieldB: <%- JSON.stringify(r.key_field_b || '') %>
+};
+var datasetsBySide = { A: [], B: [] };
+var aggregateDefs = <%- JSON.stringify(aggregateDefs.map(function(d) { return { key: d.key, label: d.label }; })) %>;
+var ruleGroupDefs = <%- JSON.stringify(ruleGroupDefs) %>;
+
+// Rules saved before expressions and constants existed carry plain fieldA/fieldB.
+savedFields = savedFields.map(function(f) {
+  return {
+    label: f.label || '',
+    a: f.a || { kind: 'field', value: f.fieldA || '' },
+    b: f.b || { kind: 'field', value: f.fieldB || '' },
+    type: f.type || 'string',
+    tolerance: f.tolerance || null
+  };
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+  renderCompareFields();
+  describeGroup();
+  ['A', 'B'].forEach(function(side) { if (document.getElementById('source' + side).value) loadDatasets(side, true); });
+});
+
+async function loadDatasets(side, restore) {
+  var sourceId = document.getElementById('source' + side).value;
+  var datasetSelect = document.getElementById('dataset' + side);
+  if (!sourceId) { datasetSelect.innerHTML = '<option value="">Select a system first</option>'; return; }
+
+  datasetSelect.innerHTML = '<option value="">Loading...</option>';
+  try {
+    var resp = await fetch('/quality/sources/' + sourceId + '/datasets');
+    var data = await resp.json();
+    if (!data.success) { datasetSelect.innerHTML = '<option value="">' + (data.message || 'Failed') + '</option>'; return; }
+    datasetsBySide[side] = data.datasets || [];
+    if (!datasetsBySide[side].length) {
+      datasetSelect.innerHTML = '<option value="">' + (data.message || 'No datasets') + '</option>';
+      return;
+    }
+    document.getElementById('datasetFilter' + side).disabled = false;
+    renderDatasetOptions(side, restore ? saved['dataset' + side] : '');
+    if (restore && saved['dataset' + side]) loadFields(side, true);
+  } catch (e) {
+    datasetSelect.innerHTML = '<option value="">' + e.message + '</option>';
+  }
+}
+
+/**
+ * Draws the dataset list, narrowed by whatever has been typed.
+ *
+ * A warehouse with several hundred tables is a list nobody can scroll, and the
+ * name that matters is usually known — the filter matches anywhere in
+ * "schema.table", so typing "sales" finds dbo.SalesOrder and Sales.Header alike.
+ * The selection is kept when it still matches, so filtering never silently
+ * changes which dataset the rule reads.
+ */
+function renderDatasetOptions(side, preferred) {
+  var select = document.getElementById('dataset' + side);
+  var all = datasetsBySide[side] || [];
+  var current = preferred !== undefined ? preferred : select.value;
+  var needle = (document.getElementById('datasetFilter' + side).value || '').trim().toLowerCase();
+
+  var matches = needle
+    ? all.filter(function(ds) { return String(ds.name || '').toLowerCase().indexOf(needle) !== -1; })
+    : all;
+
+  // A dataset already chosen stays selectable even when it falls outside the
+  // filter, so the form never loses a saved rule's dataset behind a stray keystroke.
+  if (current && !matches.some(function(ds) { return ds.name === current; })) {
+    var chosen = all.filter(function(ds) { return ds.name === current; });
+    matches = chosen.concat(matches);
+  }
+
+  select.innerHTML = '<option value="">Select...</option>' + matches.map(function(ds) {
+    return '<option value="' + escapeAttr(ds.name) + '"' + (ds.name === current ? ' selected' : '') + '>' +
+      escapeAttr(ds.name) + (ds.kind ? ' (' + escapeAttr(ds.kind) + ')' : '') + '</option>';
+  }).join('');
+
+  var count = document.getElementById('datasetCount' + side);
+  count.textContent = needle
+    ? matches.length + ' of ' + all.length + ' matching "' + needle + '"'
+    : all.length + ' dataset(s)';
+}
+
+function fieldsFor(side) {
+  var name = document.getElementById('dataset' + side).value;
+  var dataset = datasetsBySide[side].find(function(ds) { return ds.name === name; });
+  return dataset ? dataset.fields : [];
+}
+
+function loadFields(side, restore) {
+  var fields = fieldsFor(side);
+  var keySelect = document.getElementById('keyField' + side);
+  var target = restore ? saved['keyField' + side] : '';
+  keySelect.innerHTML = '<option value="">Select...</option>' + fields.map(function(f) {
+    return '<option value="' + f.name + '"' + (f.name === target ? ' selected' : '') + '>' + f.name + ' (' + f.dataType + ')</option>';
+  }).join('');
+  renderCompareFields();
+}
+
+function fieldOptions(side, selected) {
+  var fields = fieldsFor(side);
+  if (!fields.length) return '<option value="' + (selected || '') + '">' + (selected || 'select a dataset') + '</option>';
+  return '<option value="">Select...</option>' + fields.map(function(f) {
+    return '<option value="' + f.name + '"' + (f.name === selected ? ' selected' : '') + '>' + f.name + '</option>';
+  }).join('');
+}
+
+function operandCell(index, side) {
+  var field = savedFields[index];
+  var operand = field[side] || { kind: 'field', value: '' };
+  var upper = side.toUpperCase();
+  var set = function(key) {
+    return 'updateOperand(' + index + ', \'' + side + '\', \'' + key + '\', this.value)';
+  };
+  var kindSelect = '<select class="form-select form-select-sm mb-1" onchange="' + set('kind') + '">' +
+    [['field', 'Field'], ['expression', 'SQL expression'], ['constant', 'Fixed value'], ['aggregate', 'Aggregate (group by key)']].map(function(opt) {
+      return '<option value="' + opt[0] + '"' + (operand.kind === opt[0] ? ' selected' : '') + '>' + opt[1] + '</option>';
+    }).join('') + '</select>';
+
+  var input;
+  if (operand.kind === 'field') {
+    input = '<select class="form-select form-select-sm" onchange="' + set('value') + '">' +
+      fieldOptions(upper, operand.value) + '</select>';
+  } else if (operand.kind === 'expression') {
+    input = '<input type="text" class="form-control form-control-sm font-monospace" value="' + escapeAttr(operand.value) +
+      '" placeholder="TRIM(Customer)" oninput="' + set('value') + '">';
+  } else if (operand.kind === 'aggregate') {
+    var fn = operand.fn || 'sum';
+    var valueKind = operand.valueKind === 'expression' ? 'expression' : 'field';
+    var fnSelect = '<select class="form-select form-select-sm mb-1" onchange="' + set('fn') + '">' +
+      aggregateDefs.map(function(def) {
+        return '<option value="' + def.key + '"' + (fn === def.key ? ' selected' : '') + '>' + def.label + '</option>';
+      }).join('') + '</select>';
+    var innerKind = '<select class="form-select form-select-sm mb-1" onchange="' + set('valueKind') + '">' +
+      [['field', 'of field'], ['expression', 'of expression']].map(function(opt) {
+        return '<option value="' + opt[0] + '"' + (valueKind === opt[0] ? ' selected' : '') + '>' + opt[1] + '</option>';
+      }).join('') + '</select>';
+    var inner = valueKind === 'expression'
+      ? '<input type="text" class="form-control form-control-sm font-monospace" value="' + escapeAttr(operand.value) +
+        '" placeholder="CASE WHEN Reversed = 0 THEN Amount ELSE 0 END" oninput="' + set('value') + '">'
+      : '<select class="form-select form-select-sm" onchange="' + set('value') + '">' +
+        fieldOptions(upper, operand.value) + '</select>';
+    input = fnSelect + innerKind + inner;
+  } else {
+    input = '<input type="text" class="form-control form-control-sm" value="' + escapeAttr(operand.value) +
+      '" placeholder="e.g. Posted, 0, EUR" oninput="' + set('value') + '">';
+  }
+  return '<td>' + kindSelect + input + '</td>';
+}
+
+function escapeAttr(value) {
+  return String(value == null ? '' : value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+function renderCompareFields() {
+  var body = document.getElementById('compareFieldsBody');
+  if (!savedFields.length) {
+    body.innerHTML = '<tr><td colspan="6" class="text-muted small">No values selected yet. Add at least one.</td></tr>';
+    renderAggregateWarning();
+    return;
+  }
+  body.innerHTML = savedFields.map(function(f, i) {
+    return '<tr>' +
+      '<td><input type="text" class="form-control form-control-sm" value="' + escapeAttr(f.label || '') + '" oninput="updateField(' + i + ', \'label\', this.value)" placeholder="Net amount"></td>' +
+      operandCell(i, 'a') +
+      operandCell(i, 'b') +
+      '<td><select class="form-select form-select-sm" onchange="updateField(' + i + ', \'type\', this.value)">' +
+        ['string', 'number', 'date'].map(function(t) {
+          return '<option value="' + t + '"' + ((f.type || 'string') === t ? ' selected' : '') + '>' + t + '</option>';
+        }).join('') + '</select></td>' +
+      '<td><div class="d-flex gap-1">' +
+        '<select class="form-select form-select-sm" style="max-width:100px;" onchange="updateTolerance(' + i + ', \'type\', this.value)">' +
+          ['none', 'absolute', 'percent'].map(function(t) {
+            var current = (f.tolerance && f.tolerance.type) || 'none';
+            return '<option value="' + t + '"' + (current === t ? ' selected' : '') + '>' + t + '</option>';
+          }).join('') + '</select>' +
+        '<input type="number" step="any" class="form-control form-control-sm" style="max-width:90px;" value="' +
+          ((f.tolerance && f.tolerance.value) || '') + '" oninput="updateTolerance(' + i + ', \'value\', this.value)"></div></td>' +
+      '<td><button class="btn btn-sm btn-outline-danger p-0 px-1" onclick="removeField(' + i + ')"><i class="bi bi-x"></i></button></td>' +
+      '</tr>';
+  }).join('');
+  renderAggregateWarning();
+}
+
+function updateOperand(index, side, key, value) {
+  var field = savedFields[index];
+  field[side] = field[side] || { kind: 'field', value: '' };
+  field[side][key] = value;
+  // Switching kind clears a value that no longer makes sense for it.
+  if (key === 'kind') {
+    field[side].value = '';
+    if (value === 'aggregate') {
+      field[side].fn = field[side].fn || 'sum';
+      field[side].valueKind = field[side].valueKind || 'field';
+    }
+    renderCompareFields();
+  }
+  // A field name and an expression are not interchangeable, so switching what the
+  // function wraps starts the value again rather than carrying a column name into
+  // an expression box.
+  if (key === 'valueKind') { field[side].value = ''; renderCompareFields(); }
+  if (key === 'fn') renderAggregateWarning();
+}
+
+/**
+ * Warns when one side mixes an aggregate with a plain column.
+ *
+ * Aggregating anything groups that whole side by the business key, which would
+ * silently drag a non-aggregated column into the GROUP BY and split one key into
+ * several rows. The server refuses it on save; saying so while the rule is being
+ * written is much more use than a rejection afterwards.
+ */
+function renderAggregateWarning() {
+  var messages = [];
+  ['a', 'b'].forEach(function(side) {
+    var reads = savedFields.filter(function(f) { return (f[side] || {}).kind !== 'constant'; });
+    var aggregated = reads.filter(function(f) { return (f[side] || {}).kind === 'aggregate'; });
+    if (!aggregated.length || aggregated.length === reads.length) return;
+    var plain = reads.filter(function(f) { return (f[side] || {}).kind !== 'aggregate'; })
+      .map(function(f) { return f.label || '(unnamed)'; }).join(', ');
+    messages.push('Source ' + side.toUpperCase() + ' is grouped by the business key, so ' + plain +
+      ' must use an aggregate too (or be a fixed value).');
+  });
+
+  var box = document.getElementById('aggregateWarning');
+  box.innerHTML = messages.length
+    ? '<div class="alert alert-warning py-2 small mb-0"><i class="bi bi-exclamation-triangle me-1"></i>' +
+      messages.join('<br>') + '</div>'
+    : '';
+}
+
+function describeGroup() {
+  var select = document.getElementById('ruleGroup');
+  var def = ruleGroupDefs.filter(function(g) { return g.key === select.value; })[0];
+  document.getElementById('groupHelp').textContent = def ? def.description : '';
+}
+
+function addCompareField() {
+  savedFields.push({ label: '', a: { kind: 'field', value: '' }, b: { kind: 'field', value: '' }, type: 'string' });
+  renderCompareFields();
+}
+function removeField(i) { savedFields.splice(i, 1); renderCompareFields(); }
+function updateField(i, key, value) { savedFields[i][key] = value; }
+function updateTolerance(i, key, value) {
+  if (key === 'type' && value === 'none') { delete savedFields[i].tolerance; renderCompareFields(); return; }
+  savedFields[i].tolerance = savedFields[i].tolerance || { type: 'absolute', value: 0 };
+  savedFields[i].tolerance[key] = key === 'value' ? Number(value) : value;
+}
+
+async function saveRule() {
+  var body = {
+    name: document.getElementById('ruleName').value.trim(),
+    description: document.getElementById('description').value.trim(),
+    businessArea: document.getElementById('businessArea').value.trim(),
+    owner: document.getElementById('owner').value.trim(),
+    priority: document.getElementById('priority').value,
+    ruleGroup: document.getElementById('ruleGroup').value,
+    sourceAId: document.getElementById('sourceA').value,
+    sourceBId: document.getElementById('sourceB').value,
+    datasetA: document.getElementById('datasetA').value,
+    datasetB: document.getElementById('datasetB').value,
+    keyFieldA: document.getElementById('keyFieldA').value,
+    keyFieldB: document.getElementById('keyFieldB').value,
+    compareFields: savedFields,
+    duplicateHandling: document.getElementById('duplicateHandling').value,
+    incompleteKeyHandling: document.getElementById('incompleteKeyHandling').value,
+    rowLimit: document.getElementById('rowLimit').value || null
+  };
+  var noteEl = document.getElementById('changeNote');
+  if (noteEl) body.changeNote = noteEl.value.trim();
+
+  try {
+    var resp = await fetch(ruleId ? '/reconciliation/rules/' + ruleId : '/reconciliation/rules', {
+      method: ruleId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    var data = await resp.json();
+    if (!data.success) { showToast(data.message, 'error'); return; }
+    showToast(ruleId ? 'Saved as version ' + data.version : 'Rule created as draft', 'success');
+    setTimeout(function() { window.location.href = '/reconciliation/rules/' + (ruleId || data.id); }, 700);
+  } catch (e) { showToast(e.message, 'error'); }
+}
+</script>
+<%- include('../partials/footer') %>

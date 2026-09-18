@@ -1,0 +1,131 @@
+<%- include('../partials/header') %>
+<%
+  var fabricSources = sources.filter(function(s) { return s.kind !== 'external-sql'; }).length;
+  var externalSources = sources.length - fabricSources;
+  var activeRules = rules.filter(function(r) { return r.status === 'active'; }).length;
+  var activeModels = models.filter(function(m) { return m.status === 'active'; }).length;
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-patch-check me-2"></i>Data Quality</h2>
+    <p class="text-muted mb-0">Reconciliation and master data, and the systems they both read from.</p>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    <% helpTopics.forEach(function(topic) { %>
+      <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#helpModal-<%= topic.key %>">
+        <i class="bi bi-question-circle me-1"></i><%= topic.key === 'mdm' ? 'Master data' : 'Reconciliation' %> guide
+      </button>
+    <% }) %>
+    <a href="/quality/security-groups" class="btn btn-sm btn-outline-primary"><i class="bi bi-people me-1"></i>Security groups</a>
+    <a href="/quality/sources" class="btn btn-sm btn-primary"><i class="bi bi-database me-1"></i>Sources</a>
+  </div>
+</div>
+
+<% if (error) { %><div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div><% } %>
+
+<div class="alert alert-light border small">
+  <i class="bi bi-info-circle me-2"></i>
+  A system is registered <strong>once, here</strong>, and both disciplines use it: reconciliation compares two of them, master data
+  reads one and writes to another. That is why registration sits in Quality rather than inside either page.
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-sm-6 col-xl-3">
+    <a href="/quality/sources" class="text-decoration-none text-reset">
+      <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+        <div class="text-primary mb-2"><i class="bi bi-database"></i></div>
+        <div class="fs-3 fw-bold text-primary"><%= sources.length %></div>
+        <div class="small">Registered Systems</div>
+        <div class="text-muted" style="font-size:0.7rem;"><%= fabricSources %> Fabric / <%= externalSources %> database</div>
+      </div></div>
+    </a>
+  </div>
+  <div class="col-sm-6 col-xl-3">
+    <a href="/reconciliation/rules" class="text-decoration-none text-reset">
+      <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+        <div class="text-primary mb-2"><i class="bi bi-clipboard2-check"></i></div>
+        <div class="fs-3 fw-bold text-primary"><%= activeRules %></div>
+        <div class="small">Active Controls</div>
+        <div class="text-muted" style="font-size:0.7rem;"><%= rules.length %> defined</div>
+      </div></div>
+    </a>
+  </div>
+  <div class="col-sm-6 col-xl-3">
+    <a href="/reconciliation/exceptions" class="text-decoration-none text-reset">
+      <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+        <div class="text-danger mb-2"><i class="bi bi-exclamation-triangle"></i></div>
+        <div class="fs-3 fw-bold text-danger"><%= exceptionCount %></div>
+        <div class="small">Open Exceptions</div>
+      </div></div>
+    </a>
+  </div>
+  <div class="col-sm-6 col-xl-3">
+    <a href="/mdm" class="text-decoration-none text-reset">
+      <div class="card text-center h-100 stat-card"><div class="card-body py-3">
+        <div class="text-success mb-2"><i class="bi bi-fingerprint"></i></div>
+        <div class="fs-3 fw-bold text-success"><%= activeModels %></div>
+        <div class="small">Active Master Data Models</div>
+        <div class="text-muted" style="font-size:0.7rem;"><%= models.length %> defined</div>
+      </div></div>
+    </a>
+  </div>
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-lg-4">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-database me-2"></i>Configuration</div>
+      <div class="card-body py-3">
+        <p class="small text-muted">
+          Register the systems both disciplines read: Fabric lakehouses and warehouses under the tenant they belong to, and any
+          SQL Server or Azure SQL database. Registration reads and stores each schema, so authoring never opens a connection to
+          the business system.
+        </p>
+        <ul class="small text-muted">
+          <li><%= sources.length %> system(s) registered</li>
+          <li><%= writableSources %> can be written to — a master data destination needs one of these</li>
+        </ul>
+        <a href="/quality/sources" class="btn btn-sm btn-primary"><i class="bi bi-database me-1"></i>Manage sources</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-clipboard2-check me-2"></i>Reconciliation</div>
+      <div class="card-body py-3">
+        <p class="small text-muted">
+          Controls that verify the same records agree between two systems, and an exception lifecycle for every disagreement.
+        </p>
+        <div class="d-flex gap-2 flex-wrap">
+          <a href="/reconciliation" class="btn btn-sm btn-primary">Open</a>
+          <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#helpModal-reconciliation">
+            <i class="bi bi-question-circle me-1"></i>How it works
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-fingerprint me-2"></i>Master Data</div>
+      <div class="card-body py-3">
+        <p class="small text-muted">
+          Match records that arrived from many systems, build one golden record per entity, and publish it with full provenance.
+        </p>
+        <div class="d-flex gap-2 flex-wrap">
+          <a href="/mdm" class="btn btn-sm btn-primary">Open</a>
+          <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#helpModal-mdm">
+            <i class="bi bi-question-circle me-1"></i>How it works
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<% helpTopics.forEach(function(topic) { %>
+  <%- include('../partials/help-modal', { helpTopic: topic }) %>
+<% }) %>
+<%- include('../partials/footer') %>

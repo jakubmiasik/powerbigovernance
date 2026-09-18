@@ -65,7 +65,10 @@ app.use((req, res, next) => {
   const labelMap = {
     workspaces: 'Workspaces', governance: 'Governance', analysis: 'Run Analysis',
     migrate: 'Migrate', capacities: 'Capacities', settings: 'Configuration',
-    overview: 'Overview', users: 'Users', artifacts: 'Artifacts'
+    overview: 'Overview', users: 'Users', artifacts: 'Artifacts',
+    reconciliation: 'Reconciliation', exceptions: 'Exceptions', rules: 'Rules', runs: 'Runs', sources: 'Sources',
+    // Under /settings these two are pages of their own, not path noise.
+    governance: 'Governance', access: 'Grant Access'
   };
   const breadcrumb = [];
   let href = '';
@@ -130,21 +133,31 @@ app.get('/api/user', (req, res) => {
 // Routes
 const indexRoutes = require('./routes/index');
 const configRoutes = require('./routes/config');
+const accessRoutes = require('./routes/access');
+const governanceConfigRoutes = require('./routes/governanceConfig');
 const workspaceRoutes = require('./routes/workspaces');
 const governanceRoutes = require('./routes/governance');
 const analysisRoutes = require('./routes/analysis');
 const migrateRoutes = require('./routes/migrate');
 const capacityRoutes = require('./routes/capacities');
+const reconciliationRoutes = require('./routes/reconciliation');
+const mdmRoutes = require('./routes/mdm');
+const qualityRoutes = require('./routes/quality');
 const pipelineRoutes = require('./routes/pipelines');
 const tenantSettingsRoutes = require('./routes/tenantSettings');
 
 app.use('/', indexRoutes);
+app.use('/settings/access', accessRoutes);
+app.use('/settings/governance', governanceConfigRoutes);
 app.use('/settings', configRoutes);
 app.use('/workspaces', workspaceRoutes);
 app.use('/governance', governanceRoutes);
 app.use('/analysis', analysisRoutes);
 app.use('/migrate', migrateRoutes);
 app.use('/capacities', capacityRoutes);
+app.use('/reconciliation', reconciliationRoutes);
+app.use('/quality', qualityRoutes);
+app.use('/mdm', mdmRoutes);
 app.use('/pipelines', pipelineRoutes);
 app.use('/tenant-settings', tenantSettingsRoutes);
 

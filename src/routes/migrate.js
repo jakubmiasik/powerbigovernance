@@ -151,6 +151,11 @@ router.get('/auth/callback', async (req, res) => {
       return res.redirect('/analysis?grantAuth=success');
     }
 
+    if (state === 'grant-sp-access') {
+      req.session.pbiGrantToken = token;
+      return res.redirect('/settings/access?grantAuth=success');
+    }
+
     if (state === 'grant-sp-pipelines') {
       req.session.pbiGrantToken = token;
       return res.redirect('/pipelines?grantAuth=success');

@@ -1,0 +1,796 @@
+<%- include('../partials/header') %>
+<%
+  var o = overview || { workspaces: [], principals: [], grants: [], totals: {} };
+  var t = o.totals || {};
+  function badgeFor(right) { var level = accessLevel(right); return '<span class="badge bg-' + level.color + (level.color === 'light' ? ' text-dark border' : '') + '">' + level.label + '</span>'; }
+%>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-4">
+  <div>
+    <h2><i class="bi bi-key me-2"></i>Grant Access</h2>
+    <p class="text-muted mb-0">
+      Who can reach which workspace, and adding the service principal where it is missing.
+      <% if (run) { %>
+        · From scan #<%= run.id %>, <%= run.started_at ? new Date(run.started_at).toLocaleString() : 'date unknown' %>
+        · <%= describeScope(scopeFromRow(run)) %>
+      <% } %>
+    </p>
+  </div>
+  <div class="d-flex gap-2 align-items-center flex-wrap">
+    <a href="/settings/access/roles" class="btn btn-sm btn-primary">
+      <i class="bi bi-person-plus me-1"></i>Grant a user or group a role
+    </a>
+    <% if ((runs || []).length > 1) { %>
+      <select class="form-select form-select-sm" style="max-width:280px;"
+              onchange="window.location = '/settings/access?accessRunId=' + this.value">
+        <% runs.forEach(function(r) { %>
+          <option value="<%= r.id %>" <%= run && Number(run.id) === Number(r.id) ? 'selected' : '' %>>
+            Scan #<%= r.id %> — <%= r.started_at ? new Date(r.started_at).toLocaleDateString() : 'unknown' %>
+            (<%= describeScope(scopeFromRow(r), { limit: 1 }) %>)
+          </option>
+        <% }) %>
+      </select>
+    <% } %>
+    <a href="/settings" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Settings</a>
+  </div>
+</div>
+
+<% if (error) { %>
+  <div class="alert alert-danger"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div>
+<% } %>
+
+<% if (grantAuth) { %>
+  <div class="alert alert-success alert-dismissible">
+    <i class="bi bi-check-circle me-2"></i>Signed in as a Power BI administrator. You can now grant workspace access.
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+<% } %>
+
+<% if (!run) { %>
+  <div class="alert alert-info">
+    <i class="bi bi-info-circle me-2"></i>No completed scan yet. Access is whatever the last scan observed, so
+    <a href="/analysis">run an analysis</a> first.
+  </div>
+<% } else if (partialScope) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-funnel me-2"></i>This scan covered <strong><%= describeScope(scopeFromRow(run)) %></strong>, not the
+    whole tenant, so everything below describes only those workspaces. The counts that read as tenant-wide —
+    workspaces with no admin, how many principals hold access — are counts within that scope. Run a whole-tenant
+    scan, or pick one above, for the full picture.
+  </div>
+<% } else if (!indexed) { %>
+  <div class="alert alert-warning">
+    <i class="bi bi-exclamation-triangle me-2"></i>This scan has not been indexed, so the access below was read from
+    its stored results rather than queried. It is the same data, read a slower way — indexing the run from the
+    <a href="/analysis">Run Analysis</a> page makes it a query.
+  </div>
+<% } %>
+
+<!-- ── What the access model looks like ── -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-lg-2">
+    <div class="card h-100"><div class="card-body py-3">
+      <div class="text-muted small">Workspaces</div>
+      <div class="h4 mb-0"><%= t.workspaces || 0 %></div>
+    </div></div>
+  </div>
+  <div class="col-6 col-lg-2">
+    <div class="card h-100"><div class="card-body py-3">
+      <div class="text-muted small">Access grants</div>
+      <div class="h4 mb-0"><%= t.grants || 0 %></div>
+    </div></div>
+  </div>
+  <div class="col-6 col-lg-2">
+    <div class="card h-100"><div class="card-body py-3">
+      <div class="text-muted small">Principals</div>
+      <div class="h4 mb-0"><%= t.principals || 0 %></div>
+      <div class="small text-muted"><%= t.servicePrincipals || 0 %> service principal(s)</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-lg-2">
+    <div class="card h-100 <%= (t.withoutAdmin || 0) ? 'border-danger' : '' %>"><div class="card-body py-3">
+      <div class="text-muted small">No admin at all</div>
+      <div class="h4 mb-0 <%= (t.withoutAdmin || 0) ? 'text-danger' : '' %>"><%= t.withoutAdmin || 0 %></div>
+      <div class="small text-muted">Only a tenant admin can fix these</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-lg-2">
+    <div class="card h-100 <%= (t.singleAdmin || 0) ? 'border-warning' : '' %>"><div class="card-body py-3">
+      <div class="text-muted small">A single admin</div>
+      <div class="h4 mb-0"><%= t.singleAdmin || 0 %></div>
+      <div class="small text-muted">One departure from the above</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-lg-2">
+    <div class="card h-100 <%= (t.unreadable || 0) ? 'border-secondary' : '' %>"><div class="card-body py-3">
+      <div class="text-muted small">Access unreadable</div>
+      <div class="h4 mb-0"><%= t.unreadable || 0 %></div>
+      <div class="small text-muted">Not "no users" — not seen</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-lg-2">
+    <div class="card h-100 <%= (t.personal || 0) ? 'border-info' : '' %>"><div class="card-body py-3">
+      <div class="text-muted small">Personal</div>
+      <div class="h4 mb-0"><%= t.personal || 0 %></div>
+      <div class="small text-muted">
+        <%= t.personalConfirmed || 0 %> confirmed — no grants possible
+      </div>
+    </div></div>
+  </div>
+</div>
+
+<!-- ── Granting ── -->
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-shield-plus me-2"></i>Grant Service Principal Access to Workspaces</span>
+    <span class="small text-muted">Checked live, not read from a scan</span>
+  </div>
+  <div class="card-body py-3">
+    <% if (!(servicePrincipals || []).length) { %>
+      <div class="text-muted small">
+        No service principal configured. <a href="/settings">Add one in Settings</a> first.
+      </div>
+    <% } else { %>
+      <div class="row g-2 align-items-end">
+        <div class="col-md-5">
+          <label class="form-label small" for="grantSpSelect">Service principal</label>
+          <select class="form-select form-select-sm" id="grantSpSelect" onchange="onGrantSpChanged()">
+            <% servicePrincipals.forEach(function(sp) { %>
+              <option value="<%= sp.id %>" data-eaoid="<%= sp.enterprise_app_object_id || '' %>">
+                <%= sp.name %> (<%= sp.tenant_id %>)<%= sp.enterprise_app_object_id ? '' : ' — no enterprise app object ID' %>
+              </option>
+            <% }) %>
+          </select>
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-sm btn-primary w-100" id="checkAccessBtn" onclick="checkServicePrincipalAccess()">
+            <i class="bi bi-arrow-repeat me-1"></i>Check access now
+          </button>
+        </div>
+        <div class="col-md-4">
+          <div class="form-text mb-0" id="checkAccessStatus">Not checked yet.</div>
+        </div>
+      </div>
+      <div class="form-text mt-2">
+        <i class="bi bi-info-circle me-1"></i>Reading a lakehouse or warehouse SQL endpoint needs the principal to be a
+        <strong>member of the workspace</strong> — the admin APIs a scan uses see every workspace regardless, so a scan
+        cannot answer this. The check asks the tenant directly, and compares every workspace against the ones this
+        principal can actually reach. Granting uses the Power BI admin API on behalf of an administrator, so it asks
+        you to sign in as one, and adds the principal as <strong>Admin</strong>.
+      </div>
+
+      <!-- ── Workspaces the principal cannot reach ── -->
+      <div class="mt-3 d-none" id="missingAccessPanel">
+        <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
+          <strong class="small" id="missingAccessHeading"></strong>
+          <input type="text" class="form-control form-control-sm" style="max-width:220px;"
+                 id="missingAccessFilter" placeholder="Filter workspaces..." oninput="renderMissingAccess()">
+          <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllMissingAccess(true)">Select all shown</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllMissingAccess(false)">Clear</button>
+          <span class="small text-muted ms-auto" id="missingAccessCount">0 selected</span>
+        </div>
+        <div class="border rounded p-2" style="max-height:320px; overflow-y:auto;" id="missingAccessList"></div>
+        <div class="mt-2 d-flex gap-2 align-items-center flex-wrap">
+          <button class="btn btn-sm btn-warning" id="grantAccessBtn" onclick="grantSpAccess()" disabled>
+            <i class="bi bi-key me-1"></i>Grant access to selected
+          </button>
+          <div class="small text-muted" id="grantResult"></div>
+        </div>
+      </div>
+    <% } %>
+  </div>
+</div>
+
+<!-- ── Who has access to what ── -->
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-people me-2"></i>Who Has Access to What</span>
+    <ul class="nav nav-pills nav-sm" role="tablist">
+      <li class="nav-item"><button class="nav-link active btn-sm py-1" data-bs-toggle="tab" data-bs-target="#tabGrants" type="button">Every grant</button></li>
+      <li class="nav-item"><button class="nav-link btn-sm py-1" data-bs-toggle="tab" data-bs-target="#tabWorkspaces" type="button">By workspace</button></li>
+      <li class="nav-item"><button class="nav-link btn-sm py-1" data-bs-toggle="tab" data-bs-target="#tabPrincipals" type="button">By principal</button></li>
+    </ul>
+  </div>
+
+  <div class="card-body py-3 border-bottom">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-4">
+        <label class="form-label small" for="accessSearch">Search</label>
+        <input type="text" class="form-control form-control-sm" id="accessSearch"
+               placeholder="Workspace, name or email" oninput="applyAccessFilters()">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="accessRole">Role</label>
+        <select class="form-select form-select-sm" id="accessRole" onchange="applyAccessFilters()">
+          <option value="">Any role</option>
+          <% accessLevels.forEach(function(level) { %>
+            <option value="<%= level.key %>"><%= level.label %></option>
+          <% }) %>
+          <option value="unknown">Unknown</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small" for="accessType">Principal type</label>
+        <select class="form-select form-select-sm" id="accessType" onchange="applyAccessFilters()">
+          <option value="">Any type</option>
+          <% principalTypes.forEach(function(type) { %>
+            <option value="<%= type.key %>"><%= type.label %></option>
+          <% }) %>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <div class="form-text mb-0" id="accessCount"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-content">
+    <!-- Every grant -->
+    <div class="tab-pane fade show active" id="tabGrants">
+      <div class="table-responsive" style="max-height:600px;">
+        <table class="table table-sm table-hover mb-0" id="grantsTable">
+          <thead class="sticky-top"><tr>
+            <th>Workspace</th><th>Status</th><th>Principal</th><th>Email</th><th>Type</th><th>Role</th>
+          </tr></thead>
+          <tbody>
+            <% if (!o.grants.length) { %>
+              <tr><td colspan="6" class="text-muted small py-3">No access grants recorded in this scan.</td></tr>
+            <% } %>
+            <% o.grants.forEach(function(g) { %>
+              <tr data-search="<%= [g.workspaceName || '', g.displayName || '', g.email || ''].join(' ').toLowerCase() %>"
+                  data-role="<%= g.accessRight %>" data-type="<%= g.principalType %>">
+                <td class="small">
+                  <a href="/workspaces/<%= g.workspaceId %>"><%= g.workspaceName || g.workspaceId %></a>
+                  <% if (g.workspacePersonal && g.workspacePersonal.personal) { %>
+                    <i class="bi bi-person text-info ms-1" title="<%= g.workspacePersonal.reasons.join(' ') %>"></i>
+                  <% } %>
+                </td>
+                <td class="small">
+                  <% var gs = g.workspaceStatus || { label: g.workspaceState || 'Unknown', color: 'secondary', description: '' }; %>
+                  <span class="badge bg-<%= gs.color %>" title="<%= gs.description %>"><%= gs.label %></span>
+                </td>
+                <td class="small"><%= g.displayName || '(no name recorded)' %></td>
+                <td class="small text-muted"><%= g.email || '-' %></td>
+                <td class="small"><%= principalTypeLabel(g.principalType) %></td>
+                <td><%- badgeFor(g.accessRight) %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- By workspace -->
+    <div class="tab-pane fade" id="tabWorkspaces">
+      <div class="table-responsive" style="max-height:600px;">
+        <table class="table table-sm mb-0" id="workspacesTable">
+          <thead class="sticky-top"><tr>
+            <th style="width:32px;"></th>
+            <th>Workspace</th><th>Status</th><th>Capacity</th><th class="text-end">Items</th>
+            <th class="text-end">People &amp; apps</th><th>Roles</th>
+          </tr></thead>
+          <tbody>
+            <% if (!o.workspaces.length) { %>
+              <tr><td colspan="7" class="text-muted small py-3">This scan recorded no workspaces.</td></tr>
+            <% } %>
+            <% o.workspaces.forEach(function(w, index) { %>
+              <tr data-search="<%= (w.name || '').toLowerCase() %>" data-role="" data-type=""
+                  class="<%= w.usersReadable && w.counts.admin === 0 ? 'table-danger' : '' %>">
+                <td>
+                  <% if (w.grants.length) { %>
+                    <button class="btn btn-sm p-0 px-1" type="button" data-bs-toggle="collapse"
+                            data-bs-target="#wsAccess-<%= index %>" title="Show who is in this workspace">
+                      <i class="bi bi-chevron-right"></i>
+                    </button>
+                  <% } %>
+                </td>
+                <td class="small">
+                  <a href="/workspaces/<%= w.workspaceId %>"><strong><%= w.name || w.workspaceId %></strong></a>
+                  <% if (w.personal && !w.personal.grantable) { %>
+                    <span class="text-muted ms-1" title="A personal workspace takes no members, so no role can be granted in it">
+                      <i class="bi bi-person-slash"></i>
+                    </span>
+                  <% } else { %>
+                    <button type="button" class="btn btn-sm btn-outline-primary p-0 px-1 ms-1"
+                            title="Grant a user or security group a role in this workspace"
+                            onclick="openRoleGrantModal('<%= w.workspaceId %>', <%- JSON.stringify(w.name || w.workspaceId) %>)">
+                      <i class="bi bi-person-plus"></i>
+                    </button>
+                  <% } %>
+                  <% if (!w.usersReadable) { %>
+                    <span class="badge bg-secondary ms-1" title="The scan could not read this workspace's access list">not readable</span>
+                  <% } else if (w.counts.admin === 0) { %>
+                    <span class="badge bg-danger ms-1" title="Nobody can administer this workspace or grant anyone else access to it">no admin</span>
+                  <% } else if (w.counts.admin === 1) { %>
+                    <span class="badge bg-warning text-dark ms-1" title="One departure from having no admin at all">single admin</span>
+                  <% } %>
+                  <% if (w.personal && w.personal.personal) { %>
+                    <span class="badge bg-<%= w.personal.confidence === 'confirmed' ? 'info' : 'light text-dark border' %> ms-1"
+                          title="<%= w.personal.reasons.join(' ') %><%= w.personal.grantable ? '' : ' A service principal cannot be granted access to a personal workspace.' %>">
+                      <i class="bi bi-person me-1"></i><%= w.personal.confidence === 'confirmed' ? 'personal' : 'looks personal' %>
+                    </span>
+                  <% } %>
+                </td>
+                <td class="small">
+                  <% var status = w.status || { label: w.state || 'Unknown', color: 'secondary', description: '' }; %>
+                  <span class="badge bg-<%= status.color %>" title="<%= status.description %>"><%= status.label %></span>
+                </td>
+                <td class="small text-muted"><%= w.capacityName || '-' %></td>
+                <td class="text-end small"><%= w.itemCount %></td>
+                <td class="text-end small"><%= w.grants.length %></td>
+                <td class="small">
+                  <% accessLevels.forEach(function(level) { %>
+                    <% if (w.counts[level.key]) { %>
+                      <span class="badge bg-<%= level.color %> me-1"><%= w.counts[level.key] %> <%= level.label.toLowerCase() %></span>
+                    <% } %>
+                  <% }) %>
+                  <% if (w.counts.unknown) { %><span class="badge bg-light text-dark border"><%= w.counts.unknown %> unknown</span><% } %>
+                </td>
+              </tr>
+              <% if (w.grants.length) { %>
+                <tr class="collapse" id="wsAccess-<%= index %>">
+                  <td></td>
+                  <td colspan="6" class="p-0">
+                    <table class="table table-sm mb-0" style="background: var(--color-surface-2);">
+                      <tbody>
+                        <% w.grants.forEach(function(g) { %>
+                          <tr>
+                            <td class="small"><%= g.displayName || '(no name recorded)' %></td>
+                            <td class="small text-muted"><%= g.email || '-' %></td>
+                            <td class="small"><%= principalTypeLabel(g.principalType) %></td>
+                            <td class="small"><%- badgeFor(g.accessRight) %></td>
+                          </tr>
+                        <% }) %>
+                      </tbody>
+                    </table>
+                  </td>
+                </tr>
+              <% } %>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- By principal -->
+    <div class="tab-pane fade" id="tabPrincipals">
+      <div class="table-responsive" style="max-height:600px;">
+        <table class="table table-sm mb-0" id="principalsTable">
+          <thead class="sticky-top"><tr>
+            <th style="width:32px;"></th>
+            <th>Principal</th><th>Email</th><th>Type</th>
+            <th class="text-end">Workspaces</th><th>Strongest</th><th>Roles held</th>
+          </tr></thead>
+          <tbody>
+            <% if (!o.principals.length) { %>
+              <tr><td colspan="7" class="text-muted small py-3">This scan recorded no access grants.</td></tr>
+            <% } %>
+            <% o.principals.forEach(function(p, index) { %>
+              <tr data-search="<%= [p.displayName || '', p.email || ''].join(' ').toLowerCase() %>"
+                  data-role="<%= p.strongest %>" data-type="<%= p.principalType %>">
+                <td>
+                  <button class="btn btn-sm p-0 px-1" type="button" data-bs-toggle="collapse"
+                          data-bs-target="#pAccess-<%= index %>" title="Show which workspaces this principal can reach">
+                    <i class="bi bi-chevron-right"></i>
+                  </button>
+                </td>
+                <td class="small"><strong><%= p.displayName || p.email || '(no name recorded)' %></strong></td>
+                <td class="small text-muted"><%= p.email || '-' %></td>
+                <td class="small"><%= principalTypeLabel(p.principalType) %></td>
+                <td class="text-end small"><%= p.workspaces.length %></td>
+                <td><%- badgeFor(p.strongest) %></td>
+                <td class="small">
+                  <% accessLevels.forEach(function(level) { %>
+                    <% if (p.counts[level.key]) { %>
+                      <span class="badge bg-<%= level.color %> me-1"><%= p.counts[level.key] %> <%= level.label.toLowerCase() %></span>
+                    <% } %>
+                  <% }) %>
+                </td>
+              </tr>
+              <tr class="collapse" id="pAccess-<%= index %>">
+                <td></td>
+                <td colspan="6" class="p-0">
+                  <table class="table table-sm mb-0" style="background: var(--color-surface-2);">
+                    <tbody>
+                      <% p.workspaces.forEach(function(w) { %>
+                        <tr>
+                          <td class="small"><a href="/workspaces/<%= w.workspaceId %>"><%= w.name || w.workspaceId %></a></td>
+                          <td class="small"><%- badgeFor(w.accessRight) %></td>
+                        </tr>
+                      <% }) %>
+                    </tbody>
+                  </table>
+                </td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card-footer small text-muted">
+    Access is what the selected scan observed, not live state — grant a role after this scan ran and it appears on the
+    next one. A workspace marked <strong>not readable</strong> is one the scan could not read the access list for,
+    which is a gap in the evidence rather than a workspace with nobody in it.
+    <br>
+    <strong>Personal</strong> means the API reports the workspace as somebody's "My workspace": it takes no members at
+    all, so a service principal cannot be granted access to it and no role can be assigned in it.
+    <strong>Looks personal</strong> is a guess, not a fact — the name reads as a person or a mailbox, or nobody holds
+    Admin. Those are still ordinary workspaces and can still be granted; the badge is there because a workspace that
+    belongs to one person is a workspace that leaves with them.
+  </div>
+</div>
+
+<!-- ── Granting a user or a group a role, without leaving the table ── -->
+<div class="modal fade" id="roleGrantModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">
+          <i class="bi bi-person-plus me-2"></i>Grant a role in <span id="roleGrantModalWorkspace">this workspace</span>
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <% if (!(servicePrincipals || []).length) { %>
+          <div class="alert alert-warning mb-0">
+            <i class="bi bi-exclamation-triangle me-2"></i>No service principal configured.
+            <a href="/settings">Add one in Settings</a> first.
+          </div>
+        <% } else { %>
+          <div class="row g-2 align-items-end mb-3">
+            <div class="col-md-6">
+              <label class="form-label small" for="modalRoleSpSelect">Acting as</label>
+              <select class="form-select form-select-sm" id="modalRoleSpSelect" onchange="onModalRoleSpChanged()">
+                <% servicePrincipals.forEach(function(sp) { %>
+                  <option value="<%= sp.id %>"><%= sp.name %> (<%= sp.tenant_id %>)</option>
+                <% }) %>
+              </select>
+            </div>
+            <div class="col-md-6">
+              <div class="form-text mb-0" id="roleGrantNote"></div>
+            </div>
+          </div>
+          <div class="alert alert-light border small">
+            <i class="bi bi-info-circle me-2"></i>The service principal must be a <strong>workspace Admin</strong> here:
+            the Fabric role APIs require it, and the list below is what settles whether it is.
+          </div>
+          <%- include('../partials/roleGrantPanel', { spSelectId: 'modalRoleSpSelect' }) %>
+        <% } %>
+      </div>
+      <div class="modal-footer">
+        <a href="/quality/security-groups" class="btn btn-sm btn-outline-primary me-auto">
+          <i class="bi bi-people me-1"></i>Which groups should exist
+        </a>
+        <a href="/settings/access/roles" class="btn btn-sm btn-outline-secondary">Open the full page</a>
+        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/**
+ * Opens the role panel on one workspace.
+ *
+ * A modal rather than a page, because the question it answers — "who should be in
+ * this one?" — is asked while reading the table, and losing the table to answer it
+ * means finding the row again afterwards.
+ */
+function openRoleGrantModal(workspaceId, workspaceName) {
+  var element = document.getElementById('roleGrantModal');
+  document.getElementById('roleGrantModalWorkspace').textContent = workspaceName || 'this workspace';
+  if (typeof roleGrantOpen === 'function') roleGrantOpen(workspaceId, workspaceName);
+  bootstrap.Modal.getOrCreateInstance(element).show();
+}
+
+function onModalRoleSpChanged() {
+  // A different principal has different rights here, so the answer on screen is
+  // no longer about the one selected.
+  if (typeof roleGrantWorkspace !== 'undefined' && roleGrantWorkspace) {
+    roleGrantOpen(roleGrantWorkspace.id, roleGrantWorkspace.name);
+  }
+}
+
+// ── Filtering ──
+// One filter drives all three tables: the same question asked three ways should
+// not need asking three times.
+function applyAccessFilters() {
+  var needle = document.getElementById('accessSearch').value.trim().toLowerCase();
+  var role = document.getElementById('accessRole').value;
+  var type = document.getElementById('accessType').value;
+  var shown = 0;
+  var total = 0;
+
+  ['grantsTable', 'workspacesTable', 'principalsTable'].forEach(function(id) {
+    var table = document.getElementById(id);
+    if (!table) return;
+    table.querySelectorAll('tbody tr').forEach(function(row) {
+      // The expanded detail rows follow their parent and carry no filter data.
+      if (!row.hasAttribute('data-search')) return;
+      var matches = (!needle || (row.getAttribute('data-search') || '').indexOf(needle) !== -1)
+        && (!role || !row.getAttribute('data-role') || row.getAttribute('data-role') === role)
+        && (!type || !row.getAttribute('data-type') || row.getAttribute('data-type') === type);
+      row.style.display = matches ? '' : 'none';
+      if (id === 'grantsTable') { total += 1; if (matches) shown += 1; }
+    });
+  });
+
+  document.getElementById('accessCount').textContent =
+    (needle || role || type) ? shown + ' of ' + total + ' grant(s)' : total + ' grant(s)';
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  applyAccessFilters();
+  document.querySelectorAll('[data-bs-toggle="collapse"]').forEach(function(button) {
+    var target = document.querySelector(button.getAttribute('data-bs-target'));
+    if (!target || !button.querySelector('i')) return;
+    target.addEventListener('show.bs.collapse', function() { button.querySelector('i').className = 'bi bi-chevron-down'; });
+    target.addEventListener('hide.bs.collapse', function() { button.querySelector('i').className = 'bi bi-chevron-right'; });
+  });
+});
+
+// ── Granting ──
+//
+// The list of workspaces to grant into is asked for live rather than read from a
+// scan. A scan reads the admin APIs, which see every workspace whether the
+// principal is a member or not — so it can say who the scan observed holding
+// access, and cannot say what the principal can reach right now.
+function escapeHtml(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+var missingAccess = { workspaces: [], selected: new Set(), checkedAt: null, objectIdKnown: true };
+
+// A grant the administrator sign-in interrupted. Handed back by the server exactly
+// once, so a refresh cannot repeat it.
+var pendingGrant = <%- JSON.stringify(typeof pendingGrant !== 'undefined' && pendingGrant ? pendingGrant : null) %>;
+
+function onGrantSpChanged() {
+  // A different principal has a different answer; keeping the previous one on
+  // screen would invite granting against a check that was never run for it.
+  missingAccess = { workspaces: [], selected: new Set(), checkedAt: null, objectIdKnown: true };
+  document.getElementById('missingAccessPanel').classList.add('d-none');
+  document.getElementById('checkAccessStatus').textContent = 'Not checked yet.';
+  document.getElementById('grantResult').innerHTML = '';
+}
+
+/**
+ * Asks the tenant what the principal can reach.
+ *
+ * `preserveResult` is for the re-check that follows a grant: the outcome of the
+ * grant is the freshest news on the page, and clearing it would leave the operator
+ * with a list that silently changed and nothing saying why.
+ */
+async function checkServicePrincipalAccess(options) {
+  var button = document.getElementById('checkAccessBtn');
+  var status = document.getElementById('checkAccessStatus');
+  button.disabled = true;
+  status.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Asking the tenant...';
+  if (!(options && options.preserveResult)) document.getElementById('grantResult').innerHTML = '';
+
+  try {
+    var resp = await fetch('/settings/access/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ spId: document.getElementById('grantSpSelect').value }),
+    });
+    var data = await resp.json();
+    if (!data.success) {
+      status.innerHTML = '<span class="text-danger">' + escapeHtml(data.message) + '</span>';
+      return;
+    }
+
+    missingAccess = {
+      workspaces: data.missing || [],
+      selected: new Set(),
+      checkedAt: data.checkedAt,
+      objectIdKnown: data.objectIdKnown,
+    };
+
+    status.innerHTML = escapeHtml(data.withAccess + ' of ' + data.total + ' workspace(s) reachable') +
+      '<br><span class="text-muted">Checked ' + new Date(data.checkedAt).toLocaleTimeString() + '</span>';
+
+    document.getElementById('missingAccessPanel').classList.remove('d-none');
+    // Skipped workspaces are named in the count, not silently dropped: "12 of 40
+    // unreachable" beside a list of 9 would look like a bug.
+    var skippedNote = data.skipped
+      ? ' (' + data.skipped + ' personal or deleted workspace(s) left out — nothing can be granted on those)'
+      : '';
+    // Named separately from the skipped ones: these can be granted, they just may
+    // not be workspaces the organisation should be granting into.
+    var personalNote = data.personalLikely
+      ? ' — ' + data.personalLikely + ' of them look like somebody’s personal workspace'
+      : '';
+    document.getElementById('missingAccessHeading').textContent = missingAccess.workspaces.length
+      ? missingAccess.workspaces.length + ' workspace(s) ' + data.servicePrincipal + ' cannot reach' + skippedNote + personalNote
+      : data.servicePrincipal + ' can reach every workspace it could be granted' + skippedNote;
+    document.getElementById('missingAccessFilter').value = '';
+    renderMissingAccess();
+  } catch (e) {
+    status.innerHTML = '<span class="text-danger">' + escapeHtml(e.message) + '</span>';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderMissingAccess() {
+  var list = document.getElementById('missingAccessList');
+
+  if (!missingAccess.workspaces.length) {
+    list.innerHTML = '<div class="alert alert-success py-2 small mb-0">' +
+      '<i class="bi bi-check-circle me-1"></i>Nothing to grant — the principal is already a member of every workspace ' +
+      'in the tenant.</div>';
+    updateMissingAccessCount();
+    return;
+  }
+
+  var notice = missingAccess.objectIdKnown ? '' :
+    '<div class="alert alert-warning py-2 small mb-2">This principal has no Enterprise Application Object ID ' +
+    'recorded, so nothing can be granted until one is added in <a href="/settings">Settings</a>.</div>';
+
+  var needle = (document.getElementById('missingAccessFilter').value || '').trim().toLowerCase();
+  var shown = missingAccess.workspaces.filter(function(ws) {
+    return !needle || (ws.name || '').toLowerCase().indexOf(needle) !== -1;
+  });
+
+  list.innerHTML = notice + (shown.map(function(ws) {
+    // The status and the personal warning travel with the row rather than being
+    // left to the operator to know: granting into somebody's private working area
+    // is a decision, and it can only be made if it is visible at the point of it.
+    var status = ws.status
+      ? ' <span class="badge bg-' + escapeHtml(ws.status.color) + '">' + escapeHtml(ws.status.label) + '</span>'
+      : '';
+    var personal = ws.personal && ws.personal.personal
+      ? '<div class="small text-warning ms-4"><i class="bi bi-person-exclamation me-1"></i>' +
+        escapeHtml(ws.personal.reasons.join(' ')) + '</div>'
+      : '';
+    return '<div class="form-check missing-ws" data-name="' + escapeHtml((ws.name || '').toLowerCase()) + '">' +
+      '<input class="form-check-input missing-ws-cb" type="checkbox" value="' + escapeHtml(ws.id) + '" id="missws-' + escapeHtml(ws.id) + '"' +
+      (missingAccess.selected.has(ws.id) ? ' checked' : '') + (missingAccess.objectIdKnown ? '' : ' disabled') +
+      ' onchange="onMissingAccessToggled(this)">' +
+      '<label class="form-check-label small" for="missws-' + escapeHtml(ws.id) + '">' + escapeHtml(ws.name) + status + '</label>' +
+      personal + '</div>';
+  }).join('') || '<div class="small text-muted py-2">Nothing matches that filter.</div>');
+
+  updateMissingAccessCount();
+}
+
+function onMissingAccessToggled(input) {
+  // Held in a Set rather than read off the DOM, so a selection survives filtering.
+  if (input.checked) missingAccess.selected.add(input.value);
+  else missingAccess.selected.delete(input.value);
+  updateMissingAccessCount();
+}
+
+function toggleAllMissingAccess(checked) {
+  // Only the rows the filter is showing, and never one that cannot be granted.
+  document.querySelectorAll('.missing-ws-cb').forEach(function(box) {
+    if (box.disabled) return;
+    box.checked = checked;
+    if (checked) missingAccess.selected.add(box.value);
+    else missingAccess.selected.delete(box.value);
+  });
+  updateMissingAccessCount();
+}
+
+function updateMissingAccessCount() {
+  document.getElementById('missingAccessCount').textContent = missingAccess.selected.size + ' selected';
+  document.getElementById('grantAccessBtn').disabled = missingAccess.selected.size === 0;
+}
+
+/**
+ * Granting acts on behalf of an administrator, so it needs a delegated sign-in
+ * rather than the application's own credential.
+ *
+ * The selection is handed to the server before the redirect and picked up on the
+ * way back, so the sign-in is an interruption rather than a reason to choose the
+ * same workspaces a second time.
+ */
+async function ensureGrantAuth(selected) {
+  try {
+    var resp = await fetch('/governance/grant-auth/status');
+    var data = await resp.json();
+    if (data.authenticated) return true;
+  } catch (e) {
+    showToast('Could not check the administrator sign-in: ' + e.message, 'error');
+    return false;
+  }
+
+  showConfirmAction({
+    title: 'Sign in as a Power BI administrator',
+    message: 'Granting workspace access uses the Power BI admin API on behalf of an administrator. You will be '
+      + 'redirected to sign in. The ' + selected.length + ' workspace(s) you selected are remembered, and the grant '
+      + 'finishes by itself when you come back.',
+    confirmText: 'Sign in and continue',
+    confirmClass: 'btn-primary',
+    onConfirm: async function() {
+      try {
+        await fetch('/settings/access/pending', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ spId: document.getElementById('grantSpSelect').value, workspaceIds: selected }),
+        });
+      } catch (e) {
+        // Losing the stash costs a second selection, not correctness — going on to
+        // the sign-in is still better than stopping here.
+        showToast('The selection could not be remembered: ' + e.message, 'error');
+      }
+      window.location.href = '/governance/grant-auth?returnTo=access';
+    },
+  });
+  return false;
+}
+
+/**
+ * Finishes the grant the sign-in interrupted.
+ *
+ * Runs from the remembered ids rather than from the on-screen list, which is empty
+ * on a fresh page load — the whole point is that the operator does not have to
+ * rebuild the selection.
+ */
+async function resumePendingGrant() {
+  if (!pendingGrant || !pendingGrant.workspaceIds || !pendingGrant.workspaceIds.length) return;
+
+  var select = document.getElementById('grantSpSelect');
+  if (select && pendingGrant.spId) select.value = pendingGrant.spId;
+
+  document.getElementById('missingAccessPanel').classList.remove('d-none');
+  document.getElementById('missingAccessHeading').textContent =
+    'Finishing the grant you started before signing in';
+  document.getElementById('missingAccessList').innerHTML =
+    '<div class="small text-muted py-2">' + pendingGrant.workspaceIds.length + ' workspace(s) remembered.</div>';
+
+  missingAccess.selected = new Set(pendingGrant.workspaceIds);
+  pendingGrant = null;
+  await grantSpAccess();
+}
+
+document.addEventListener('DOMContentLoaded', resumePendingGrant);
+
+async function grantSpAccess() {
+  var selected = Array.from(missingAccess.selected);
+  if (!selected.length) return;
+  if (!(await ensureGrantAuth(selected))) return;
+
+  var button = document.getElementById('grantAccessBtn');
+  var result = document.getElementById('grantResult');
+  button.disabled = true;
+  result.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Granting access to ' +
+    selected.length + ' workspace(s)...';
+
+  try {
+    var resp = await fetch('/governance/grant-sp-access', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceIds: selected, spId: document.getElementById('grantSpSelect').value }),
+    });
+    var data = await resp.json();
+
+    if (!data.success) {
+      result.innerHTML = '<span class="text-danger"><i class="bi bi-x-circle me-1"></i>' + escapeHtml(data.message) + '</span>';
+      button.disabled = false;
+      return;
+    }
+
+    // Failures are named. "Granted 38 of 50" without saying which twelve, or why,
+    // is not something anyone can act on.
+    var failures = (data.results || []).filter(function(r) { return !r.success; });
+    var detail = failures.length
+      ? '<ul class="mb-0 mt-1">' + failures.slice(0, 20).map(function(r) {
+          return '<li>' + escapeHtml(r.workspaceId) + ' — ' + escapeHtml(r.error) + '</li>';
+        }).join('') + (failures.length > 20 ? '<li>… and ' + (failures.length - 20) + ' more</li>' : '') + '</ul>'
+      : '';
+    result.innerHTML = '<span class="text-' + (failures.length ? 'warning' : 'success') + '">' +
+      '<i class="bi bi-' + (failures.length ? 'exclamation-triangle' : 'check-circle') + ' me-1"></i>' +
+      escapeHtml(data.message) + '</span>' + detail;
+
+    // Re-checked rather than assumed: the list on screen is now out of date, and
+    // the whole point of this section is that it reflects the tenant.
+    await checkServicePrincipalAccess({ preserveResult: true });
+  } catch (e) {
+    result.innerHTML = '<span class="text-danger">' + escapeHtml(e.message) + '</span>';
+    button.disabled = false;
+  }
+}
+</script>
+
+<%- include('../partials/footer') %>

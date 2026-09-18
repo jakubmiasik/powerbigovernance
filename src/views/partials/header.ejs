@@ -21,10 +21,16 @@
 
   <!-- Sidebar -->
   <aside class="sidebar" id="appSidebar">
-    <a href="/" class="sidebar-brand">
-      <span class="brand-logo">G</span>
-      <span class="brand-text">Power BI Governance<small>Admin Portal</small></span>
-    </a>
+    <div class="sidebar-brand">
+      <a href="/" class="brand-link">
+        <span class="brand-logo">G</span>
+        <span class="brand-text">Power BI Governance<small>Admin Portal</small></span>
+      </a>
+      <button type="button" class="brand-collapse" onclick="collapseSidebar(event)"
+              title="Collapse sidebar" aria-label="Collapse sidebar" id="collapseLink">
+        <i class="bi bi-chevron-double-left" id="collapseIcon"></i>
+      </button>
+    </div>
 
     <nav class="sidebar-nav">
       <p class="nav-section-title">Main</p>
@@ -55,14 +61,29 @@
         <i class="bi bi-lightning"></i> <span>Capacities</span>
       </a>
 
-      <p class="nav-section-title">Settings</p>
-      <a href="/settings" class="sidebar-link <%= pagePath.startsWith('/settings') ? 'active' : '' %>" title="Configuration">
-        <i class="bi bi-gear"></i> <span>Configuration</span>
+      <p class="nav-section-title">Quality</p>
+      <a href="/quality" class="sidebar-link <%= pagePath === '/quality' || pagePath.startsWith('/quality/sources') ? 'active' : '' %>" title="Quality Configuration">
+        <i class="bi bi-patch-check"></i> <span>Quality Configuration</span>
+      </a>
+      <a href="/quality/security-groups" class="sidebar-link <%= pagePath.startsWith('/quality/security-groups') ? 'active' : '' %>" title="Which security groups should exist">
+        <i class="bi bi-people"></i> <span>Security Groups</span>
+      </a>
+      <a href="/reconciliation" class="sidebar-link <%= pagePath.startsWith('/reconciliation') ? 'active' : '' %>" title="Data Reconciliation">
+        <i class="bi bi-clipboard2-check"></i> <span>Reconciliation</span>
+      </a>
+      <a href="/mdm" class="sidebar-link <%= pagePath.startsWith('/mdm') ? 'active' : '' %>" title="Master Data Management">
+        <i class="bi bi-fingerprint"></i> <span>Master Data</span>
       </a>
 
-      <!-- Collapse toggle -->
-      <a href="#" class="sidebar-link mt-2" onclick="collapseSidebar(event)" title="Collapse sidebar" id="collapseLink">
-        <i class="bi bi-layout-sidebar-inset" id="collapseIcon"></i> <span>Collapse</span>
+      <p class="nav-section-title">Settings</p>
+      <a href="/settings" class="sidebar-link <%= pagePath === '/settings' ? 'active' : '' %>" title="Configuration">
+        <i class="bi bi-gear"></i> <span>Configuration</span>
+      </a>
+      <a href="/settings/governance" class="sidebar-link <%= pagePath.startsWith('/settings/governance') ? 'active' : '' %>" title="Governance Configuration">
+        <i class="bi bi-rulers"></i> <span>Governance Configuration</span>
+      </a>
+      <a href="/settings/access" class="sidebar-link <%= pagePath.startsWith('/settings/access') ? 'active' : '' %>" title="Grant Access">
+        <i class="bi bi-key"></i> <span>Grant Access</span>
       </a>
     </nav>
 
@@ -131,7 +152,12 @@
       var lockedRunId = typeof lockedRun !== 'undefined' && lockedRun ? lockedRun.id : null;
       var runSelectorValue = runSelectorLocked && lockedRunId ? lockedRunId : (typeof selectedRunId !== 'undefined' ? selectedRunId : null);
     %>
-    <% if (typeof availableRuns !== 'undefined' && availableRuns && availableRuns.length > 0) { %>
+    <%
+      // Pages that have nothing to do with an analysis scan hide the selector
+      // entirely, rather than showing a control that does not affect them.
+      var suppressRunSelector = typeof hideRunSelector !== 'undefined' && hideRunSelector;
+    %>
+    <% if (!suppressRunSelector && typeof availableRuns !== 'undefined' && availableRuns && availableRuns.length > 0) { %>
       <div class="run-selector-bar">
         <span class="fw-bold small text-nowrap" style="color: var(--color-primary);"><i class="bi bi-building me-1"></i>Service Principal / Scan:</span>
         <select class="form-select form-select-sm" style="max-width: 440px;" id="globalRunSelector" onchange="switchGlobalRun(this.value)" <%= runSelectorLocked ? 'disabled' : '' %>>
@@ -151,13 +177,18 @@
           %>
             <optgroup label="<%= spName %>">
               <% spRuns.forEach(function(r) { %>
-                <option value="<%= r.id %>" <%= (runSelectorValue === r.id) ? 'selected' : '' %>>
-                  <%= spName %>: Run#<%= r.id %> &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
+                <option value="<%= r.id %>" <%= (runSelectorValue === r.id) ? 'selected' : '' %>
+                        title="<%= r.scopeTagTitle || '' %>">
+                  [<%= r.scopeTag || 'WT' %>] <%= spName %>: Run#<%= r.id %> &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
                 </option>
               <% }) %>
             </optgroup>
           <% }) %>
         </select>
+        <% if (typeof globalRun !== 'undefined' && globalRun && globalRun.scopeTag) { %>
+          <span class="badge bg-<%= globalRun.scopeTag === 'WT' ? 'secondary' : 'info text-dark' %>"
+                title="<%= globalRun.scopeTagTitle %>"><%= globalRun.scopeTag %></span>
+        <% } %>
         <% if (runSelectorLocked) { %>
           <% var lockedInfo = (typeof lockedRun !== 'undefined' && lockedRun) ? lockedRun : null; %>
           <span class="badge bg-primary"><i class="bi bi-eye me-1"></i>Viewing Run #<%= lockedInfo ? lockedInfo.id : '-' %></span>
@@ -210,7 +241,12 @@ function collapseSidebar(e) {
   document.body.classList.toggle('sidebar-collapsed', isCollapsed);
   localStorage.setItem('pbi-gov-sidebar', isCollapsed ? 'collapsed' : 'expanded');
   var icon = document.getElementById('collapseIcon');
-  icon.className = isCollapsed ? 'bi bi-layout-sidebar-inset-reverse' : 'bi bi-layout-sidebar-inset';
+  // The arrow points the way it will move the sidebar, so its meaning does not
+  // depend on remembering the current state.
+  icon.className = isCollapsed ? 'bi bi-chevron-double-right' : 'bi bi-chevron-double-left';
+  var button = document.getElementById('collapseLink');
+  button.title = isCollapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  button.setAttribute('aria-label', button.title);
 }
 
 // Theme
@@ -270,7 +306,9 @@ function toggleDensity() {
     var sidebar = document.getElementById('appSidebar');
     if (sidebar) { sidebar.classList.add('collapsed'); document.body.classList.add('sidebar-collapsed'); }
     var ci = document.getElementById('collapseIcon');
-    if (ci) ci.className = 'bi bi-layout-sidebar-inset-reverse';
+    if (ci) ci.className = 'bi bi-chevron-double-right';
+    var cl = document.getElementById('collapseLink');
+    if (cl) { cl.title = 'Expand sidebar'; cl.setAttribute('aria-label', 'Expand sidebar'); }
   }
   // Last refreshed timestamp
   var ts = document.getElementById('lastRefreshed');

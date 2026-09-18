@@ -2,7 +2,7 @@
 <div class="row">
   <div class="col-lg-8 mx-auto">
     <h2><i class="bi bi-gear me-2"></i>Settings</h2>
-    <p class="text-muted">Configure Service Principals for Power BI API access.</p>
+    <p class="text-muted">Service principals for Power BI API access.</p>
 
     <div id="flash-messages">
       <% if (success && success.length) { %>
@@ -85,6 +85,20 @@
     <div class="text-muted small mb-4">
       <i class="bi bi-info-circle me-1"></i>
       The first Service Principal in the list is used for all API calls (workspaces, capacities, analysis, storage).
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-body py-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+          <div class="fw-bold"><i class="bi bi-rulers me-2"></i>Governance Configuration</div>
+          <div class="text-muted small">
+            How the estate is judged rather than how it is reached — starting with the Fabric artifact naming convention.
+          </div>
+        </div>
+        <a href="/settings/governance" class="btn btn-sm btn-outline-primary text-nowrap">
+          Open<i class="bi bi-arrow-right ms-1"></i>
+        </a>
+      </div>
     </div>
   </div>
 </div>
