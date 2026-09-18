@@ -1144,6 +1144,32 @@ test('governance tenant settings read the snapshot stored with the selected run'
   }
 });
 
+test('the workspace detail view renders inline scripts that actually parse', async () => {
+  // A broken declaration in one inline script block kills every function defined
+  // in it, so the Security tab's "Refresh from Fabric API" button silently does
+  // nothing with only a console error to show for it.
+  const ejs = require('ejs');
+  const fs = require('node:fs');
+  const vm = require('node:vm');
+  const file = 'src/views/workspaces/detail.ejs';
+
+  const html = ejs.render(fs.readFileSync(file, 'utf8'), {
+    title: 'WS', user: null, currentUser: null,
+    workspace: { id: '11111111-2222-3333-4444-555555555555', name: 'WS' },
+    items: [], reports: [], datasets: [], dashboards: [], dataflows: [],
+    lakehouses: [], notebooks: [], pipelines: [], warehouses: [], others: [],
+    users: [], sourceRun: { id: 1, started_at: new Date().toISOString() },
+    lockRunSelector: false, lockedRun: null,
+  }, { filename: file });
+
+  const blocks = [...html.matchAll(/<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+  assert.ok(blocks.length > 0, 'expected inline script blocks');
+  for (const [index, code] of blocks.entries()) {
+    assert.doesNotThrow(() => new vm.Script(code), `inline script block ${index} does not parse`);
+  }
+  assert.ok(html.includes('loadFabricRoles'), 'the refresh handler should be defined');
+});
+
 test('the pipeline grant redirect resolves the async auth URL', async () => {
   // getDelegatedAuthUrl is a promise-returning MSAL call. Redirecting to it
   // without awaiting sends the browser to "/pipelines/[object Promise]".
