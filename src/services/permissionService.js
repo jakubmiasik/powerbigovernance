@@ -36,20 +36,32 @@ function parseAdminEmails(raw) {
 /**
  * The effective permissions for one signed-in user.
  *
+ * Access can be granted to the person directly or to a security group they belong
+ * to, so what arrives here is a *set* of matching entries. They are combined
+ * additively: the most access any one of them confers is what the person gets.
+ * Intersecting instead would make adding somebody to a second group take access
+ * away, which is the opposite of what granting means.
+ *
  * @param {object} options
  * @param {object|null} options.user        the signed-in user ({ email, name })
- * @param {object|null} options.record      their row from app_users, with tenantIds/sectionKeys
+ * @param {object|null} options.record      their own row from app_users, with tenantIds/sectionKeys
+ * @param {Array}       options.groupRecords rows for security groups they belong to
  * @param {string[]}    options.adminEmails emails that are administrators by configuration
  * @param {boolean}     options.anyAdminConfigured whether any administrator exists yet
  * @param {Array}       options.tenants     every configured tenant (service principal)
  */
-function resolvePermissions({ user, record, adminEmails = [], anyAdminConfigured = false, tenants = [] } = {}) {
+function resolvePermissions({
+  user, record, groupRecords = [], adminEmails = [], anyAdminConfigured = false, tenants = [],
+} = {}) {
   const email = normalizeEmail(user && user.email);
   const envAdmin = Boolean(email) && adminEmails.map(normalizeEmail).includes(email);
   // Nobody has been made an administrator yet, so the first arrivals must be able
   // to reach the panel and name one.
   const bootstrap = !anyAdminConfigured;
-  const recordAdmin = Boolean(record) && record.is_active !== false && record.role === ROLE_ADMIN;
+
+  // A deactivated entry grants nothing, whether it is the person's own or a group's.
+  const applicable = [record, ...groupRecords].filter(entry => entry && entry.is_active !== false);
+  const recordAdmin = applicable.some(entry => entry.role === ROLE_ADMIN);
   const isAdmin = envAdmin || bootstrap || recordAdmin;
 
   const allTenantIds = tenants.map(tenant => Number(tenant.id));
@@ -65,13 +77,14 @@ function resolvePermissions({ user, record, adminEmails = [], anyAdminConfigured
       tenantIds: allTenantIds,
       sectionKeys: SECTION_KEYS.slice(),
       allSections: true,
+      viaGroups: [],
     };
   }
 
   // Signed in, but nobody has granted this person anything. They are not an error
   // and not an administrator — they simply have no access yet, and must be told so
   // rather than shown an application with every page empty.
-  if (!record || record.is_active === false) {
+  if (!applicable.length) {
     return {
       email,
       isAdmin: false,
@@ -82,11 +95,15 @@ function resolvePermissions({ user, record, adminEmails = [], anyAdminConfigured
       tenantIds: [],
       sectionKeys: [],
       allSections: false,
+      viaGroups: [],
     };
   }
 
-  const tenantIds = [...new Set((record.tenantIds || []).map(Number).filter(Number.isFinite))];
-  const sectionKeys = [...new Set((record.sectionKeys || []).filter(key => SECTION_KEYS.includes(key)))]
+  const tenantIds = [...new Set(
+    applicable.flatMap(entry => (entry.tenantIds || []).map(Number)).filter(Number.isFinite),
+  )];
+  const sectionKeys = [...new Set(applicable.flatMap(entry => entry.sectionKeys || []))]
+    .filter(key => SECTION_KEYS.includes(key))
     // An ordinary user can never hold an admin-only section, whatever the table says.
     .filter(key => {
       const section = APP_SECTIONS.find(candidate => candidate.key === key);
@@ -103,6 +120,11 @@ function resolvePermissions({ user, record, adminEmails = [], anyAdminConfigured
     tenantIds,
     sectionKeys,
     allSections: false,
+    // Which groups did the granting, so the panel and the refusal page can say
+    // where somebody's access actually comes from.
+    viaGroups: applicable
+      .filter(entry => entry.principal_type === 'group')
+      .map(entry => entry.display_name || entry.entra_object_id),
   };
 }
 

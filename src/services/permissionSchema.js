@@ -62,6 +62,45 @@ const PERMISSION_MIGRATIONS = [
       END
     `,
   },
+  {
+    // A group is granted the same way a person is, so it lives in the same table.
+    // That means identity can no longer be "the email": a security group may not
+    // have one, and two groups without one must not collide.
+    label: 'allow security groups alongside users in app_users',
+    sql: `
+      IF COL_LENGTH('app_users', 'principal_type') IS NULL
+        ALTER TABLE app_users ADD principal_type NVARCHAR(16) NOT NULL DEFAULT 'user';
+      -- The directory object the entry was picked from. For a group it is what
+      -- members are matched against; for a person it survives a rename or an
+      -- address change that would otherwise lose their grants.
+      IF COL_LENGTH('app_users', 'entra_object_id') IS NULL
+        ALTER TABLE app_users ADD entra_object_id NVARCHAR(64) NULL;
+    `,
+  },
+  {
+    label: 'key app_users by principal rather than by email alone',
+    sql: `
+      IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_app_users_email' AND object_id = OBJECT_ID(N'app_users'))
+        DROP INDEX UX_app_users_email ON app_users;
+
+      IF EXISTS (
+        SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'app_users')
+          AND name = 'email' AND is_nullable = 0
+      )
+        ALTER TABLE app_users ALTER COLUMN email NVARCHAR(320) NULL;
+
+      -- Filtered, so each kind of principal is unique by the thing that actually
+      -- identifies it: a person by the address they sign in with, a group by its
+      -- directory object.
+      IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_app_users_user_email' AND object_id = OBJECT_ID(N'app_users'))
+        CREATE UNIQUE INDEX UX_app_users_user_email ON app_users (email)
+          WHERE principal_type = 'user' AND email IS NOT NULL;
+
+      IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_app_users_group_object' AND object_id = OBJECT_ID(N'app_users'))
+        CREATE UNIQUE INDEX UX_app_users_group_object ON app_users (entra_object_id)
+          WHERE principal_type = 'group' AND entra_object_id IS NOT NULL;
+    `,
+  },
 ];
 
 module.exports = { PERMISSION_MIGRATIONS };

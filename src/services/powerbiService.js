@@ -952,6 +952,21 @@ function createPowerBIService(spConfig, authOptions = {}) {
     return data.value || [];
   }
 
+  /**
+   * Every security group a person belongs to, directly or through nesting.
+   *
+   * `getMemberGroups` is used rather than reading `memberOf`, because it is the
+   * call that expands nested groups. A grant is almost always given to a parent
+   * group, so direct membership alone would apply it to some members and silently
+   * not to others.
+   */
+  async function getTransitiveGroupIds(userPrincipalName) {
+    const token = await getGraphToken();
+    const url = `${GRAPH_BASE}/users/${encodeURIComponent(userPrincipalName)}/getMemberGroups`;
+    const data = await safePost(token, url, { securityEnabledOnly: true });
+    return data && Array.isArray(data.value) ? data.value : [];
+  }
+
   // ── OneLake Storage Size: ADLS Gen2 compatible API ──
   const ONELAKE_DFS = 'https://onelake.dfs.fabric.microsoft.com';
   let onelakeTokenPromise = null;
@@ -1123,6 +1138,7 @@ function createPowerBIService(spConfig, authOptions = {}) {
     searchEntraUsers,
     searchEntraServicePrincipals,
     searchEntraGroups,
+    getTransitiveGroupIds,
     getItemStorageSize,
     getWorkspaceStorageSize,
   };
