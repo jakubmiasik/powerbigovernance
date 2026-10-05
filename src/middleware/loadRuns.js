@@ -1,5 +1,6 @@
 const db = require('../services/databaseService');
 const { scopeTag, scopeTagTitle } = require('../services/analysisScopeService');
+const { visibleRuns } = require('../services/permissionService');
 
 const RUN_CACHE_TTL_MS = parseInt(process.env.RUN_CACHE_TTL_MS || '30000', 10);
 let runCache = { expiresAt: 0, runs: [] };
@@ -27,12 +28,15 @@ async function loadRuns(req, res, next) {
   res.locals.currentUser = req.user;
 
   try {
-    const completedRuns = await getCompletedRuns();
+    // A scan belongs to the tenant it scanned, so the tenant grant decides which
+    // scans exist for this user at all. Filtering here means every page, selector
+    // and count downstream is already scoped, rather than each having to remember.
+    const completedRuns = visibleRuns(req.permissions, await getCompletedRuns());
     res.locals.availableRuns = completedRuns;
 
     if (req.query.runId) {
       const parsedRunId = Number.parseInt(req.query.runId, 10);
-      if (Number.isInteger(parsedRunId)) {
+      if (Number.isInteger(parsedRunId) && completedRuns.some(r => r.id === parsedRunId)) {
         req.session.selectedRunId = parsedRunId;
       }
     }

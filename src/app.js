@@ -9,6 +9,7 @@ const { getConfig } = require('./config/settings');
 const { parseEasyAuthUser, requireAuth } = require('./middleware/auth');
 const { securityHeaders, createRateLimiter } = require('./middleware/security');
 const { loadRuns } = require('./middleware/loadRuns');
+const { loadPermissions, requireSectionAccess } = require('./middleware/permissions');
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
@@ -105,14 +106,27 @@ app.get('/health', (_req, res) => {
 // so the App Service probe (which sends no user) keeps working.
 app.use(requireAuth);
 
+// Who this user is allowed to be, before anything reads a run or renders a menu.
+app.use(loadPermissions);
+
 // Global context: selected run + available runs, cached to avoid DB work on every request
 app.use(loadRuns);
+
+// Section access is enforced here, in front of every route. The sidebar hides what
+// a user cannot reach, but hiding a link is not a restriction — this is.
+app.use(requireSectionAccess);
 
 // API to switch selected run
 app.post('/api/select-run', (req, res) => {
   const selectedRunId = Number.parseInt(req.body.runId, 10);
   if (!Number.isInteger(selectedRunId) || selectedRunId <= 0) {
     return res.status(400).json({ success: false, message: 'Invalid runId.' });
+  }
+  // The selector only offers permitted scans, but the endpoint must check too:
+  // otherwise the tenant restriction is one POST away from being bypassed.
+  const permitted = (res.locals.availableRuns || []).some(run => run.id === selectedRunId);
+  if (!permitted) {
+    return res.status(403).json({ success: false, message: 'You do not have access to that scan.' });
   }
   req.session.selectedRunId = selectedRunId;
   res.json({ success: true });
@@ -145,8 +159,10 @@ const mdmRoutes = require('./routes/mdm');
 const qualityRoutes = require('./routes/quality');
 const pipelineRoutes = require('./routes/pipelines');
 const tenantSettingsRoutes = require('./routes/tenantSettings');
+const permissionRoutes = require('./routes/permissions');
 
 app.use('/', indexRoutes);
+app.use('/settings/permissions', permissionRoutes);
 app.use('/settings/access', accessRoutes);
 app.use('/settings/governance', governanceConfigRoutes);
 app.use('/settings', configRoutes);

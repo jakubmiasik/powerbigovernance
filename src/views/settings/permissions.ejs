@@ -1,0 +1,296 @@
+<%- include('../partials/header') %>
+<%
+  var sectionsByGroup = {};
+  sections.forEach(function(section) {
+    (sectionsByGroup[section.group] = sectionsByGroup[section.group] || []).push(section);
+  });
+  var tenantName = {};
+  tenants.forEach(function(tenant) { tenantName[tenant.id] = tenant.name; });
+%>
+<div class="row">
+  <div class="col-xxl-10 mx-auto">
+    <h2><i class="bi bi-person-badge me-2"></i>Users &amp; Access</h2>
+    <p class="text-muted">
+      Who may use this application, which tenants they may see and run scans for, and which
+      sections are available to them.
+    </p>
+
+    <div id="flash-messages">
+      <% if (success && success.length) { %>
+        <% success.forEach(function(message) { %>
+          <div class="alert alert-success alert-dismissible fade show">
+            <i class="bi bi-check-circle me-2"></i><%= message %>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+          </div>
+        <% }) %>
+      <% } %>
+      <% if (error && error.length) { %>
+        <% error.forEach(function(message) { %>
+          <div class="alert alert-danger alert-dismissible fade show">
+            <i class="bi bi-x-circle me-2"></i><%= message %>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+          </div>
+        <% }) %>
+      <% } %>
+    </div>
+
+    <% if (bootstrap) { %>
+      <div class="alert alert-warning">
+        <i class="bi bi-exclamation-triangle me-2"></i>
+        <strong>No administrator has been configured yet.</strong>
+        Until one exists, every signed-in user has full access — that is what makes this
+        page reachable the first time. Add yourself as an <strong>Administrator</strong>
+        below to switch restrictions on.
+      </div>
+    <% } %>
+
+    <% if (!tenants.length) { %>
+      <div class="alert alert-info">
+        <i class="bi bi-info-circle me-2"></i>No tenants are configured yet, so there is nothing to grant.
+        Add a service principal under <a href="/settings">Configuration</a> first.
+      </div>
+    <% } %>
+
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h5 class="mb-0"><i class="bi bi-people me-2 text-primary"></i>Users (<%= users.length %>)</h5>
+      <button class="btn btn-primary btn-sm" onclick="openUserForm()">
+        <i class="bi bi-plus-lg me-1"></i>Add User
+      </button>
+    </div>
+
+    <% if (!users.length) { %>
+      <div class="alert alert-secondary"><i class="bi bi-info-circle me-2"></i>No users configured yet.</div>
+    <% } else { %>
+      <div class="card mb-4">
+        <div class="table-responsive">
+          <table class="table table-hover table-sm mb-0 align-middle">
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Role</th>
+                <th>Tenants</th>
+                <th>Sections</th>
+                <th class="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% users.forEach(function(row) { %>
+                <tr>
+                  <td>
+                    <strong><%= row.display_name || row.email %></strong>
+                    <% if (row.display_name) { %><div class="small text-muted"><%= row.email %></div><% } %>
+                    <% if (!row.is_active) { %><span class="badge bg-secondary">Deactivated</span><% } %>
+                  </td>
+                  <td>
+                    <span class="badge bg-<%= row.role === 'admin' ? 'danger' : 'primary' %>">
+                      <%= row.role === 'admin' ? 'Administrator' : 'User' %>
+                    </span>
+                  </td>
+                  <td class="small">
+                    <% if (row.role === 'admin') { %>
+                      <span class="text-muted">All tenants</span>
+                    <% } else if (!row.tenantIds.length) { %>
+                      <span class="text-danger">None</span>
+                    <% } else { %>
+                      <% row.tenantIds.forEach(function(spId) { %>
+                        <span class="badge bg-secondary me-1"><%= tenantName[spId] || ('Tenant #' + spId) %></span>
+                      <% }) %>
+                    <% } %>
+                  </td>
+                  <td class="small">
+                    <% if (row.role === 'admin') { %>
+                      <span class="text-muted">All sections</span>
+                    <% } else if (!row.sectionKeys.length) { %>
+                      <span class="text-danger">None</span>
+                    <% } else { %>
+                      <% row.sectionKeys.forEach(function(key) { %>
+                        <span class="badge bg-info text-dark me-1"><%= key %></span>
+                      <% }) %>
+                    <% } %>
+                  </td>
+                  <td class="text-end text-nowrap">
+                    <button class="btn btn-sm btn-outline-primary js-edit-user"
+                            data-user="<%= JSON.stringify(row).replace(/"/g, '&quot;') %>">
+                      <i class="bi bi-pencil"></i>
+                    </button>
+                    <form method="POST" action="/settings/permissions/delete/<%= row.id %>" class="d-inline"
+                          onsubmit="return confirm('Remove access for <%= row.email %>?');">
+                      <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                    </form>
+                  </td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    <% } %>
+  </div>
+</div>
+
+<div class="modal fade" id="userModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <form method="POST" action="/settings/permissions/save">
+        <div class="modal-header">
+          <h5 class="modal-title" id="userModalTitle">Add User</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" name="id" id="userId">
+
+          <div class="row g-3 mb-3">
+            <div class="col-md-6">
+              <label class="form-label">Sign-in email <span class="text-danger">*</span></label>
+              <input type="email" class="form-control" name="email" id="userEmail" required
+                     placeholder="person@contoso.com">
+              <div class="form-text">Must match the address they sign in with.</div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Display name</label>
+              <input type="text" class="form-control" name="displayName" id="userDisplayName">
+            </div>
+          </div>
+
+          <div class="row g-3 mb-3">
+            <div class="col-md-6">
+              <label class="form-label">Role</label>
+              <select class="form-select" name="role" id="userRole" onchange="syncRoleState()">
+                <option value="user">User — only what is ticked below</option>
+                <option value="admin">Administrator — everything, including this page</option>
+              </select>
+            </div>
+            <div class="col-md-6 d-flex align-items-end">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="isActive" id="userActive" checked>
+                <label class="form-check-label" for="userActive">Active</label>
+              </div>
+            </div>
+          </div>
+
+          <div id="grantFields">
+            <h6 class="mt-3"><i class="bi bi-building me-1"></i>Tenants</h6>
+            <p class="text-muted small">
+              Which tenants this person can see and trigger analysis runs for. Scans belonging to
+              other tenants are hidden from them everywhere, including the scan selector.
+            </p>
+            <% if (!tenants.length) { %>
+              <p class="text-muted small fst-italic">No tenants configured.</p>
+            <% } else { %>
+              <div class="row g-2 mb-3">
+                <% tenants.forEach(function(tenant) { %>
+                  <div class="col-md-6">
+                    <div class="form-check">
+                      <input class="form-check-input js-tenant" type="checkbox" name="tenantIds"
+                             value="<%= tenant.id %>" id="tenant-<%= tenant.id %>">
+                      <label class="form-check-label" for="tenant-<%= tenant.id %>">
+                        <%= tenant.name %>
+                        <span class="d-block small text-muted"><%= tenant.tenant_id %></span>
+                      </label>
+                    </div>
+                  </div>
+                <% }) %>
+              </div>
+            <% } %>
+
+            <h6 class="mt-3"><i class="bi bi-grid me-1"></i>Sections</h6>
+            <p class="text-muted small">
+              Which parts of the application appear for this person. Anything not ticked is hidden
+              from the menu and refused if its address is opened directly.
+            </p>
+            <% Object.keys(sectionsByGroup).forEach(function(group) { %>
+              <div class="mb-2">
+                <div class="small fw-bold text-muted text-uppercase"><%= group %></div>
+                <div class="row g-2">
+                  <% sectionsByGroup[group].forEach(function(section) { %>
+                    <div class="col-md-6">
+                      <div class="form-check">
+                        <input class="form-check-input js-section" type="checkbox" name="sectionKeys"
+                               value="<%= section.key %>" id="section-<%= section.key %>">
+                        <label class="form-check-label" for="section-<%= section.key %>">
+                          <i class="bi <%= section.icon %> me-1"></i><%= section.label %>
+                        </label>
+                      </div>
+                    </div>
+                  <% }) %>
+                </div>
+              </div>
+            <% }) %>
+          </div>
+
+          <div id="adminNotice" class="alert alert-info d-none mt-3">
+            <i class="bi bi-info-circle me-2"></i>Administrators see every tenant and every section,
+            so there is nothing to tick.
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+var userModalInstance = null;
+
+function userModal() {
+  if (!userModalInstance) userModalInstance = new bootstrap.Modal(document.getElementById('userModal'));
+  return userModalInstance;
+}
+
+// Administrators hold everything by role, so the tick boxes are hidden rather than
+// left on screen suggesting a restriction that is not applied.
+function syncRoleState() {
+  var isAdmin = document.getElementById('userRole').value === 'admin';
+  document.getElementById('grantFields').classList.toggle('d-none', isAdmin);
+  document.getElementById('adminNotice').classList.toggle('d-none', !isAdmin);
+}
+
+function clearGrantBoxes() {
+  document.querySelectorAll('.js-tenant, .js-section').forEach(function(box) { box.checked = false; });
+}
+
+function openUserForm() {
+  document.getElementById('userModalTitle').textContent = 'Add User';
+  document.getElementById('userId').value = '';
+  document.getElementById('userEmail').value = '';
+  document.getElementById('userDisplayName').value = '';
+  document.getElementById('userRole').value = 'user';
+  document.getElementById('userActive').checked = true;
+  clearGrantBoxes();
+  syncRoleState();
+  userModal().show();
+}
+
+function openUserFormWith(row) {
+  document.getElementById('userModalTitle').textContent = 'Edit ' + row.email;
+  document.getElementById('userId').value = row.id;
+  document.getElementById('userEmail').value = row.email;
+  document.getElementById('userDisplayName').value = row.display_name || '';
+  document.getElementById('userRole').value = row.role === 'admin' ? 'admin' : 'user';
+  document.getElementById('userActive').checked = row.is_active !== false;
+  clearGrantBoxes();
+  (row.tenantIds || []).forEach(function(spId) {
+    var box = document.getElementById('tenant-' + spId);
+    if (box) box.checked = true;
+  });
+  (row.sectionKeys || []).forEach(function(key) {
+    var box = document.getElementById('section-' + key);
+    if (box) box.checked = true;
+  });
+  syncRoleState();
+  userModal().show();
+}
+
+// The row carries its own data, bound here rather than inlined into an onclick:
+// a display name containing a quote would end the attribute and kill the button.
+document.addEventListener('click', function(event) {
+  var btn = event.target.closest('.js-edit-user');
+  if (!btn) return;
+  event.preventDefault();
+  openUserFormWith(JSON.parse(btn.getAttribute('data-user')));
+});
+</script>
+<%- include('../partials/footer') %>

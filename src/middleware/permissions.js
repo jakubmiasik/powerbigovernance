@@ -1,0 +1,109 @@
+/**
+ * Loads the signed-in user's permissions and enforces them.
+ *
+ * Enforcement is here, in front of every route, rather than in the sidebar. Hiding
+ * a menu entry is a courtesy; a restriction that only exists in the menu is
+ * defeated by typing the URL.
+ *
+ * Permissions are cached briefly per email. Without it every request would run
+ * three extra queries, and the page templates themselves read the result.
+ */
+
+const permissions = require('../services/permissionService');
+const permissionRepository = require('../services/permissionRepository');
+const db = require('../services/databaseService');
+const { sectionForPath } = require('../services/appSectionService');
+
+const PERMISSION_CACHE_TTL_MS = parseInt(process.env.PERMISSION_CACHE_TTL_MS || '30000', 10);
+const cache = new Map();
+
+function clearPermissionCache() {
+  cache.clear();
+}
+
+async function readPermissionInputs(email) {
+  const cached = cache.get(email);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  // Errors are deliberately not swallowed here. Treating an unreadable table as
+  // "no administrator exists" would put the whole application into bootstrap mode
+  // and hand every signed-in user administrator rights — the exact opposite of
+  // what a failure should do. The caller turns a failure into no access instead.
+  const [record, anyAdminConfigured, tenants] = await Promise.all([
+    permissionRepository.getUserByEmail(email),
+    permissionRepository.hasAnyAdmin(),
+    db.getServicePrincipals(),
+  ]);
+
+  const value = { record, anyAdminConfigured, tenants };
+  cache.set(email, { expiresAt: Date.now() + PERMISSION_CACHE_TTL_MS, value });
+  return value;
+}
+
+async function loadPermissions(req, res, next) {
+  const adminEmails = permissions.parseAdminEmails(process.env.ADMIN_EMAILS);
+
+  // No signed-in user means auth is switched off (local development). Treating
+  // that as an administrator keeps the app usable without inventing an identity.
+  if (!req.user) {
+    req.permissions = permissions.resolvePermissions({ user: null, record: null, adminEmails, anyAdminConfigured: false });
+    res.locals.permissions = req.permissions;
+    res.locals.visibleSections = permissions.visibleSections(req.permissions);
+    return next();
+  }
+
+  try {
+    const { record, anyAdminConfigured, tenants } = await readPermissionInputs(permissions.normalizeEmail(req.user.email));
+    req.permissions = permissions.resolvePermissions({
+      user: req.user, record, adminEmails, anyAdminConfigured, tenants,
+    });
+  } catch (err) {
+    // The permission tables being unreadable must not hand out access. The user is
+    // told their access could not be determined instead of silently getting none
+    // or, worse, all of it.
+    console.error('[Permissions] Could not resolve permissions:', err.message);
+    req.permissions = {
+      email: permissions.normalizeEmail(req.user.email),
+      isAdmin: false, isKnown: false, isBootstrap: false, reason: 'error',
+      allTenants: false, tenantIds: [], sectionKeys: [], allSections: false,
+      error: err.message,
+    };
+  }
+
+  res.locals.permissions = req.permissions;
+  res.locals.visibleSections = permissions.visibleSections(req.permissions);
+  next();
+}
+
+function requireSectionAccess(req, res, next) {
+  if (permissions.canAccessPath(req.permissions, req.path)) return next();
+
+  const section = sectionForPath(req.path);
+  const message = req.permissions && req.permissions.reason === 'error'
+    ? 'Your access could not be determined right now. Try again shortly.'
+    : null;
+
+  // A fetch/XHR call needs an answer it can read, not a page it cannot render.
+  const wantsJson = req.xhr
+    || (req.get('accept') || '').includes('application/json')
+    || req.path.startsWith('/api/');
+  if (wantsJson) {
+    return res.status(403).json({
+      success: false,
+      error: 'Forbidden',
+      message: message || 'You do not have access to this section.',
+      section: section ? section.key : null,
+    });
+  }
+
+  res.status(403).render('no-access', {
+    title: 'No access',
+    user: req.user,
+    section,
+    message,
+    permissions: req.permissions,
+    hideRunSelector: true,
+  });
+}
+
+module.exports = { loadPermissions, requireSectionAccess, clearPermissionCache };

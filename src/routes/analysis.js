@@ -17,6 +17,18 @@ const {
 } = require('../services/analysisScopeService');
 const { SCHEDULE_TYPES } = require('../services/scheduleDueService');
 const { convertScheduleToUtc } = require('../services/scheduleTimeService');
+const { visibleTenants, visibleRuns, canSeeTenant } = require('../services/permissionService');
+
+/**
+ * The tenants this user may act on.
+ *
+ * Every entry point that can read a tenant or start a scan goes through here, so a
+ * tenant grant cannot be bypassed by passing another tenant's spId to an endpoint
+ * that happened to read the full list for itself.
+ */
+async function permittedServicePrincipals(req) {
+  return visibleTenants(req.permissions, await db.getServicePrincipals());
+}
 
 const activeAnalyses = new Map();
 
@@ -146,7 +158,7 @@ router.get('/', async (req, res) => {
   try {
     const [runs, servicePrincipals] = await Promise.all([
       db.getAnalysisRuns(),
-      db.getServicePrincipals(),
+      permittedServicePrincipals(req),
     ]);
 
     // Live percentages are rendered with the table rather than waiting for the first
@@ -172,7 +184,8 @@ router.get('/', async (req, res) => {
     res.render('analysis/index', {
       title: 'Run Analysis',
       user: req.user,
-      runs: runs.map(run => ({ ...run, scope: scopeFromRow(run), scopeLabel: describeScope(scopeFromRow(run)) })),
+      runs: visibleRuns(req.permissions, runs)
+        .map(run => ({ ...run, scope: scopeFromRow(run), scopeLabel: describeScope(scopeFromRow(run)) })),
       servicePrincipals,
       liveProgress,
       schedules,
@@ -220,9 +233,20 @@ launcher.register(({ sp, scope, runBy, scheduleId }) =>
 
 router.post('/run', async (req, res) => {
   try {
-    const sps = await db.getServicePrincipals();
-    if (sps.length === 0) return res.json({ success: false, message: 'No service principal configured. Go to Settings to add one.' });
+    const sps = await permittedServicePrincipals(req);
+    if (sps.length === 0) {
+      return res.json({
+        success: false,
+        message: 'No tenant is available to you. Ask an administrator to grant you one under Users & Access.',
+      });
+    }
     const requestedSpId = Number.parseInt(req.body ? req.body.spId : null, 10);
+    // Naming a tenant that was not granted is refused rather than quietly falling
+    // back to a permitted one: starting a scan against the wrong tenant is worse
+    // than being told no.
+    if (Number.isFinite(requestedSpId) && !canSeeTenant(req.permissions, requestedSpId)) {
+      return res.status(403).json({ success: false, message: 'You do not have access to that tenant.' });
+    }
     const sp = (Number.isFinite(requestedSpId) && sps.find(s => parseInt(s.id, 10) === requestedSpId)) || sps[0];
 
     const requested = { kind: req.body ? req.body.scope : null, workspaceIds: req.body ? req.body.workspaces : [] };
@@ -259,8 +283,11 @@ router.post('/run', async (req, res) => {
 router.get('/workspaces', async (req, res) => {
   try {
     const wantsLive = req.query.refresh === '1' || req.query.refresh === 'true';
-    const sps = await db.getServicePrincipals();
+    const sps = await permittedServicePrincipals(req);
     const requestedSpId = Number.parseInt(req.query.spId, 10);
+    if (Number.isFinite(requestedSpId) && !canSeeTenant(req.permissions, requestedSpId)) {
+      return res.status(403).json({ success: false, message: 'You do not have access to that tenant.' });
+    }
     const sp = (Number.isFinite(requestedSpId) && sps.find(s => parseInt(s.id, 10) === requestedSpId)) || sps[0];
 
     if (wantsLive) {
