@@ -29,7 +29,10 @@ function int(name, value) {
   return { name, type: TYPES.Int, value: Number.isFinite(parsed) ? parsed : null };
 }
 
-const USER_COLUMNS = 'id, email, display_name, role, is_active, created_at, created_by, updated_at, updated_by';
+const USER_COLUMNS = 'id, email, display_name, role, is_active, principal_type, entra_object_id, created_at, created_by, updated_at, updated_by';
+
+const PRINCIPAL_USER = 'user';
+const PRINCIPAL_GROUP = 'group';
 
 function shapeUser(row) {
   if (!row) return null;
@@ -37,43 +40,50 @@ function shapeUser(row) {
     ...row,
     id: Number(row.id),
     is_active: row.is_active === true || row.is_active === 1,
+    principal_type: row.principal_type === PRINCIPAL_GROUP ? PRINCIPAL_GROUP : PRINCIPAL_USER,
     tenantIds: [],
     sectionKeys: [],
   };
 }
 
-/** Every configured user with their grants attached, for the admin panel. */
+/** Attaches tenant and section grants to already-loaded entries, in place. */
+async function attachGrants(conn, entries) {
+  if (!entries.length) return entries;
+  const byId = new Map(entries.map(entry => [entry.id, entry]));
+  // Separate statements rather than one joined query: a tedious connection runs
+  // one request at a time, and a three-way join would duplicate rows per grant,
+  // which has to be undone again on the way out.
+  for (const row of await execSql(conn, 'SELECT user_id, sp_id FROM app_user_tenants')) {
+    const entry = byId.get(Number(row.user_id));
+    if (entry) entry.tenantIds.push(Number(row.sp_id));
+  }
+  for (const row of await execSql(conn, 'SELECT user_id, section_key FROM app_user_sections')) {
+    const entry = byId.get(Number(row.user_id));
+    if (entry) entry.sectionKeys.push(row.section_key);
+  }
+  return entries;
+}
+
+/** Every configured user and security group with their grants, for the admin panel. */
 async function listUsers() {
   return withConnection(async (conn) => {
-    const users = (await execSql(conn, `SELECT ${USER_COLUMNS} FROM app_users ORDER BY role DESC, email`))
+    const users = (await execSql(conn, `SELECT ${USER_COLUMNS} FROM app_users ORDER BY role DESC, principal_type, email, display_name`))
       .map(shapeUser);
-    if (!users.length) return [];
-
-    const byId = new Map(users.map(user => [user.id, user]));
-    // Separate statements rather than one joined query: a tedious connection runs
-    // one request at a time, and a three-way join would duplicate user rows per
-    // grant, which has to be undone again on the way out.
-    for (const row of await execSql(conn, 'SELECT user_id, sp_id FROM app_user_tenants')) {
-      const user = byId.get(Number(row.user_id));
-      if (user) user.tenantIds.push(Number(row.sp_id));
-    }
-    for (const row of await execSql(conn, 'SELECT user_id, section_key FROM app_user_sections')) {
-      const user = byId.get(Number(row.user_id));
-      if (user) user.sectionKeys.push(row.section_key);
-    }
-    return users;
+    return attachGrants(conn, users);
   });
 }
 
-/** One user, by sign-in email, with their grants. Null when they are not configured. */
+/** One person's own entry, by sign-in email. Null when they are not configured. */
 async function getUserByEmail(email) {
   const normalized = normalizeEmail(email);
   if (!normalized) return null;
 
   return withConnection(async (conn) => {
-    const rows = await execSql(conn, `SELECT ${USER_COLUMNS} FROM app_users WHERE email = @email`, [
-      str('email', normalized),
-    ]);
+    const rows = await execSql(
+      conn,
+      `SELECT ${USER_COLUMNS} FROM app_users WHERE email = @email AND principal_type = @principalType`,
+      [str('email', normalized), str('principalType', PRINCIPAL_USER)],
+    );
     const user = shapeUser(rows[0]);
     if (!user) return null;
 
@@ -84,6 +94,34 @@ async function getUserByEmail(email) {
       user.sectionKeys.push(row.section_key);
     }
     return user;
+  });
+}
+
+/**
+ * The granted security groups a person belongs to.
+ *
+ * Matched on the directory object id rather than the group's name or address: a
+ * group can be renamed, and the grant must survive it.
+ */
+async function getGroupRecords(groupIds = []) {
+  const wanted = [...new Set(groupIds.map(id => String(id || '').trim()).filter(Boolean))];
+  if (!wanted.length) return [];
+
+  return withConnection(async (conn) => {
+    // Parameterised one placeholder per id — an id is directory data, not something
+    // to concatenate into SQL.
+    const placeholders = wanted.map((_, index) => '@g' + index).join(', ');
+    const params = wanted.map((id, index) => str('g' + index, id));
+    params.push(str('principalType', PRINCIPAL_GROUP));
+
+    const groups = (await execSql(
+      conn,
+      `SELECT ${USER_COLUMNS} FROM app_users
+        WHERE principal_type = @principalType AND entra_object_id IN (${placeholders})`,
+      params,
+    )).map(shapeUser);
+
+    return attachGrants(conn, groups);
   });
 }
 
@@ -105,50 +143,82 @@ async function hasAnyAdmin() {
 }
 
 /**
- * Creates or updates a user and replaces their grants.
+ * Whether any security group has been granted anything.
+ *
+ * Checked so the directory is only consulted when group grants actually exist: an
+ * installation that names individuals never needs Graph read permission at all.
+ */
+async function hasAnyGroupGrant() {
+  return withConnection(async (conn) => {
+    const rows = await execSql(
+      conn,
+      'SELECT TOP 1 id FROM app_users WHERE principal_type = @principalType AND is_active = 1',
+      [str('principalType', PRINCIPAL_GROUP)],
+    );
+    return rows.length > 0;
+  });
+}
+
+/**
+ * Creates or updates a user or security group entry and replaces its grants.
  *
  * Grants are replaced wholesale rather than merged: the admin panel submits the
  * complete intended state, and merging would make unticking a box do nothing.
  */
-async function saveUser({ id, email, displayName, role, isActive = true, tenantIds = [], sectionKeys = [], actor = null }) {
+async function saveUser({
+  id, email, displayName, role, isActive = true, tenantIds = [], sectionKeys = [], actor = null,
+  principalType = PRINCIPAL_USER, entraObjectId = null,
+}) {
+  const kind = principalType === PRINCIPAL_GROUP ? PRINCIPAL_GROUP : PRINCIPAL_USER;
   const normalized = normalizeEmail(email);
-  if (!normalized) throw new Error('An email address is required.');
+  const objectId = String(entraObjectId || '').trim() || null;
+
+  // Each kind is identified by the thing that actually finds it again: a person by
+  // the address in their sign-in token, a group by its directory object.
+  if (kind === PRINCIPAL_USER && !normalized) throw new Error('An email address is required.');
+  if (kind === PRINCIPAL_GROUP && !objectId) throw new Error('A security group must be chosen from the directory.');
+
   const storedRole = role === ROLE_ADMIN ? ROLE_ADMIN : ROLE_USER;
+  const common = [
+    str('email', kind === PRINCIPAL_GROUP ? (normalized || null) : normalized),
+    str('displayName', displayName || null),
+    str('role', storedRole),
+    { name: 'isActive', type: TYPES.Bit, value: isActive ? 1 : 0 },
+    str('principalType', kind),
+    str('entraObjectId', objectId),
+    str('actor', actor),
+  ];
 
   return withConnection(async (conn) => {
     let userId = Number.parseInt(id, 10);
+
+    if (!Number.isFinite(userId)) {
+      // Saving a principal that already exists is an edit, not a duplicate. Without
+      // this the unique index turns a re-grant into an error the admin cannot act on.
+      const existing = kind === PRINCIPAL_GROUP
+        ? await execSql(conn, 'SELECT id FROM app_users WHERE principal_type = @principalType AND entra_object_id = @entraObjectId',
+          [str('principalType', kind), str('entraObjectId', objectId)])
+        : await execSql(conn, 'SELECT id FROM app_users WHERE principal_type = @principalType AND email = @email',
+          [str('principalType', kind), str('email', normalized)]);
+      if (existing.length) userId = Number(existing[0].id);
+    }
 
     if (Number.isFinite(userId)) {
       await execSql(
         conn,
         `UPDATE app_users SET email=@email, display_name=@displayName, role=@role, is_active=@isActive,
+           principal_type=@principalType, entra_object_id=@entraObjectId,
            updated_at=SYSUTCDATETIME(), updated_by=@actor WHERE id=@id`,
-        [int('id', userId), str('email', normalized), str('displayName', displayName || null),
-          str('role', storedRole), { name: 'isActive', type: TYPES.Bit, value: isActive ? 1 : 0 }, str('actor', actor)],
+        [int('id', userId), ...common],
       );
     } else {
-      // Saving an email that already exists is an edit, not a duplicate. Without
-      // this the unique index turns a re-grant into an error the admin cannot act on.
-      const existing = await execSql(conn, 'SELECT id FROM app_users WHERE email = @email', [str('email', normalized)]);
-      if (existing.length) {
-        userId = Number(existing[0].id);
-        await execSql(
-          conn,
-          `UPDATE app_users SET display_name=@displayName, role=@role, is_active=@isActive,
-             updated_at=SYSUTCDATETIME(), updated_by=@actor WHERE id=@id`,
-          [int('id', userId), str('displayName', displayName || null), str('role', storedRole),
-            { name: 'isActive', type: TYPES.Bit, value: isActive ? 1 : 0 }, str('actor', actor)],
-        );
-      } else {
-        const inserted = await execSql(
-          conn,
-          `INSERT INTO app_users (email, display_name, role, is_active, created_by)
-           OUTPUT INSERTED.id VALUES (@email, @displayName, @role, @isActive, @actor)`,
-          [str('email', normalized), str('displayName', displayName || null), str('role', storedRole),
-            { name: 'isActive', type: TYPES.Bit, value: isActive ? 1 : 0 }, str('actor', actor)],
-        );
-        userId = Number(inserted[0] && inserted[0].id);
-      }
+      const inserted = await execSql(
+        conn,
+        `INSERT INTO app_users (email, display_name, role, is_active, principal_type, entra_object_id, created_by)
+         OUTPUT INSERTED.id VALUES (@email, @displayName, @role, @isActive, @principalType, @entraObjectId, @actor)`,
+        common,
+      );
+      userId = Number(inserted[0] && inserted[0].id);
     }
 
     if (!Number.isFinite(userId)) throw new Error('Could not determine the saved user.');
@@ -181,4 +251,7 @@ async function deleteUser(id) {
   });
 }
 
-module.exports = { listUsers, getUserByEmail, hasAnyAdmin, saveUser, deleteUser };
+module.exports = {
+  listUsers, getUserByEmail, getGroupRecords, hasAnyAdmin, hasAnyGroupGrant, saveUser, deleteUser,
+  PRINCIPAL_USER, PRINCIPAL_GROUP,
+};

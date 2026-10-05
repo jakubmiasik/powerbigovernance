@@ -121,6 +121,29 @@ gets the same refusal. Two independent guards keep the panel reachable: `ADMIN_E
 administrator rights, and while no active administrator exists at all, every signed-in user is treated
 as one so the first can be named. That bootstrap ends the moment an administrator is saved.
 
+### Granting from Entra ID
+
+People and security groups are chosen from the directory rather than typed, because a mistyped address
+does not fail — it simply never matches, and the person it was meant for is told they have no access
+while the row sits there looking correct.
+
+Granting a **security group** gives its tenants and sections to everyone in it, including members of
+nested groups. Grants add up: holding two groups means holding the union of what they confer, and
+administrator from any one of them. A deactivated entry confers nothing. Groups are matched on their
+Entra object id, so renaming a group in the directory does not lose its grant. Only security groups are
+offered — a distribution or Microsoft 365 group's membership is maintained for delivering mail, not for
+deciding who may see a tenant.
+
+This requires the service principal used for the directory lookup to hold the Microsoft Graph
+**application** permissions `User.Read.All` and `GroupMember.Read.All`, with admin consent granted. They
+are only needed once a security group has been granted something; an installation that names only
+individuals never reads the directory outside the picker. If consent is missing, the picker says so
+instead of returning an empty list.
+
+| Variable | Description |
+|----------|-------------|
+| `DIRECTORY_CACHE_TTL_MS` | How long a user's Entra group membership is cached (default 300000) |
+
 ## Architecture
 
 ```

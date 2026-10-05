@@ -6770,7 +6770,7 @@ test('saving a user replaces their grants rather than adding to them', async () 
 
 test('saving an email that already exists is an edit, not a duplicate', async () => {
   const repo = require('../src/services/permissionRepository');
-  const { executed } = await withFakeSql(sql => (/SELECT id FROM app_users WHERE email/.test(sql) ? [{ id: 4 }] : []), () =>
+  const { executed } = await withFakeSql(sql => (/SELECT id FROM app_users WHERE principal_type = @principalType AND email/.test(sql) ? [{ id: 4 }] : []), () =>
     repo.saveUser({ email: 'ann@x.com', role: 'admin', tenantIds: [], sectionKeys: [] })
   );
   assert.ok(!executed.some(e => /INSERT INTO app_users/.test(e.sql)), 'a second grant must not hit the unique index');
@@ -6847,3 +6847,217 @@ test('the no-access page says which section was refused instead of showing an er
   });
   assert.match(html, /Master Data/);
 });
+
+// ── Entra ID directory picker and group-based grants ──
+
+function withFakeDirectory(client, fn, servicePrincipals = [{ id: 1, name: 'Primary' }]) {
+  const dir = require('../src/services/directoryService');
+  const db = require('../src/services/databaseService');
+  const powerbi = require('../src/services/powerbiService');
+  const realSps = db.getServicePrincipals;
+  const realCreate = powerbi.createPowerBIService;
+  db.getServicePrincipals = async () => servicePrincipals;
+  powerbi.createPowerBIService = () => client;
+  dir.clearDirectoryCache();
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      db.getServicePrincipals = realSps;
+      powerbi.createPowerBIService = realCreate;
+      dir.clearDirectoryCache();
+    });
+}
+
+test('only security groups are offered, because a mailing list is not an access decision', async () => {
+  const dir = require('../src/services/directoryService');
+  const results = await withFakeDirectory({
+    searchEntraGroups: async () => ([
+      { id: 'g1', displayName: 'BI Admins', securityEnabled: true },
+      { id: 'g2', displayName: 'All Staff Newsletter', securityEnabled: false },
+    ]),
+  }, () => dir.search('bi', 'group'));
+
+  assert.deepEqual(results.map(r => r.objectId), ['g1']);
+  assert.equal(results[0].principalType, 'group');
+});
+
+test('a person is identified by the address their sign-in token will carry', async () => {
+  const dir = require('../src/services/directoryService');
+  const results = await withFakeDirectory({
+    searchEntraUsers: async () => ([
+      { id: 'u1', displayName: 'Ann', userPrincipalName: 'ann@x.com', mail: 'alias@x.com' },
+      { id: 'u2', displayName: 'No Address' },
+    ]),
+  }, () => dir.search('ann', 'user'));
+
+  // The alias would never match the token, and an entry with no address at all
+  // could never match anything, so it is not offered.
+  assert.deepEqual(results.map(r => r.email), ['ann@x.com']);
+});
+
+test('a quote in a name does not break the directory filter', () => {
+  const dir = require('../src/services/directoryService');
+  assert.equal(dir._private.escapeODataLiteral("O'Brien"), "O''Brien");
+});
+
+test('a search shorter than two characters does not reach the directory', async () => {
+  const dir = require('../src/services/directoryService');
+  let called = false;
+  const results = await withFakeDirectory({
+    searchEntraUsers: async () => { called = true; return []; },
+  }, () => dir.search('a', 'user'));
+  assert.deepEqual(results, []);
+  assert.equal(called, false);
+});
+
+test('a directory refusal names the Graph permissions that are missing', async () => {
+  const dir = require('../src/services/directoryService');
+  await withFakeDirectory({
+    searchEntraUsers: async () => { throw new Error('Request failed with status code 403'); },
+  }, async () => {
+    await assert.rejects(dir.search('ann', 'user'), /User.Read.All and GroupMember.Read.All/);
+  });
+});
+
+test('unreadable group membership is raised, never reported as belonging to no groups', async () => {
+  const dir = require('../src/services/directoryService');
+  await withFakeDirectory({
+    getTransitiveGroupIds: async () => { throw new Error('Request failed with status code 403'); },
+  }, async () => {
+    // Returning [] here would silently drop every group-based grant, which looks
+    // to the user exactly like having been removed from the application.
+    await assert.rejects(dir.groupIdsForUser('ann@x.com'), /directory/i);
+  });
+});
+
+test('membership is read once and then served from the cache', async () => {
+  const dir = require('../src/services/directoryService');
+  let calls = 0;
+  await withFakeDirectory({
+    getTransitiveGroupIds: async () => { calls += 1; return ['g1']; },
+  }, async () => {
+    assert.deepEqual(await dir.groupIdsForUser('ann@x.com'), ['g1']);
+    assert.deepEqual(await dir.groupIdsForUser('ANN@x.com'), ['g1']);
+    assert.equal(calls, 1, 'the address differs only in case, so it is the same person');
+  });
+});
+
+test('the directory cannot be searched when no service principal is configured', async () => {
+  const dir = require('../src/services/directoryService');
+  await withFakeDirectory({}, async () => {
+    await assert.rejects(dir.search('ann', 'user'), /No service principal is configured/);
+  }, []);
+});
+
+test('grants from a person and their groups add up rather than narrowing', () => {
+  const permissionService = require('../src/services/permissionService');
+  const result = permissionService.resolvePermissions({
+    user: { email: 'ann@x.com' },
+    record: { email: 'ann@x.com', role: 'user', is_active: true, tenantIds: [1], sectionKeys: ['workspaces'] },
+    groupRecords: [
+      { display_name: 'BI Readers', principal_type: 'group', role: 'user', is_active: true, tenantIds: [2], sectionKeys: ['reconciliation'] },
+    ],
+    anyAdminConfigured: true,
+    tenants: [{ id: 1 }, { id: 2 }],
+  });
+
+  assert.deepEqual(result.tenantIds.sort(), [1, 2]);
+  assert.ok(result.sectionKeys.includes('workspaces'));
+  assert.ok(result.sectionKeys.includes('reconciliation'));
+  assert.deepEqual(result.viaGroups, ['BI Readers']);
+});
+
+test('a group may confer administrator, and a deactivated group confers nothing', () => {
+  const permissionService = require('../src/services/permissionService');
+  const asAdmin = permissionService.resolvePermissions({
+    user: { email: 'ann@x.com' },
+    record: null,
+    groupRecords: [{ display_name: 'BI Admins', role: 'admin', is_active: true, tenantIds: [], sectionKeys: [] }],
+    anyAdminConfigured: true,
+    tenants: [{ id: 1 }],
+  });
+  assert.equal(asAdmin.isAdmin, true);
+
+  const deactivated = permissionService.resolvePermissions({
+    user: { email: 'ann@x.com' },
+    record: null,
+    groupRecords: [{ display_name: 'BI Admins', role: 'admin', is_active: false, tenantIds: [1], sectionKeys: ['workspaces'] }],
+    anyAdminConfigured: true,
+    tenants: [{ id: 1 }],
+  });
+  assert.equal(deactivated.isAdmin, false);
+  assert.deepEqual(deactivated.tenantIds, []);
+});
+
+test('group records are looked up by object id, parameterised', async () => {
+  const repo = require('../src/services/permissionRepository');
+  const { executed } = await withFakeSql(() => [], () => repo.getGroupRecords(['g1', 'g2']));
+  const lookup = executed[0];
+  // A group name can be changed in Entra; its object id cannot, so the grant
+  // survives a rename. And the ids are directory data, so they are bound, not pasted.
+  assert.match(lookup.sql, /entra_object_id IN \(@g0, @g1\)/);
+  assert.ok(lookup.params.some(p => p.value === 'g1') && lookup.params.some(p => p.value === 'g2'));
+});
+
+test('no group lookup is attempted when no group has been granted anything', async () => {
+  const repo = require('../src/services/permissionRepository');
+  const { executed } = await withFakeSql(() => [], () => repo.getGroupRecords([]));
+  assert.equal(executed.length, 0, 'an empty IN list is not a query worth sending');
+});
+
+test('a group grant without an object id is refused, as is a person without an address', async () => {
+  const repo = require('../src/services/permissionRepository');
+  await assert.rejects(
+    withFakeSql(() => [], () => repo.saveUser({ principalType: 'group', displayName: 'BI Admins', tenantIds: [], sectionKeys: [] })),
+    /group/i,
+  );
+  await assert.rejects(
+    withFakeSql(() => [], () => repo.saveUser({ principalType: 'user', displayName: 'Ann', tenantIds: [], sectionKeys: [] })),
+    /email|address/i,
+  );
+});
+
+test('the access panel lets an administrator pick a person or a security group', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/settings/permissions.ejs', {
+    currentUser: { name: 'T' }, user: { name: 'T' }, currentPath: '/settings/permissions',
+    breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Users & Access',
+    users: [{ id: 9, email: null, display_name: 'BI Admins', principal_type: 'group', entra_object_id: 'g1', role: 'user', is_active: true, tenantIds: [], sectionKeys: [] }],
+    tenants: [{ id: 2, name: 'Fabrikam', tenant_id: 'abc' }],
+    sections: sections.GRANTABLE_SECTIONS,
+    bootstrap: false, success: [], error: [],
+    permissions: { isAdmin: true }, visibleSections: sections.APP_SECTIONS,
+  });
+
+  assert.match(html, /id="principalSearch"/);
+  assert.match(html, /id="userPrincipalType"/);
+  assert.match(html, /id="userObjectId"/);
+  assert.match(html, /name="lookupType"/);
+  // A granted group is shown as one, so an administrator is not left wondering
+  // why an entry has no address.
+  assert.match(html, /Security group/);
+  // Every group of sections can be ticked at once; Quality was the one people
+  // could not find at the bottom of a long list.
+  assert.match(html, /js-toggle-group/);
+});
+
+test('the directory search route reports a failure instead of looking like no results', async () => {
+  const dir = require('../src/services/directoryService');
+  const router = require('../src/routes/permissions');
+  const layer = router.stack.find(l => l.route && l.route.path === '/directory/search');
+  const handler = layer.route.stack[0].handle;
+
+  const real = dir.search;
+  dir.search = async () => { throw new Error('The service principal cannot read the directory.'); };
+  try {
+    let body = null;
+    await handler({ query: { q: 'ann', type: 'user' } }, { json: payload => { body = payload; } });
+    // An empty list would read as "nobody by that name"; missing consent is a
+    // thing an administrator can act on, so it has to be said out loud.
+    assert.equal(body.success, false);
+    assert.match(body.message, /cannot read the directory/);
+  } finally {
+    dir.search = real;
+  }
+});
+

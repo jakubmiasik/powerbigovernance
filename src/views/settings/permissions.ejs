@@ -12,7 +12,8 @@
     <h2><i class="bi bi-person-badge me-2"></i>Users &amp; Access</h2>
     <p class="text-muted">
       Who may use this application, which tenants they may see and run scans for, and which
-      sections are available to them.
+      sections are available to them. People and security groups are chosen from Entra ID —
+      granting a group gives its access to everyone in it, including nested groups.
     </p>
 
     <div id="flash-messages">
@@ -52,9 +53,9 @@
     <% } %>
 
     <div class="d-flex justify-content-between align-items-center mb-3">
-      <h5 class="mb-0"><i class="bi bi-people me-2 text-primary"></i>Users (<%= users.length %>)</h5>
+      <h5 class="mb-0"><i class="bi bi-people me-2 text-primary"></i>Users &amp; groups (<%= users.length %>)</h5>
       <button class="btn btn-primary btn-sm" onclick="openUserForm()">
-        <i class="bi bi-plus-lg me-1"></i>Add User
+        <i class="bi bi-plus-lg me-1"></i>Add from Entra ID
       </button>
     </div>
 
@@ -77,8 +78,16 @@
               <% users.forEach(function(row) { %>
                 <tr>
                   <td>
-                    <strong><%= row.display_name || row.email %></strong>
-                    <% if (row.display_name) { %><div class="small text-muted"><%= row.email %></div><% } %>
+                    <strong>
+                      <i class="bi <%= row.principal_type === 'group' ? 'bi-people' : 'bi-person' %> me-1 text-muted"></i>
+                      <%= row.display_name || row.email %>
+                    </strong>
+                    <% if (row.principal_type === 'group') { %>
+                      <span class="badge bg-dark ms-1">Security group</span>
+                      <div class="small text-muted">Everyone in this group inherits the access below</div>
+                    <% } else if (row.display_name) { %>
+                      <div class="small text-muted"><%= row.email %></div>
+                    <% } %>
                     <% if (!row.is_active) { %><span class="badge bg-secondary">Deactivated</span><% } %>
                   </td>
                   <td>
@@ -114,7 +123,7 @@
                       <i class="bi bi-pencil"></i>
                     </button>
                     <form method="POST" action="/settings/permissions/delete/<%= row.id %>" class="d-inline"
-                          onsubmit="return confirm('Remove access for <%= row.email %>?');">
+                          onsubmit="return confirm('Remove access for <%= row.display_name || row.email %>?');">
                       <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
                     </form>
                   </td>
@@ -138,17 +147,35 @@
         </div>
         <div class="modal-body">
           <input type="hidden" name="id" id="userId">
+          <input type="hidden" name="principalType" id="userPrincipalType" value="user">
+          <input type="hidden" name="entraObjectId" id="userObjectId">
+          <input type="hidden" name="email" id="userEmail">
+          <input type="hidden" name="displayName" id="userDisplayName">
 
-          <div class="row g-3 mb-3">
-            <div class="col-md-6">
-              <label class="form-label">Sign-in email <span class="text-danger">*</span></label>
-              <input type="email" class="form-control" name="email" id="userEmail" required
-                     placeholder="person@contoso.com">
-              <div class="form-text">Must match the address they sign in with.</div>
+          <div class="mb-3">
+            <label class="form-label">Who <span class="text-danger">*</span></label>
+            <div class="btn-group btn-group-sm d-block mb-2" role="group">
+              <input type="radio" class="btn-check" name="lookupType" id="lookupUser" value="user" checked
+                     onchange="onLookupTypeChange()">
+              <label class="btn btn-outline-primary" for="lookupUser"><i class="bi bi-person me-1"></i>Person</label>
+              <input type="radio" class="btn-check" name="lookupType" id="lookupGroup" value="group"
+                     onchange="onLookupTypeChange()">
+              <label class="btn btn-outline-primary" for="lookupGroup"><i class="bi bi-people me-1"></i>Security group</label>
             </div>
-            <div class="col-md-6">
-              <label class="form-label">Display name</label>
-              <input type="text" class="form-control" name="displayName" id="userDisplayName">
+
+            <div id="chosenPrincipal" class="alert alert-secondary py-2 px-3 d-none d-flex justify-content-between align-items-center">
+              <span><i class="bi bi-check-circle text-success me-2"></i><span id="chosenPrincipalText"></span></span>
+              <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearChosenPrincipal()">Change</button>
+            </div>
+
+            <div id="principalSearchWrap">
+              <input type="text" class="form-control" id="principalSearch" autocomplete="off"
+                     placeholder="Start typing a name to search Entra ID...">
+              <div class="form-text" id="principalSearchHelp">
+                Only people and security groups that exist in Entra ID can be chosen, so a grant
+                cannot be lost to a typo.
+              </div>
+              <div id="principalResults" class="list-group mt-2" style="max-height:240px;overflow-y:auto;"></div>
             </div>
           </div>
 
@@ -198,24 +225,34 @@
               Which parts of the application appear for this person. Anything not ticked is hidden
               from the menu and refused if its address is opened directly.
             </p>
-            <% Object.keys(sectionsByGroup).forEach(function(group) { %>
-              <div class="mb-2">
-                <div class="small fw-bold text-muted text-uppercase"><%= group %></div>
-                <div class="row g-2">
-                  <% sectionsByGroup[group].forEach(function(section) { %>
-                    <div class="col-md-6">
+            <%
+              // Laid out as columns rather than one long stack: with the groups below
+              // each other the last of them sat past the fold of the dialog, which made
+              // Quality look like it was missing rather than merely further down.
+            %>
+            <div class="row g-3">
+              <% Object.keys(sectionsByGroup).forEach(function(group) { %>
+                <div class="col-md-6">
+                  <div class="border rounded h-100 p-2">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <span class="small fw-bold text-muted text-uppercase"><%= group %></span>
+                      <button type="button" class="btn btn-link btn-sm p-0 js-toggle-group"
+                              data-group="<%= group %>">Select all</button>
+                    </div>
+                    <% sectionsByGroup[group].forEach(function(section) { %>
                       <div class="form-check">
                         <input class="form-check-input js-section" type="checkbox" name="sectionKeys"
+                               data-group="<%= group %>"
                                value="<%= section.key %>" id="section-<%= section.key %>">
                         <label class="form-check-label" for="section-<%= section.key %>">
                           <i class="bi <%= section.icon %> me-1"></i><%= section.label %>
                         </label>
                       </div>
-                    </div>
-                  <% }) %>
+                    <% }) %>
+                  </div>
                 </div>
-              </div>
-            <% }) %>
+              <% }) %>
+            </div>
           </div>
 
           <div id="adminNotice" class="alert alert-info d-none mt-3">
@@ -252,25 +289,147 @@ function clearGrantBoxes() {
   document.querySelectorAll('.js-tenant, .js-section').forEach(function(box) { box.checked = false; });
 }
 
-function openUserForm() {
-  document.getElementById('userModalTitle').textContent = 'Add User';
-  document.getElementById('userId').value = '';
+// ── Choosing who from Entra ID ──
+
+function lookupType() {
+  return document.querySelector('input[name="lookupType"]:checked').value;
+}
+
+function setChosenPrincipal(entry) {
+  document.getElementById('userPrincipalType').value = entry.principalType;
+  document.getElementById('userObjectId').value = entry.objectId || '';
+  document.getElementById('userEmail').value = entry.email || '';
+  document.getElementById('userDisplayName').value = entry.displayName || '';
+
+  document.getElementById('chosenPrincipalText').textContent =
+    entry.displayName + (entry.detail ? ' — ' + entry.detail : '');
+  document.getElementById('chosenPrincipal').classList.remove('d-none');
+  document.getElementById('principalSearchWrap').classList.add('d-none');
+}
+
+function clearChosenPrincipal() {
+  document.getElementById('userObjectId').value = '';
   document.getElementById('userEmail').value = '';
   document.getElementById('userDisplayName').value = '';
+  document.getElementById('chosenPrincipal').classList.add('d-none');
+  document.getElementById('principalSearchWrap').classList.remove('d-none');
+  document.getElementById('principalResults').innerHTML = '';
+  document.getElementById('principalSearch').value = '';
+  document.getElementById('principalSearch').focus();
+}
+
+function onLookupTypeChange() {
+  document.getElementById('userPrincipalType').value = lookupType();
+  clearChosenPrincipal();
+}
+
+function renderDirectoryResults(results) {
+  var list = document.getElementById('principalResults');
+  if (!results.length) {
+    list.innerHTML = '<div class="list-group-item text-muted small">Nobody in the directory matches that.</div>';
+    return;
+  }
+  list.innerHTML = '';
+  results.forEach(function(entry) {
+    var item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'list-group-item list-group-item-action';
+    // Built as nodes rather than markup: a display name is directory data and may
+    // contain anything, including quotes and angle brackets.
+    var name = document.createElement('div');
+    name.textContent = entry.displayName;
+    var detail = document.createElement('div');
+    detail.className = 'small text-muted';
+    detail.textContent = entry.detail || '';
+    item.appendChild(name);
+    item.appendChild(detail);
+    item.addEventListener('click', function() { setChosenPrincipal(entry); });
+    list.appendChild(item);
+  });
+}
+
+var searchTimer = null;
+var searchSequence = 0;
+
+function searchDirectory() {
+  var query = document.getElementById('principalSearch').value.trim();
+  var list = document.getElementById('principalResults');
+  if (query.length < 2) { list.innerHTML = ''; return; }
+
+  list.innerHTML = '<div class="list-group-item text-muted small">Searching Entra ID...</div>';
+  // Replies can arrive out of order, and an older one overwriting a newer would
+  // show results for a query the user has already moved past.
+  var sequence = ++searchSequence;
+
+  fetch('/settings/permissions/directory/search?type=' + encodeURIComponent(lookupType())
+        + '&q=' + encodeURIComponent(query))
+    .then(function(response) { return response.json(); })
+    .then(function(body) {
+      if (sequence !== searchSequence) return;
+      if (!body.success) {
+        list.innerHTML = '';
+        var problem = document.createElement('div');
+        problem.className = 'list-group-item list-group-item-warning small';
+        problem.textContent = body.message || 'The directory could not be searched.';
+        list.appendChild(problem);
+        return;
+      }
+      renderDirectoryResults(body.results || []);
+    })
+    .catch(function(err) {
+      if (sequence !== searchSequence) return;
+      list.innerHTML = '';
+      var problem = document.createElement('div');
+      problem.className = 'list-group-item list-group-item-warning small';
+      problem.textContent = 'The directory could not be searched: ' + err.message;
+      list.appendChild(problem);
+    });
+}
+
+document.getElementById('principalSearch').addEventListener('input', function() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(searchDirectory, 300);
+});
+
+// Ticking a whole group at once, because the common case is "everything under
+// Quality" rather than three of its four entries.
+document.addEventListener('click', function(event) {
+  var toggle = event.target.closest('.js-toggle-group');
+  if (!toggle) return;
+  event.preventDefault();
+  var boxes = document.querySelectorAll('.js-section[data-group="' + toggle.dataset.group + '"]');
+  var turnOn = Array.prototype.some.call(boxes, function(box) { return !box.checked; });
+  boxes.forEach(function(box) { box.checked = turnOn; });
+  toggle.textContent = turnOn ? 'Clear all' : 'Select all';
+});
+
+function openUserForm() {
+  document.getElementById('userModalTitle').textContent = 'Add User or Group';
+  document.getElementById('userId').value = '';
+  document.getElementById('lookupUser').checked = true;
+  document.getElementById('userPrincipalType').value = 'user';
   document.getElementById('userRole').value = 'user';
   document.getElementById('userActive').checked = true;
+  clearChosenPrincipal();
   clearGrantBoxes();
   syncRoleState();
   userModal().show();
 }
 
 function openUserFormWith(row) {
-  document.getElementById('userModalTitle').textContent = 'Edit ' + row.email;
+  document.getElementById('userModalTitle').textContent = 'Edit ' + (row.display_name || row.email);
   document.getElementById('userId').value = row.id;
-  document.getElementById('userEmail').value = row.email;
-  document.getElementById('userDisplayName').value = row.display_name || '';
+  var isGroup = row.principal_type === 'group';
+  document.getElementById(isGroup ? 'lookupGroup' : 'lookupUser').checked = true;
   document.getElementById('userRole').value = row.role === 'admin' ? 'admin' : 'user';
   document.getElementById('userActive').checked = row.is_active !== false;
+  setChosenPrincipal({
+    principalType: isGroup ? 'group' : 'user',
+    objectId: row.entra_object_id || '',
+    email: row.email || '',
+    displayName: row.display_name || row.email || '',
+    detail: isGroup ? 'Security group' : (row.email || ''),
+  });
   clearGrantBoxes();
   (row.tenantIds || []).forEach(function(spId) {
     var box = document.getElementById('tenant-' + spId);

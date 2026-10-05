@@ -11,6 +11,7 @@
 
 const permissions = require('../services/permissionService');
 const permissionRepository = require('../services/permissionRepository');
+const directoryService = require('../services/directoryService');
 const db = require('../services/databaseService');
 const { sectionForPath } = require('../services/appSectionService');
 
@@ -21,6 +22,22 @@ function clearPermissionCache() {
   cache.clear();
 }
 
+/**
+ * The security groups this person belongs to, when any group has been granted
+ * anything at all.
+ *
+ * Asking Entra is skipped entirely while no group grants exist, so an application
+ * that only names individuals never needs directory read permission. Once a group
+ * is granted, a failure to read membership is reported rather than treated as
+ * "belongs to nothing" — that would silently drop every group-based grant.
+ */
+async function readGroupRecords(email, anyGroupGranted) {
+  if (!anyGroupGranted) return [];
+  const groupIds = await directoryService.groupIdsForUser(email);
+  if (!groupIds.length) return [];
+  return permissionRepository.getGroupRecords(groupIds);
+}
+
 async function readPermissionInputs(email) {
   const cached = cache.get(email);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
@@ -29,13 +46,16 @@ async function readPermissionInputs(email) {
   // "no administrator exists" would put the whole application into bootstrap mode
   // and hand every signed-in user administrator rights — the exact opposite of
   // what a failure should do. The caller turns a failure into no access instead.
-  const [record, anyAdminConfigured, tenants] = await Promise.all([
+  const [record, anyAdminConfigured, tenants, anyGroupGranted] = await Promise.all([
     permissionRepository.getUserByEmail(email),
     permissionRepository.hasAnyAdmin(),
     db.getServicePrincipals(),
+    permissionRepository.hasAnyGroupGrant(),
   ]);
 
-  const value = { record, anyAdminConfigured, tenants };
+  const groupRecords = await readGroupRecords(email, anyGroupGranted);
+
+  const value = { record, groupRecords, anyAdminConfigured, tenants };
   cache.set(email, { expiresAt: Date.now() + PERMISSION_CACHE_TTL_MS, value });
   return value;
 }
@@ -53,9 +73,10 @@ async function loadPermissions(req, res, next) {
   }
 
   try {
-    const { record, anyAdminConfigured, tenants } = await readPermissionInputs(permissions.normalizeEmail(req.user.email));
+    const { record, groupRecords, anyAdminConfigured, tenants } =
+      await readPermissionInputs(permissions.normalizeEmail(req.user.email));
     req.permissions = permissions.resolvePermissions({
-      user: req.user, record, adminEmails, anyAdminConfigured, tenants,
+      user: req.user, record, groupRecords, adminEmails, anyAdminConfigured, tenants,
     });
   } catch (err) {
     // The permission tables being unreadable must not hand out access. The user is
