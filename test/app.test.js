@@ -4247,6 +4247,8 @@ test('the sidebar names the quality configuration page for what it is', async ()
   const html = await ejs.renderFile('src/views/partials/header.ejs', {
     currentUser: { name: 'T' }, currentPath: '/quality', breadcrumb: [],
     availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
+    visibleSections: require('../src/services/appSectionService').APP_SECTIONS,
+    permissions: { isAdmin: true },
   });
   assert.match(html, /<span>Quality Configuration<\/span>/);
 });
@@ -4466,6 +4468,8 @@ test('the sidebar offers Grant Access under Settings', async () => {
   const html = await ejs.renderFile('src/views/partials/header.ejs', {
     currentUser: { name: 'T' }, currentPath: '/settings/access', breadcrumb: [],
     availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
+    visibleSections: require('../src/services/appSectionService').APP_SECTIONS,
+    permissions: { isAdmin: true },
   });
   assert.match(html, /href="\/settings\/access"[^>]*active/, 'the new page highlights itself');
   assert.match(html, /<span>Grant Access<\/span>/);
@@ -4982,7 +4986,8 @@ test('the middleware decorates every run it hands the selector', async () => {
 
   try {
     const res = { locals: {} };
-    await new Promise(resolve => loadRuns({ query: {}, session: {}, user: null }, res, resolve));
+    const permissions = { isAdmin: true, allTenants: true, tenantIds: [], sectionKeys: [] };
+    await new Promise(resolve => loadRuns({ query: {}, session: {}, user: null, permissions }, res, resolve));
     assert.deepEqual(res.locals.availableRuns.map(r => r.scopeTag), ['SC', 'WT'], 'only completed runs, each tagged');
     assert.match(res.locals.availableRuns[0].scopeTagTitle, /Finance/);
   } finally {
@@ -5341,6 +5346,8 @@ test('the sidebar lists Governance Configuration under Settings, with its own ic
   const html = await ejs.renderFile('src/views/partials/header.ejs', {
     currentUser: { name: 'T' }, currentPath: '/settings/governance', breadcrumb: [],
     availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
+    visibleSections: require('../src/services/appSectionService').APP_SECTIONS,
+    permissions: { isAdmin: true },
   });
 
   assert.match(html, /<span>Governance Configuration<\/span>/);
@@ -6573,4 +6580,270 @@ test('the export is a file, not a page', async () => {
   } finally {
     sgRepo.listAssignments = original;
   }
+});
+
+// ── Per-user access: tenants and sections ──
+const perms = require('../src/services/permissionService');
+const sections = require('../src/services/appSectionService');
+
+const TENANTS = [{ id: 1, name: 'Contoso' }, { id: 2, name: 'Fabrikam' }];
+
+function resolveFor(record, extra = {}) {
+  return perms.resolvePermissions({
+    user: { email: 'ann@x.com', name: 'Ann' },
+    record,
+    adminEmails: [],
+    anyAdminConfigured: true,
+    tenants: TENANTS,
+    ...extra,
+  });
+}
+
+test('while no administrator exists at all, a signed-in user is treated as one', () => {
+  // Otherwise the very first person to open the app could never name an admin,
+  // and the panel that grants access would itself be unreachable.
+  const p = resolveFor(null, { anyAdminConfigured: false });
+  assert.equal(p.isAdmin, true);
+  assert.equal(p.isBootstrap, true);
+  assert.equal(p.reason, 'bootstrap');
+});
+
+test('bootstrap ends the moment a real administrator exists', () => {
+  const p = resolveFor(null);
+  assert.equal(p.isAdmin, false);
+  assert.equal(p.isKnown, false);
+  assert.equal(p.reason, 'unknown');
+  assert.deepEqual(p.sectionKeys, []);
+  assert.deepEqual(p.tenantIds, []);
+});
+
+test('ADMIN_EMAILS confers administrator rights even when the table says otherwise', () => {
+  // The second lockout guard: configuration stays reachable when the data is wrong.
+  const p = resolveFor({ role: 'user', is_active: true, tenantIds: [], sectionKeys: [] }, {
+    adminEmails: ['ANN@X.com'],
+  });
+  assert.equal(p.isAdmin, true);
+  assert.equal(p.reason, 'configured-admin');
+  assert.equal(perms.parseAdminEmails(' a@x.com, B@X.com ').join(','), 'a@x.com,b@x.com');
+});
+
+test('a deactivated user keeps nothing, including a deactivated administrator', () => {
+  const p = resolveFor({ role: 'admin', is_active: false, tenantIds: [1], sectionKeys: ['workspaces'] });
+  assert.equal(p.isAdmin, false);
+  assert.equal(p.reason, 'deactivated');
+  assert.deepEqual(p.tenantIds, []);
+});
+
+test('an administrator holds every tenant and every section by role', () => {
+  const p = resolveFor({ role: 'admin', is_active: true, tenantIds: [], sectionKeys: [] });
+  assert.equal(p.allTenants, true);
+  assert.deepEqual(perms.visibleTenants(p, TENANTS), TENANTS);
+  assert.equal(perms.canAccessPath(p, '/settings/permissions'), true);
+});
+
+test('an ordinary user cannot be granted an administrator-only section, whatever the table says', () => {
+  const p = resolveFor({ role: 'user', is_active: true, tenantIds: [1], sectionKeys: ['workspaces', 'settings'] });
+  assert.deepEqual(p.sectionKeys, ['workspaces']);
+  assert.equal(perms.canAccessPath(p, '/settings'), false);
+  assert.equal(perms.canAccessPath(p, '/settings/permissions'), false);
+});
+
+test('a path is matched to the most specific section that claims it', () => {
+  const p = resolveFor({ role: 'user', is_active: true, tenantIds: [], sectionKeys: ['security-groups'] });
+  // Security Groups lives under /quality but is granted separately, so holding it
+  // must not hand over the rest of /quality.
+  assert.equal(perms.canAccessPath(p, '/quality/security-groups'), true);
+  assert.equal(perms.canAccessPath(p, '/quality/security-groups/export.csv'), true);
+  assert.equal(perms.canAccessPath(p, '/quality'), false);
+  assert.equal(perms.canAccessPath(p, '/quality/rules'), false);
+});
+
+test('the home page and the shared APIs stay open to any signed-in user', () => {
+  const p = resolveFor(null);
+  assert.equal(perms.canAccessPath(p, '/'), true);
+  assert.equal(perms.canAccessPath(p, '/home'), true);
+  assert.equal(perms.canAccessPath(p, '/api/select-run'), true);
+  assert.equal(perms.canAccessPath(p, '/health'), true);
+});
+
+test('every declared section is reachable by its own href', () => {
+  // A section the guard cannot match would be granted but never allowed.
+  for (const section of sections.APP_SECTIONS) {
+    const hit = sections.sectionForPath(section.href);
+    assert.ok(hit, 'no section matches ' + section.href);
+    assert.equal(hit.key, section.key, section.href + ' resolved to ' + hit.key);
+  }
+});
+
+test('scans belonging to a tenant the user cannot see are filtered out entirely', () => {
+  // The run selector drives every page, so filtering here is what makes the tenant
+  // grant mean something beyond the analysis screen.
+  const p = resolveFor({ role: 'user', is_active: true, tenantIds: [2], sectionKeys: ['workspaces'] });
+  const runs = [{ id: 10, sp_id: 1 }, { id: 11, sp_id: 2 }, { id: 12, sp_id: 3 }];
+  assert.deepEqual(perms.visibleRuns(p, runs).map(r => r.id), [11]);
+  assert.deepEqual(perms.visibleTenants(p, TENANTS).map(t => t.id), [2]);
+  assert.equal(perms.canSeeTenant(p, '2'), true);
+  assert.equal(perms.canSeeTenant(p, 1), false);
+});
+
+// ── Enforcement in front of the routes ──
+const permMiddleware = require('../src/middleware/permissions');
+
+function fakeRes() {
+  return {
+    locals: {}, statusCode: 200, jsonBody: null, rendered: null,
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.jsonBody = body; return this; },
+    render(view, model) { this.rendered = { view, model }; return this; },
+  };
+}
+
+test('a forbidden page renders an explanation, while a forbidden fetch gets JSON it can read', () => {
+  const p = resolveFor({ role: 'user', is_active: true, tenantIds: [], sectionKeys: ['workspaces'] });
+
+  const page = fakeRes();
+  permMiddleware.requireSectionAccess({ permissions: p, path: '/mdm', get: () => '', xhr: false }, page, () => {
+    throw new Error('should not have been allowed through');
+  });
+  assert.equal(page.statusCode, 403);
+  assert.equal(page.rendered.view, 'no-access');
+  assert.equal(page.rendered.model.section.key, 'mdm');
+
+  const xhr = fakeRes();
+  permMiddleware.requireSectionAccess({ permissions: p, path: '/mdm/models', get: () => '', xhr: true }, xhr, () => {
+    throw new Error('should not have been allowed through');
+  });
+  assert.equal(xhr.statusCode, 403);
+  assert.equal(xhr.jsonBody.success, false);
+  assert.equal(xhr.jsonBody.section, 'mdm');
+
+  let passed = false;
+  permMiddleware.requireSectionAccess({ permissions: p, path: '/workspaces', get: () => '', xhr: false }, fakeRes(), () => { passed = true; });
+  assert.equal(passed, true);
+});
+
+test('permissions that cannot be read hand out nothing and say so', async () => {
+  // Failing open here would turn a database blip into a tenant-wide disclosure.
+  const repo = require('../src/services/permissionRepository');
+  const originals = { getUserByEmail: repo.getUserByEmail, hasAnyAdmin: repo.hasAnyAdmin };
+  repo.getUserByEmail = async () => { throw new Error('login failed'); };
+  repo.hasAnyAdmin = async () => { throw new Error('login failed'); };
+  permMiddleware.clearPermissionCache();
+
+  try {
+    const res = fakeRes();
+    const req = { user: { email: 'ann@x.com' }, path: '/workspaces', get: () => '', xhr: false };
+    await permMiddleware.loadPermissions(req, res, () => {});
+    assert.equal(req.permissions.isAdmin, false);
+    assert.equal(req.permissions.reason, 'error');
+    assert.deepEqual(req.permissions.sectionKeys, []);
+
+    permMiddleware.requireSectionAccess(Object.assign(req, { xhr: true }), res, () => {
+      throw new Error('should not have been allowed through');
+    });
+    assert.match(res.jsonBody.message, /could not be determined/);
+  } finally {
+    Object.assign(repo, originals);
+    permMiddleware.clearPermissionCache();
+  }
+});
+
+// ── Storing the grants ──
+test('saving a user replaces their grants rather than adding to them', async () => {
+  const repo = require('../src/services/permissionRepository');
+  const { executed } = await withFakeSql(sql => (/OUTPUT INSERTED.id/.test(sql) ? [{ id: 7 }] : []), () =>
+    repo.saveUser({ email: ' ANN@X.com ', displayName: 'Ann', role: 'user', tenantIds: ['2', 2, 'x'], sectionKeys: ['workspaces', 'mdm'] })
+  );
+
+  const sqls = executed.map(e => e.sql);
+  // Unticking a box has to actually remove the grant, so the old rows go first.
+  assert.ok(sqls.some(s => /DELETE FROM app_user_tenants/.test(s)));
+  assert.ok(sqls.some(s => /DELETE FROM app_user_sections/.test(s)));
+  // Duplicates and nonsense are dropped, so two identical tenant ids insert once.
+  assert.equal(sqls.filter(s => /INSERT INTO app_user_tenants/.test(s)).length, 1);
+  assert.equal(sqls.filter(s => /INSERT INTO app_user_sections/.test(s)).length, 2);
+
+  const insert = executed.find(e => /INSERT INTO app_users/.test(e.sql));
+  const email = insert.params.find(p => p.name === 'email');
+  assert.equal(email.value, 'ann@x.com', 'the email is stored normalized so sign-in can match it');
+});
+
+test('saving an email that already exists is an edit, not a duplicate', async () => {
+  const repo = require('../src/services/permissionRepository');
+  const { executed } = await withFakeSql(sql => (/SELECT id FROM app_users WHERE email/.test(sql) ? [{ id: 4 }] : []), () =>
+    repo.saveUser({ email: 'ann@x.com', role: 'admin', tenantIds: [], sectionKeys: [] })
+  );
+  assert.ok(!executed.some(e => /INSERT INTO app_users/.test(e.sql)), 'a second grant must not hit the unique index');
+  assert.ok(executed.some(e => /UPDATE app_users/.test(e.sql)));
+});
+
+test('only an active administrator counts as one for the bootstrap check', async () => {
+  const repo = require('../src/services/permissionRepository');
+  const { executed } = await withFakeSql(() => [], () => repo.hasAnyAdmin());
+  // A deactivated administrator cannot sign in to fix anything, so counting them
+  // would be exactly the lockout the bootstrap exists to prevent.
+  assert.match(executed[0].sql, /is_active = 1/);
+});
+
+// ── The admin panel and the menu ──
+test('the access panel offers every grantable section and no administrator-only one', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/settings/permissions.ejs', {
+    currentUser: { name: 'T' }, user: { name: 'T' }, currentPath: '/settings/permissions',
+    breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Users & Access',
+    users: [{ id: 1, email: 'ann@x.com', display_name: 'Ann "The Boss" X', role: 'user', is_active: true, tenantIds: [2], sectionKeys: ['workspaces'] }],
+    tenants: [{ id: 2, name: 'Fabrikam', tenant_id: 'abc' }],
+    sections: sections.GRANTABLE_SECTIONS,
+    bootstrap: false, success: [], error: [],
+    permissions: { isAdmin: true }, visibleSections: sections.APP_SECTIONS,
+  });
+
+  for (const section of sections.GRANTABLE_SECTIONS) {
+    assert.match(html, new RegExp('value="' + section.key + '"'), 'missing ' + section.key);
+  }
+  assert.doesNotMatch(html, /value="settings"/, 'Configuration must never be grantable');
+  assert.match(html, /Fabrikam/);
+  // A name with quotes in it must not break the row out of its attribute — the
+  // User 360 lesson, applied here before it can bite.
+  assert.doesNotMatch(html, /onclick="editUser/);
+  assert.match(html, /js-edit-user/);
+});
+
+test('the sidebar shows only the sections a user holds', async () => {
+  const ejs = require('ejs');
+  const granted = sections.APP_SECTIONS.filter(s => s.key === 'workspaces' || s.key === 'reconciliation');
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
+    visibleSections: granted, permissions: { isAdmin: false },
+  });
+
+  assert.match(html, /<span>Workspaces<\/span>/);
+  assert.match(html, /<span>Reconciliation<\/span>/);
+  assert.doesNotMatch(html, /<span>Master Data<\/span>/);
+  assert.doesNotMatch(html, /<span>Deployment Pipelines<\/span>/);
+  // Settings holds the credentials and this panel; it is for administrators only.
+  assert.doesNotMatch(html, /Users &amp; Access/);
+});
+
+test('an administrator sees the Settings block and the access panel link', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/settings/permissions', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
+    visibleSections: sections.APP_SECTIONS, permissions: { isAdmin: true },
+  });
+  assert.match(html, /href="\/settings\/permissions"/);
+  assert.match(html, /Users &amp; Access/);
+});
+
+test('the no-access page says which section was refused instead of showing an error', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/no-access.ejs', {
+    currentUser: { name: 'T' }, user: { name: 'T' }, currentPath: '/mdm', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'No access',
+    section: sections.getSection('mdm'), message: null,
+    permissions: { isAdmin: false, isKnown: false }, visibleSections: [],
+  });
+  assert.match(html, /Master Data/);
 });

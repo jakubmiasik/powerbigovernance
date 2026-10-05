@@ -33,58 +33,61 @@
     </div>
 
     <nav class="sidebar-nav">
+      <%
+        // The menu is built from the sections this user may actually reach. A link
+        // that leads to a refusal is worse than no link at all.
+        //
+        // The menu is not the restriction — access is enforced by middleware in
+        // front of every route — but it defaults to showing nothing rather than
+        // everything, so a missing local can never advertise more than it should.
+        var navSections = typeof visibleSections !== 'undefined' && visibleSections ? visibleSections : [];
+        var isAdminUser = Boolean(typeof permissions !== 'undefined' && permissions && permissions.isAdmin);
+        var navByGroup = {};
+        navSections.forEach(function(section) {
+          (navByGroup[section.group] = navByGroup[section.group] || []).push(section);
+        });
+        function navActive(section) {
+          return section.prefixes.some(function(prefix) {
+            return pagePath === prefix || pagePath.indexOf(prefix + '/') === 0;
+          });
+        }
+      %>
       <p class="nav-section-title">Main</p>
       <a href="/" class="sidebar-link <%= pagePath === '/' || pagePath === '/home' ? 'active' : '' %>" title="Home">
         <i class="bi bi-house"></i> <span>Home</span>
       </a>
-      <a href="/workspaces" class="sidebar-link <%= pagePath.startsWith('/workspaces') ? 'active' : '' %>" title="Workspaces">
-        <i class="bi bi-collection"></i> <span>Workspaces</span>
-      </a>
-      <a href="/governance" class="sidebar-link <%= pagePath.startsWith('/governance') ? 'active' : '' %>" title="Governance">
-        <i class="bi bi-shield-check"></i> <span>Governance</span>
-      </a>
-      <a href="/pipelines" class="sidebar-link <%= pagePath.startsWith('/pipelines') ? 'active' : '' %>" title="Deployment Pipelines">
-        <i class="bi bi-diagram-3"></i> <span>Deployment Pipelines</span>
-      </a>
-      <a href="/tenant-settings" class="sidebar-link <%= pagePath.startsWith('/tenant-settings') ? 'active' : '' %>" title="Tenant Settings (live)">
-        <i class="bi bi-sliders"></i> <span>Tenant Settings</span>
-      </a>
+      <% (navByGroup['Main'] || []).forEach(function(section) { %>
+        <a href="<%= section.href %>" class="sidebar-link <%= navActive(section) ? 'active' : '' %>" title="<%= section.label %>">
+          <i class="bi <%= section.icon %>"></i> <span><%= section.label %></span>
+        </a>
+      <% }) %>
 
-      <p class="nav-section-title">Operations</p>
-      <a href="/analysis" class="sidebar-link <%= pagePath.startsWith('/analysis') ? 'active' : '' %>" title="Run Analysis">
-        <i class="bi bi-play-circle"></i> <span>Run Analysis</span>
-      </a>
-      <a href="/migrate" class="sidebar-link <%= pagePath.startsWith('/migrate') ? 'active' : '' %>" title="Migrate">
-        <i class="bi bi-arrow-left-right"></i> <span>Migrate</span>
-      </a>
-      <a href="/capacities" class="sidebar-link <%= pagePath.startsWith('/capacities') ? 'active' : '' %>" title="Capacities">
-        <i class="bi bi-lightning"></i> <span>Capacities</span>
-      </a>
+      <% ['Operations', 'Quality'].forEach(function(group) { %>
+        <% if ((navByGroup[group] || []).length) { %>
+          <p class="nav-section-title"><%= group %></p>
+          <% navByGroup[group].forEach(function(section) { %>
+            <a href="<%= section.href %>" class="sidebar-link <%= navActive(section) ? 'active' : '' %>" title="<%= section.label %>">
+              <i class="bi <%= section.icon %>"></i> <span><%= section.label %></span>
+            </a>
+          <% }) %>
+        <% } %>
+      <% }) %>
 
-      <p class="nav-section-title">Quality</p>
-      <a href="/quality" class="sidebar-link <%= pagePath === '/quality' || pagePath.startsWith('/quality/sources') ? 'active' : '' %>" title="Quality Configuration">
-        <i class="bi bi-patch-check"></i> <span>Quality Configuration</span>
-      </a>
-      <a href="/quality/security-groups" class="sidebar-link <%= pagePath.startsWith('/quality/security-groups') ? 'active' : '' %>" title="Which security groups should exist">
-        <i class="bi bi-people"></i> <span>Security Groups</span>
-      </a>
-      <a href="/reconciliation" class="sidebar-link <%= pagePath.startsWith('/reconciliation') ? 'active' : '' %>" title="Data Reconciliation">
-        <i class="bi bi-clipboard2-check"></i> <span>Reconciliation</span>
-      </a>
-      <a href="/mdm" class="sidebar-link <%= pagePath.startsWith('/mdm') ? 'active' : '' %>" title="Master Data Management">
-        <i class="bi bi-fingerprint"></i> <span>Master Data</span>
-      </a>
-
-      <p class="nav-section-title">Settings</p>
-      <a href="/settings" class="sidebar-link <%= pagePath === '/settings' ? 'active' : '' %>" title="Configuration">
-        <i class="bi bi-gear"></i> <span>Configuration</span>
-      </a>
-      <a href="/settings/governance" class="sidebar-link <%= pagePath.startsWith('/settings/governance') ? 'active' : '' %>" title="Governance Configuration">
-        <i class="bi bi-rulers"></i> <span>Governance Configuration</span>
-      </a>
-      <a href="/settings/access" class="sidebar-link <%= pagePath.startsWith('/settings/access') ? 'active' : '' %>" title="Grant Access">
-        <i class="bi bi-key"></i> <span>Grant Access</span>
-      </a>
+      <% if (isAdminUser) { %>
+        <p class="nav-section-title">Settings</p>
+        <a href="/settings" class="sidebar-link <%= pagePath === '/settings' ? 'active' : '' %>" title="Configuration">
+          <i class="bi bi-gear"></i> <span>Configuration</span>
+        </a>
+        <a href="/settings/permissions" class="sidebar-link <%= pagePath.startsWith('/settings/permissions') ? 'active' : '' %>" title="Users & Access">
+          <i class="bi bi-person-badge"></i> <span>Users &amp; Access</span>
+        </a>
+        <a href="/settings/governance" class="sidebar-link <%= pagePath.startsWith('/settings/governance') ? 'active' : '' %>" title="Governance Configuration">
+          <i class="bi bi-rulers"></i> <span>Governance Configuration</span>
+        </a>
+        <a href="/settings/access" class="sidebar-link <%= pagePath.startsWith('/settings/access') ? 'active' : '' %>" title="Grant Access">
+          <i class="bi bi-key"></i> <span>Grant Access</span>
+        </a>
+      <% } %>
     </nav>
 
     <!-- Sidebar footer: user info -->

@@ -7,6 +7,7 @@ const { RECONCILIATION_MIGRATIONS } = require('./reconciliationSchema');
 const { MDM_MIGRATIONS } = require('./mdmSchema');
 const { ANALYSIS_MODEL_MIGRATIONS } = require('./analysisModelSchema');
 const { SECURITY_GROUP_MIGRATIONS } = require('./securityGroupSchema');
+const { PERMISSION_MIGRATIONS } = require('./permissionSchema');
 const { encryptSecret, isEncryptionConfigured } = require('./secretCryptoService');
 
 const cfg = getConfig();
@@ -1401,6 +1402,10 @@ async function runMigrations() {
     }
     // People, security groups and the workspaces they are attached to
     for (const migration of SECURITY_GROUP_MIGRATIONS) {
+      await runStatement(conn, migration.label, migration.sql);
+    }
+    // Application users and the tenants / sections they may see
+    for (const migration of PERMISSION_MIGRATIONS) {
       await runStatement(conn, migration.label, migration.sql);
     }
 

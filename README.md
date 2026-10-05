@@ -91,6 +91,8 @@ npm run dev
 | `SCHEDULER_CATCHUP_MINUTES` | How far back a tick looks for a schedule that came due (default 240) — applies to capacity actions and analysis scans alike |
 | `SCHEDULER_TICK_MS` | Scheduler tick interval (default 60000) |
 | `REQUIRE_AUTH` | Force (`true`) or disable (`false`) the in-app sign-in requirement. Defaults to enabled whenever the app runs on Azure App Service. |
+| `ADMIN_EMAILS` | Comma-separated sign-in emails that are always application administrators, regardless of what the permission tables say. The safety net for the access panel. |
+| `PERMISSION_CACHE_TTL_MS` | How long a user's resolved permissions are cached (default 30000) |
 | `PORT` | Server port (default: 3000) |
 
 Authentication is enforced in two places. Azure App Service EasyAuth should be configured with
@@ -98,6 +100,26 @@ Authentication is enforced in two places. Azure App Service EasyAuth should be c
 so the health probe (which also drives the scheduler catch-up tick) stays reachable. The application
 additionally refuses anonymous requests itself, so leaving EasyAuth on "allow unauthenticated
 access" no longer exposes the app.
+
+## Who can see what
+
+Signing in says *who* someone is; **Settings → Users & Access** says *what they may do*. Each person is
+granted:
+
+- **Tenants** — which configured service principals they may see and start scans against. A scan belongs
+  to the tenant it scanned, so this filters the run selector itself and every page, count and detail view
+  that follows from it.
+- **Sections** — which parts of the application appear at all: Workspaces, Governance, Deployment
+  Pipelines, Reconciliation, Master Data and so on.
+
+Administrators hold every tenant and every section by role, so their grants are not stored separately.
+Configuration (credentials and this panel) is reserved for administrators and cannot be granted to an
+ordinary user.
+
+Access is enforced by middleware in front of every route, not by hiding menu entries — typing the URL
+gets the same refusal. Two independent guards keep the panel reachable: `ADMIN_EMAILS` always confers
+administrator rights, and while no active administrator exists at all, every signed-in user is treated
+as one so the first can be named. That bootstrap ends the moment an administrator is saved.
 
 ## Architecture
 
