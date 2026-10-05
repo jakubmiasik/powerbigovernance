@@ -7061,3 +7061,24 @@ test('the directory search route reports a failure instead of looking like no re
   }
 });
 
+
+test('the access dialog fits its content instead of hiding it below the fold', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/settings/permissions.ejs', {
+    currentUser: { name: 'T' }, user: { name: 'T' }, currentPath: '/settings/permissions',
+    breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Users & Access',
+    users: [],
+    tenants: [{ id: 2, name: 'Fabrikam', tenant_id: 'abc' }],
+    sections: sections.GRANTABLE_SECTIONS,
+    bootstrap: false, success: [], error: [],
+    permissions: { isAdmin: true }, visibleSections: sections.APP_SECTIONS,
+  });
+
+  // Wide enough to put the two grant lists beside each other rather than stacking
+  // them into a dialog taller than the screen.
+  assert.match(html, /modal-dialog modal-xl/);
+  assert.match(html, /id="grantFields" class="row/);
+  // A long tenant list scrolls within its own box, so it cannot push Sections off
+  // the bottom of the dialog.
+  assert.match(html, /js-toggle-tenants/);
+});
