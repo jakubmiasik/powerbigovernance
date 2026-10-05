@@ -138,7 +138,7 @@
 </div>
 
 <div class="modal fade" id="userModal" tabindex="-1">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable modal-dialog-centered">
     <div class="modal-content">
       <form method="POST" action="/settings/permissions/save">
         <div class="modal-header">
@@ -172,10 +172,9 @@
               <input type="text" class="form-control" id="principalSearch" autocomplete="off"
                      placeholder="Start typing a name to search Entra ID...">
               <div class="form-text" id="principalSearchHelp">
-                Only people and security groups that exist in Entra ID can be chosen, so a grant
-                cannot be lost to a typo.
+                Chosen from Entra ID, so a grant cannot be lost to a typo.
               </div>
-              <div id="principalResults" class="list-group mt-2" style="max-height:240px;overflow-y:auto;"></div>
+              <div id="principalResults" class="list-group mt-2" style="max-height:200px;overflow-y:auto;"></div>
             </div>
           </div>
 
@@ -195,18 +194,29 @@
             </div>
           </div>
 
-          <div id="grantFields">
-            <h6 class="mt-3"><i class="bi bi-building me-1"></i>Tenants</h6>
-            <p class="text-muted small">
-              Which tenants this person can see and trigger analysis runs for. Scans belonging to
-              other tenants are hidden from them everywhere, including the scan selector.
-            </p>
-            <% if (!tenants.length) { %>
-              <p class="text-muted small fst-italic">No tenants configured.</p>
-            <% } else { %>
-              <div class="row g-2 mb-3">
-                <% tenants.forEach(function(tenant) { %>
-                  <div class="col-md-6">
+          <%
+            // Tenants beside sections rather than beneath them. Stacked, with a
+            // paragraph of explanation above each, the dialog was taller than the
+            // screen and everything below the fold read as missing rather than
+            // merely further down.
+          %>
+          <div id="grantFields" class="row g-3">
+            <div class="col-lg-4">
+              <h6 class="d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-building me-1"></i>Tenants</span>
+                <% if (tenants.length) { %>
+                  <button type="button" class="btn btn-link btn-sm p-0 js-toggle-tenants">Select all</button>
+                <% } %>
+              </h6>
+              <p class="text-muted small mb-2">
+                Which tenants they may see and scan. Other tenants' scans are hidden everywhere,
+                including the scan selector.
+              </p>
+              <% if (!tenants.length) { %>
+                <p class="text-muted small fst-italic">No tenants configured.</p>
+              <% } else { %>
+                <div class="border rounded p-2" style="max-height:260px;overflow-y:auto;">
+                  <% tenants.forEach(function(tenant) { %>
                     <div class="form-check">
                       <input class="form-check-input js-tenant" type="checkbox" name="tenantIds"
                              value="<%= tenant.id %>" id="tenant-<%= tenant.id %>">
@@ -215,43 +225,40 @@
                         <span class="d-block small text-muted"><%= tenant.tenant_id %></span>
                       </label>
                     </div>
+                  <% }) %>
+                </div>
+              <% } %>
+            </div>
+
+            <div class="col-lg-8">
+              <h6><i class="bi bi-grid me-1"></i>Sections</h6>
+              <p class="text-muted small mb-2">
+                Which parts of the application appear for them. Anything not ticked is hidden from
+                the menu and refused if its address is opened directly.
+              </p>
+              <div class="row g-2 row-cols-1 row-cols-md-2">
+                <% Object.keys(sectionsByGroup).forEach(function(group) { %>
+                  <div class="col">
+                    <div class="border rounded h-100 p-2">
+                      <div class="d-flex justify-content-between align-items-center mb-1">
+                        <span class="small fw-bold text-muted text-uppercase"><%= group %></span>
+                        <button type="button" class="btn btn-link btn-sm p-0 js-toggle-group"
+                                data-group="<%= group %>">Select all</button>
+                      </div>
+                      <% sectionsByGroup[group].forEach(function(section) { %>
+                        <div class="form-check">
+                          <input class="form-check-input js-section" type="checkbox" name="sectionKeys"
+                                 data-group="<%= group %>"
+                                 value="<%= section.key %>" id="section-<%= section.key %>">
+                          <label class="form-check-label" for="section-<%= section.key %>">
+                            <i class="bi <%= section.icon %> me-1"></i><%= section.label %>
+                          </label>
+                        </div>
+                      <% }) %>
+                    </div>
                   </div>
                 <% }) %>
               </div>
-            <% } %>
-
-            <h6 class="mt-3"><i class="bi bi-grid me-1"></i>Sections</h6>
-            <p class="text-muted small">
-              Which parts of the application appear for this person. Anything not ticked is hidden
-              from the menu and refused if its address is opened directly.
-            </p>
-            <%
-              // Laid out as columns rather than one long stack: with the groups below
-              // each other the last of them sat past the fold of the dialog, which made
-              // Quality look like it was missing rather than merely further down.
-            %>
-            <div class="row g-3">
-              <% Object.keys(sectionsByGroup).forEach(function(group) { %>
-                <div class="col-md-6">
-                  <div class="border rounded h-100 p-2">
-                    <div class="d-flex justify-content-between align-items-center mb-1">
-                      <span class="small fw-bold text-muted text-uppercase"><%= group %></span>
-                      <button type="button" class="btn btn-link btn-sm p-0 js-toggle-group"
-                              data-group="<%= group %>">Select all</button>
-                    </div>
-                    <% sectionsByGroup[group].forEach(function(section) { %>
-                      <div class="form-check">
-                        <input class="form-check-input js-section" type="checkbox" name="sectionKeys"
-                               data-group="<%= group %>"
-                               value="<%= section.key %>" id="section-<%= section.key %>">
-                        <label class="form-check-label" for="section-<%= section.key %>">
-                          <i class="bi <%= section.icon %> me-1"></i><%= section.label %>
-                        </label>
-                      </div>
-                    <% }) %>
-                  </div>
-                </div>
-              <% }) %>
             </div>
           </div>
 
@@ -287,6 +294,7 @@ function syncRoleState() {
 
 function clearGrantBoxes() {
   document.querySelectorAll('.js-tenant, .js-section').forEach(function(box) { box.checked = false; });
+  resetToggleLabels();
 }
 
 // ── Choosing who from Entra ID ──
@@ -394,14 +402,25 @@ document.getElementById('principalSearch').addEventListener('input', function() 
 // Ticking a whole group at once, because the common case is "everything under
 // Quality" rather than three of its four entries.
 document.addEventListener('click', function(event) {
-  var toggle = event.target.closest('.js-toggle-group');
+  var toggle = event.target.closest('.js-toggle-group, .js-toggle-tenants');
   if (!toggle) return;
   event.preventDefault();
-  var boxes = document.querySelectorAll('.js-section[data-group="' + toggle.dataset.group + '"]');
+  var selector = toggle.classList.contains('js-toggle-tenants')
+    ? '.js-tenant'
+    : '.js-section[data-group="' + toggle.dataset.group + '"]';
+  var boxes = document.querySelectorAll(selector);
   var turnOn = Array.prototype.some.call(boxes, function(box) { return !box.checked; });
   boxes.forEach(function(box) { box.checked = turnOn; });
   toggle.textContent = turnOn ? 'Clear all' : 'Select all';
 });
+
+function resetToggleLabels() {
+  // The boxes have just been cleared, so a button still reading "Clear all" from
+  // the previous time the dialog was open would be describing the wrong state.
+  document.querySelectorAll('.js-toggle-group, .js-toggle-tenants').forEach(function(toggle) {
+    toggle.textContent = 'Select all';
+  });
+}
 
 function openUserForm() {
   document.getElementById('userModalTitle').textContent = 'Add User or Group';
