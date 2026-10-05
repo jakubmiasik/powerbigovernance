@@ -911,6 +911,21 @@ body.sidebar-collapsed .main-content {
 .breadcrumb { background: none; padding: 0; }
 .display-6 { font-weight: 700; }
 
+/* A scrollable modal whose header, body and footer are wrapped in a <form>.
+   Bootstrap builds that layout assuming the three are direct children of
+   .modal-content, so a wrapper leaves the body at its natural height: it
+   overflows the capped content box, is clipped with no scrollbar, and the
+   footer - the Save button - is cut off the bottom with no way to reach it.
+   Making the wrapper the flex column restores the intended behaviour. */
+.modal-dialog-scrollable .modal-content > form {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  max-height: 100%;
+  min-height: 0;
+}
+.modal-dialog-scrollable .modal-content > form > .modal-body { overflow-y: auto; }
+
 /* ──── Landing page ──── */
 .landing-hero {
   min-height: 100vh;

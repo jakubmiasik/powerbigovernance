@@ -7082,3 +7082,18 @@ test('the access dialog fits its content instead of hiding it below the fold', a
   // the bottom of the dialog.
   assert.match(html, /js-toggle-tenants/);
 });
+
+test('a scrollable modal whose body is wrapped in a form can still scroll', async () => {
+  const fs = require('fs');
+  const css = fs.readFileSync('src/public/css/style.css', 'utf8');
+  const view = fs.readFileSync('src/views/settings/permissions.ejs', 'utf8');
+
+  // Bootstrap builds the scrollable layout assuming header, body and footer are
+  // direct children of .modal-content. This dialog wraps them in a form, which
+  // left the body at its natural height: clipped, with no scrollbar and the Save
+  // button cut off the bottom of the screen with no way to reach it.
+  assert.match(view, /<div class="modal-content">\s*<form/);
+  assert.match(css, /\.modal-dialog-scrollable \.modal-content > form \{[^}]*flex-direction: column/);
+  assert.match(css, /\.modal-dialog-scrollable \.modal-content > form \{[^}]*max-height: 100%/);
+  assert.match(css, /\.modal-dialog-scrollable \.modal-content > form > \.modal-body \{ overflow-y: auto/);
+});
