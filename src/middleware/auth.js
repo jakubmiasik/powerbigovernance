@@ -14,18 +14,30 @@ function parseEasyAuthUser(req, _res, next) {
         return claim ? claim.val : null;
       };
 
+      // A guest's identity reaches us in more than one shape: the token may carry
+      // the external address, the #EXT# principal name, or both, depending on the
+      // tenant. The object id is the same in every case, so it is captured as the
+      // identity that actually matches, with the addresses kept as fallbacks.
+      const upn = getClaim('http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn') || getClaim('upn');
+      const preferred = getClaim('preferred_username');
+      const emailClaim = getClaim('http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress');
+
       req.user = {
         id: decoded.userId || getClaim('http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier'),
+        objectId:
+          getClaim('http://schemas.microsoft.com/identity/claims/objectidentifier') ||
+          getClaim('oid') ||
+          null,
         name:
           getClaim('name') ||
           getClaim('http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name') ||
           decoded.userDetails ||
           'User',
-        email:
-          getClaim('preferred_username') ||
-          getClaim('http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress') ||
-          decoded.userDetails ||
-          '',
+        email: preferred || emailClaim || upn || decoded.userDetails || '',
+        userPrincipalName: upn || decoded.userDetails || '',
+        // Kept so a grant recorded against any address this person is known by
+        // still matches — a guest is routinely recorded under a different one.
+        alternateEmails: [preferred, emailClaim, upn, decoded.userDetails].filter(Boolean),
         provider: decoded.identityProvider || 'aad',
       };
     } catch {

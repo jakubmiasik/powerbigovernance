@@ -72,8 +72,11 @@ router.post('/save', async (req, res) => {
         req.flash('error', 'Choose the security group from the directory list so it can be matched to its members.');
         return res.redirect('/settings/permissions');
       }
-    } else if (!email || !normalizeEmail(email).includes('@')) {
-      req.flash('error', 'A valid sign-in email address is required.');
+    } else if (!entraObjectId && (!email || !normalizeEmail(email).includes('@'))) {
+      // Either identity is enough: the object id is what a guest is matched on,
+      // since which of their two addresses the sign-in token carries is not ours
+      // to decide.
+      req.flash('error', 'Choose the person from the directory list, or enter a valid sign-in email address.');
       return res.redirect('/settings/permissions');
     }
 

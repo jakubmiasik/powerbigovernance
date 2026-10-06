@@ -31,15 +31,19 @@ function clearPermissionCache() {
  * is granted, a failure to read membership is reported rather than treated as
  * "belongs to nothing" — that would silently drop every group-based grant.
  */
-async function readGroupRecords(email, anyGroupGranted) {
+async function readGroupRecords(identity, anyGroupGranted) {
   if (!anyGroupGranted) return [];
-  const groupIds = await directoryService.groupIdsForUser(email);
+  // The object id is preferred because Graph cannot look a guest up by the
+  // address they signed in with: their external address is not their principal
+  // name in this tenant, so by-address lookup is a 404 and every group grant
+  // would appear to confer nothing.
+  const groupIds = await directoryService.groupIdsForUser(identity.objectId || identity.email);
   if (!groupIds.length) return [];
   return permissionRepository.getGroupRecords(groupIds);
 }
 
-async function readPermissionInputs(email) {
-  const cached = cache.get(email);
+async function readPermissionInputs(identity) {
+  const cached = cache.get(identity.cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
 
   // Errors are deliberately not swallowed here. Treating an unreadable table as
@@ -47,17 +51,36 @@ async function readPermissionInputs(email) {
   // and hand every signed-in user administrator rights — the exact opposite of
   // what a failure should do. The caller turns a failure into no access instead.
   const [record, anyAdminConfigured, tenants, anyGroupGranted] = await Promise.all([
-    permissionRepository.getUserByEmail(email),
+    permissionRepository.getUserByIdentity({ objectId: identity.objectId, emails: identity.emails }),
     permissionRepository.hasAnyAdmin(),
     db.getServicePrincipals(),
     permissionRepository.hasAnyGroupGrant(),
   ]);
 
-  const groupRecords = await readGroupRecords(email, anyGroupGranted);
+  const groupRecords = await readGroupRecords(identity, anyGroupGranted);
 
   const value = { record, groupRecords, anyAdminConfigured, tenants };
-  cache.set(email, { expiresAt: Date.now() + PERMISSION_CACHE_TTL_MS, value });
+  cache.set(identity.cacheKey, { expiresAt: Date.now() + PERMISSION_CACHE_TTL_MS, value });
   return value;
+}
+
+/**
+ * Every way the signed-in person can be recognised.
+ *
+ * A guest arrives under whichever of their two addresses the tenant puts in the
+ * token, so one of them is not enough to find a grant made against the other.
+ */
+function identityOf(user) {
+  const emails = permissions.identityEmails(user);
+  const objectId = String((user && user.objectId) || '').trim() || null;
+  return {
+    objectId,
+    emails,
+    email: emails[0] || '',
+    // Keyed on the object id when there is one: two addresses for the same guest
+    // must not become two cache entries that can disagree.
+    cacheKey: objectId ? 'oid:' + objectId : 'email:' + (emails[0] || ''),
+  };
 }
 
 async function loadPermissions(req, res, next) {
@@ -73,8 +96,8 @@ async function loadPermissions(req, res, next) {
   }
 
   try {
-    const { record, groupRecords, anyAdminConfigured, tenants } =
-      await readPermissionInputs(permissions.normalizeEmail(req.user.email));
+    const identity = identityOf(req.user);
+    const { record, groupRecords, anyAdminConfigured, tenants } = await readPermissionInputs(identity);
     req.permissions = permissions.resolvePermissions({
       user: req.user, record, groupRecords, adminEmails, anyAdminConfigured, tenants,
     });

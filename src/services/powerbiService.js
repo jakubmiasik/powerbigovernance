@@ -921,10 +921,14 @@ function createPowerBIService(spConfig, authOptions = {}) {
 
   async function searchEntraUsers(query) {
     const token = await getGraphToken();
-    const filter = `startswith(displayName,'${query}') or startswith(userPrincipalName,'${query}')`;
+    // A guest's principal name is the mangled `#EXT#` form, so searching it alone
+    // never finds them by the address they are actually known by. Their original
+    // address lives in mail / otherMails, which is why both are searched.
+    const filter = `startswith(displayName,'${query}') or startswith(userPrincipalName,'${query}') `
+      + `or startswith(mail,'${query}')`;
     const data = await safeGet(token, `${GRAPH_BASE}/users`, {
       $filter: filter,
-      $select: 'id,displayName,userPrincipalName,mail',
+      $select: 'id,displayName,userPrincipalName,mail,userType',
       $top: 15,
     });
     return data.value || [];
@@ -960,9 +964,12 @@ function createPowerBIService(spConfig, authOptions = {}) {
    * group, so direct membership alone would apply it to some members and silently
    * not to others.
    */
-  async function getTransitiveGroupIds(userPrincipalName) {
+  async function getTransitiveGroupIds(userIdOrPrincipalName) {
     const token = await getGraphToken();
-    const url = `${GRAPH_BASE}/users/${encodeURIComponent(userPrincipalName)}/getMemberGroups`;
+    // Addressed by object id wherever the caller has one. A guest's external
+    // address is not their principal name in this tenant, so looking them up by
+    // the address they signed in with is a 404.
+    const url = `${GRAPH_BASE}/users/${encodeURIComponent(userIdOrPrincipalName)}/getMemberGroups`;
     const data = await safePost(token, url, { securityEnabledOnly: true });
     return data && Array.isArray(data.value) ? data.value : [];
   }
