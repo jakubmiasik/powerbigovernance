@@ -85,8 +85,16 @@
                     <% if (row.principal_type === 'group') { %>
                       <span class="badge bg-dark ms-1">Security group</span>
                       <div class="small text-muted">Everyone in this group inherits the access below</div>
-                    <% } else if (row.display_name) { %>
-                      <div class="small text-muted"><%= row.email %></div>
+                    <% } else { %>
+                      <% if (String(row.email || '').includes('#EXT#')) { %>
+                        <span class="badge bg-warning text-dark ms-1">Guest</span>
+                      <% } %>
+                      <% if (row.display_name && row.email) { %>
+                        <div class="small text-muted"><%= row.email %></div>
+                      <% } %>
+                      <% if (!row.email && row.entra_object_id) { %>
+                        <div class="small text-muted">Matched on their directory entry</div>
+                      <% } %>
                     <% } %>
                     <% if (!row.is_active) { %><span class="badge bg-secondary">Deactivated</span><% } %>
                   </td>
@@ -346,6 +354,14 @@ function renderDirectoryResults(results) {
     // contain anything, including quotes and angle brackets.
     var name = document.createElement('div');
     name.textContent = entry.displayName;
+    if (entry.isGuest) {
+      // Said plainly, because a guest's two addresses look like two different
+      // people and an administrator needs to know which they are granting.
+      var badge = document.createElement('span');
+      badge.className = 'badge bg-warning text-dark ms-2';
+      badge.textContent = 'Guest';
+      name.appendChild(badge);
+    }
     var detail = document.createElement('div');
     detail.className = 'small text-muted';
     detail.textContent = entry.detail || '';

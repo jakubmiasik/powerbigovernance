@@ -15,6 +15,7 @@
 
 const db = require('./databaseService');
 const powerbi = require('./powerbiService');
+const permissions = require('./permissionService');
 
 // Looked up per call rather than destructured once, so a test can substitute it.
 const createPowerBIService = (...args) => powerbi.createPowerBIService(...args);
@@ -72,15 +73,30 @@ async function searchUsers(query) {
   try {
     const client = await directoryClient();
     const found = await client.searchEntraUsers(escapeODataLiteral(query));
-    return found.map(user => ({
-      objectId: user.id,
-      displayName: user.displayName || user.userPrincipalName || 'Unnamed',
-      // The sign-in address specifically. `mail` can be absent or an alias, and an
-      // alias will never match what arrives in the token.
-      email: user.userPrincipalName || user.mail || '',
-      principalType: 'user',
-      detail: user.userPrincipalName || user.mail || '',
-    })).filter(entry => entry.email);
+    return found.map((user) => {
+      const upn = permissions.normalizeEmail(user.userPrincipalName);
+      const guest = user.userType === 'Guest' || permissions.isGuestUpn(upn);
+      // A guest is known by two addresses: the mangled `#EXT#` principal name in
+      // this tenant and the real one they were invited by. The real one is shown,
+      // because it is the one an administrator recognises, while the grant is
+      // keyed on the object id so it matches whichever arrives in the token.
+      const external = permissions.normalizeEmail(user.mail) || permissions.externalAddressFromGuestUpn(upn);
+      const primary = guest ? (external || upn) : (upn || permissions.normalizeEmail(user.mail));
+
+      return {
+        objectId: user.id,
+        displayName: user.displayName || primary || 'Unnamed',
+        email: primary,
+        userPrincipalName: upn,
+        isGuest: guest,
+        principalType: 'user',
+        detail: guest && external && upn && external !== upn
+          ? external + ' (guest)'
+          : (primary || ''),
+      };
+    // Somebody with no usable address and no object id could never be matched to
+    // a sign-in, so they are not offered.
+    }).filter(entry => entry.email || entry.objectId);
   } catch (err) {
     throw explainGraphFailure(err);
   }

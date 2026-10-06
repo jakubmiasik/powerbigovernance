@@ -101,6 +101,17 @@ const PERMISSION_MIGRATIONS = [
           WHERE principal_type = 'group' AND entra_object_id IS NOT NULL;
     `,
   },
+  {
+    label: 'keep a person unique by directory object as well as by address',
+    sql: `
+      -- A guest is known by two addresses, so the same person could otherwise be
+      -- granted twice - once under each - and the two entries could then disagree
+      -- about what they may see.
+      IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_app_users_user_object' AND object_id = OBJECT_ID(N'app_users'))
+        CREATE UNIQUE INDEX UX_app_users_user_object ON app_users (entra_object_id)
+          WHERE principal_type = 'user' AND entra_object_id IS NOT NULL;
+    `,
+  },
 ];
 
 module.exports = { PERMISSION_MIGRATIONS };

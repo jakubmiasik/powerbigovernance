@@ -6770,7 +6770,7 @@ test('saving a user replaces their grants rather than adding to them', async () 
 
 test('saving an email that already exists is an edit, not a duplicate', async () => {
   const repo = require('../src/services/permissionRepository');
-  const { executed } = await withFakeSql(sql => (/SELECT id FROM app_users WHERE principal_type = @principalType AND email/.test(sql) ? [{ id: 4 }] : []), () =>
+  const { executed } = await withFakeSql(sql => (/SELECT id FROM app_users/.test(sql) ? [{ id: 4 }] : []), () =>
     repo.saveUser({ email: 'ann@x.com', role: 'admin', tenantIds: [], sectionKeys: [] })
   );
   assert.ok(!executed.some(e => /INSERT INTO app_users/.test(e.sql)), 'a second grant must not hit the unique index');
@@ -6887,12 +6887,15 @@ test('a person is identified by the address their sign-in token will carry', asy
     searchEntraUsers: async () => ([
       { id: 'u1', displayName: 'Ann', userPrincipalName: 'ann@x.com', mail: 'alias@x.com' },
       { id: 'u2', displayName: 'No Address' },
+      { displayName: 'Nothing At All' },
     ]),
   }, () => dir.search('ann', 'user'));
 
-  // The alias would never match the token, and an entry with no address at all
-  // could never match anything, so it is not offered.
-  assert.deepEqual(results.map(r => r.email), ['ann@x.com']);
+  // The alias would never match the token, so the principal name wins. An entry
+  // with no address can still be granted on its directory object, but one with
+  // neither could never match anything and is not offered.
+  assert.deepEqual(results.map(r => r.displayName), ['Ann', 'No Address']);
+  assert.equal(results[0].email, 'ann@x.com');
 });
 
 test('a quote in a name does not break the directory filter', () => {
@@ -7096,4 +7099,188 @@ test('a scrollable modal whose body is wrapped in a form can still scroll', asyn
   assert.match(css, /\.modal-dialog-scrollable \.modal-content > form \{[^}]*flex-direction: column/);
   assert.match(css, /\.modal-dialog-scrollable \.modal-content > form \{[^}]*max-height: 100%/);
   assert.match(css, /\.modal-dialog-scrollable \.modal-content > form > \.modal-body \{ overflow-y: auto/);
+});
+
+// ── Guest (B2B external) users ──
+
+test('the address hidden in a guest principal name is recovered', () => {
+  const p = require('../src/services/permissionService');
+  assert.equal(
+    p.externalAddressFromGuestUpn('jakub.miasik_softwareone.com#EXT#@SWOTDEMPID302779.onmicrosoft.com'),
+    'jakub.miasik@softwareone.com',
+  );
+  // Only the last underscore becomes the @: ann_marie at contoso.com, never ann
+  // at marie_contoso.com.
+  assert.equal(
+    p.externalAddressFromGuestUpn('ann_marie_contoso.com#EXT#@tenant.onmicrosoft.com'),
+    'ann_marie@contoso.com',
+  );
+  // A member's address is not a guest address and must not be mangled into one.
+  assert.equal(p.externalAddressFromGuestUpn('ann@contoso.com'), '');
+  assert.equal(p.externalAddressFromGuestUpn(''), '');
+});
+
+test('a guest is recognised under either of their two addresses', () => {
+  const p = require('../src/services/permissionService');
+  const upn = 'jakub.miasik_softwareone.com#EXT#@SWOTDEMPID302779.onmicrosoft.com';
+
+  assert.ok(p.identityEmails({ email: upn }).includes('jakub.miasik@softwareone.com'));
+  assert.ok(p.identityEmails({ email: upn }).includes(upn.toLowerCase()));
+  // Signed in under the external address, the #EXT# form is not derivable, but
+  // the address itself still has to be offered as a match.
+  assert.deepEqual(p.identityEmails({ email: 'jakub.miasik@softwareone.com' }), ['jakub.miasik@softwareone.com']);
+  assert.ok(p.isGuestUpn(upn));
+  assert.ok(!p.isGuestUpn('ann@contoso.com'));
+});
+
+test('naming either form of a guest address in ADMIN_EMAILS makes them an administrator', () => {
+  const p = require('../src/services/permissionService');
+  const upn = 'jakub.miasik_softwareone.com#EXT#@SWOTDEMPID302779.onmicrosoft.com';
+
+  // The lockout safety net has to work for a guest too, and whoever sets
+  // ADMIN_EMAILS will write the address they recognise, not the mangled one.
+  const byExternal = p.resolvePermissions({
+    user: { email: upn }, record: null,
+    adminEmails: ['jakub.miasik@softwareone.com'], anyAdminConfigured: true, tenants: [],
+  });
+  assert.equal(byExternal.isAdmin, true);
+
+  const byUpn = p.resolvePermissions({
+    user: { email: upn }, record: null,
+    adminEmails: [upn], anyAdminConfigured: true, tenants: [],
+  });
+  assert.equal(byUpn.isAdmin, true);
+});
+
+test('a sign-in token is read for the object id and both address forms', () => {
+  const { parseEasyAuthUser } = require('../src/middleware/auth');
+  const upn = 'jakub.miasik_softwareone.com#EXT#@SWOTDEMPID302779.onmicrosoft.com';
+  const principal = {
+    userId: 'x', userDetails: upn, identityProvider: 'aad',
+    claims: [
+      { typ: 'name', val: 'Jakub Miasik' },
+      { typ: 'preferred_username', val: 'jakub.miasik@softwareone.com' },
+      { typ: 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn', val: upn },
+      { typ: 'http://schemas.microsoft.com/identity/claims/objectidentifier', val: 'guest-oid' },
+    ],
+  };
+  const req = { headers: { 'x-ms-client-principal': Buffer.from(JSON.stringify(principal)).toString('base64') } };
+  parseEasyAuthUser(req, {}, () => {});
+
+  assert.equal(req.user.objectId, 'guest-oid');
+  assert.equal(req.user.email, 'jakub.miasik@softwareone.com');
+  assert.equal(req.user.userPrincipalName, upn);
+  // Whichever address the grant was recorded against, one of these matches it.
+  assert.ok(req.user.alternateEmails.includes(upn));
+});
+
+test('a person is found by directory object id as well as by any of their addresses', async () => {
+  const repo = require('../src/services/permissionRepository');
+  const { executed } = await withFakeSql(() => [], () => repo.getUserByIdentity({
+    objectId: 'guest-oid',
+    emails: ['jakub.miasik@softwareone.com', 'jakub.miasik_softwareone.com#EXT#@tenant.onmicrosoft.com'],
+  }));
+
+  const lookup = executed[0];
+  assert.match(lookup.sql, /entra_object_id = @objectId/);
+  assert.match(lookup.sql, /email IN \(@e0, @e1\)/);
+  // Token data, so bound rather than concatenated into the statement.
+  assert.ok(lookup.params.some(p => p.value === 'guest-oid'));
+  assert.ok(lookup.params.some(p => p.value === 'jakub.miasik@softwareone.com'));
+});
+
+test('the object id wins when an older address-keyed entry sits beside it', async () => {
+  const repo = require('../src/services/permissionRepository');
+  const rows = [
+    { id: 1, email: 'jakub.miasik@softwareone.com', entra_object_id: null, role: 'user', is_active: true, principal_type: 'user' },
+    { id: 2, email: null, entra_object_id: 'guest-oid', role: 'admin', is_active: true, principal_type: 'user' },
+  ];
+  const { result } = await withFakeSql(sql => (/FROM app_users/.test(sql) ? rows : []), () =>
+    repo.getUserByIdentity({ objectId: 'guest-oid', emails: ['jakub.miasik@softwareone.com'] }));
+
+  // The object id is the identity that cannot be reassigned, so it decides.
+  assert.equal(result.id, 2);
+});
+
+test('an identity with nothing to match on does not query at all', async () => {
+  const repo = require('../src/services/permissionRepository');
+  const { executed, result } = await withFakeSql(() => [], () => repo.getUserByIdentity({ objectId: '', emails: [] }));
+  assert.equal(result, null);
+  assert.equal(executed.length, 0);
+});
+
+test('a guest can be granted access by directory entry alone, without an address', async () => {
+  const repo = require('../src/services/permissionRepository');
+  const { executed } = await withFakeSql(sql => (/OUTPUT INSERTED.id/.test(sql) ? [{ id: 7 }] : []), () =>
+    repo.saveUser({ principalType: 'user', entraObjectId: 'guest-oid', displayName: 'Jakub Miasik', tenantIds: [], sectionKeys: [] }));
+  assert.ok(executed.some(e => /INSERT INTO app_users/.test(e.sql)));
+
+  // With neither, there is nothing a sign-in could ever be matched against.
+  await assert.rejects(
+    withFakeSql(() => [], () => repo.saveUser({ principalType: 'user', displayName: 'Nobody', tenantIds: [], sectionKeys: [] })),
+    /email address or a directory entry/i,
+  );
+});
+
+test('re-granting a guest found under their other address edits the same entry', async () => {
+  const repo = require('../src/services/permissionRepository');
+  const { executed } = await withFakeSql(sql => (/SELECT id FROM app_users/.test(sql) ? [{ id: 4 }] : []), () =>
+    repo.saveUser({ principalType: 'user', email: 'jakub.miasik@softwareone.com', entraObjectId: 'guest-oid', tenantIds: [], sectionKeys: [] }));
+
+  const lookup = executed.find(e => /SELECT id FROM app_users/.test(e.sql));
+  assert.match(lookup.sql, /email = @email OR .*entra_object_id = @entraObjectId/s);
+  assert.ok(!executed.some(e => /INSERT INTO app_users/.test(e.sql)), 'a second row for the same person is not a new grant');
+});
+
+test('the picker shows a guest by the address an administrator recognises', async () => {
+  const dir = require('../src/services/directoryService');
+  const upn = 'jakub.miasik_softwareone.com#EXT#@SWOTDEMPID302779.onmicrosoft.com';
+  const results = await withFakeDirectory({
+    searchEntraUsers: async () => ([
+      { id: 'guest-oid', displayName: 'Jakub Miasik', userPrincipalName: upn, mail: 'jakub.miasik@softwareone.com', userType: 'Guest' },
+      { id: 'member-oid', displayName: 'Ann', userPrincipalName: 'ann@contoso.com', mail: 'ann@contoso.com', userType: 'Member' },
+    ]),
+  }, () => dir.search('jakub', 'user'));
+
+  const guest = results.find(r => r.objectId === 'guest-oid');
+  assert.equal(guest.isGuest, true);
+  assert.equal(guest.email, 'jakub.miasik@softwareone.com', 'the #EXT# form is not what anyone recognises');
+  assert.equal(guest.userPrincipalName, upn.toLowerCase());
+  assert.match(guest.detail, /guest/i);
+  assert.equal(results.find(r => r.objectId === 'member-oid').isGuest, false);
+});
+
+test('a guest with no mail is still offered, recovered from their principal name', async () => {
+  const dir = require('../src/services/directoryService');
+  const results = await withFakeDirectory({
+    searchEntraUsers: async () => ([
+      { id: 'guest-oid', displayName: 'Jakub Miasik', userType: 'Guest',
+        userPrincipalName: 'jakub.miasik_softwareone.com#EXT#@tenant.onmicrosoft.com' },
+    ]),
+  }, () => dir.search('jakub', 'user'));
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].email, 'jakub.miasik@softwareone.com');
+});
+
+test('guests are searchable by the address they are actually known by', () => {
+  // Their principal name is the mangled #EXT# form, so filtering on it alone
+  // could never find them by what an administrator types.
+  const source = require('fs').readFileSync(
+    require('path').join(__dirname, '..', 'src', 'services', 'powerbiService.js'), 'utf8');
+  assert.match(source, /startswith\(mail,/);
+  assert.match(source, /userType/);
+});
+
+test('group membership for a guest is resolved by object id, not by their address', async () => {
+  const dir = require('../src/services/directoryService');
+  let askedFor = null;
+  await withFakeDirectory({
+    getTransitiveGroupIds: async (key) => { askedFor = key; return ['g1']; },
+  }, async () => {
+    assert.deepEqual(await dir.groupIdsForUser('guest-oid'), ['g1']);
+  });
+  // Graph cannot find a guest by the external address they signed in with - that
+  // is not their principal name in this tenant, and the lookup is a 404.
+  assert.equal(askedFor, 'guest-oid');
 });

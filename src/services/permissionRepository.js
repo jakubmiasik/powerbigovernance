@@ -73,18 +73,47 @@ async function listUsers() {
   });
 }
 
-/** One person's own entry, by sign-in email. Null when they are not configured. */
-async function getUserByEmail(email) {
-  const normalized = normalizeEmail(email);
-  if (!normalized) return null;
+/**
+ * One person's own entry, by the identity in their sign-in token.
+ *
+ * The directory object id is tried first and matters most for guests: their
+ * `#EXT#` principal name and their original address are both valid ways to refer
+ * to them, and which one a token carries is not ours to decide. The object id is
+ * the same either way. Addresses remain a fallback so entries granted before the
+ * object id was recorded keep working.
+ */
+async function getUserByIdentity({ objectId = null, emails = [] } = {}) {
+  const wantedId = String(objectId || '').trim();
+  const wantedEmails = [...new Set(emails.map(normalizeEmail).filter(Boolean))];
+  if (!wantedId && !wantedEmails.length) return null;
 
   return withConnection(async (conn) => {
+    const params = [str('principalType', PRINCIPAL_USER)];
+    const clauses = [];
+
+    if (wantedId) {
+      clauses.push('entra_object_id = @objectId');
+      params.push(str('objectId', wantedId));
+    }
+    if (wantedEmails.length) {
+      // One placeholder per address: these come from a token, so they are bound
+      // rather than concatenated into the statement.
+      clauses.push(`email IN (${wantedEmails.map((_, i) => '@e' + i).join(', ')})`);
+      wantedEmails.forEach((value, i) => params.push(str('e' + i, value)));
+    }
+
     const rows = await execSql(
       conn,
-      `SELECT ${USER_COLUMNS} FROM app_users WHERE email = @email AND principal_type = @principalType`,
-      [str('email', normalized), str('principalType', PRINCIPAL_USER)],
+      `SELECT ${USER_COLUMNS} FROM app_users
+        WHERE principal_type = @principalType AND (${clauses.join(' OR ')})`,
+      params,
     );
-    const user = shapeUser(rows[0]);
+
+    // More than one row can match only while an older address-keyed entry sits
+    // beside a newer object-id one. The object id is the identity that cannot be
+    // reassigned, so it wins.
+    const matched = rows.find(row => wantedId && row.entra_object_id === wantedId) || rows[0];
+    const user = shapeUser(matched);
     if (!user) return null;
 
     for (const row of await execSql(conn, 'SELECT sp_id FROM app_user_tenants WHERE user_id = @userId', [int('userId', user.id)])) {
@@ -95,6 +124,11 @@ async function getUserByEmail(email) {
     }
     return user;
   });
+}
+
+/** One person's own entry, by sign-in email. Null when they are not configured. */
+async function getUserByEmail(email) {
+  return getUserByIdentity({ emails: [email] });
 }
 
 /**
@@ -175,12 +209,14 @@ async function saveUser({
 
   // Each kind is identified by the thing that actually finds it again: a person by
   // the address in their sign-in token, a group by its directory object.
-  if (kind === PRINCIPAL_USER && !normalized) throw new Error('An email address is required.');
+  if (kind === PRINCIPAL_USER && !normalized && !objectId) {
+    throw new Error('An email address or a directory entry is required.');
+  }
   if (kind === PRINCIPAL_GROUP && !objectId) throw new Error('A security group must be chosen from the directory.');
 
   const storedRole = role === ROLE_ADMIN ? ROLE_ADMIN : ROLE_USER;
   const common = [
-    str('email', kind === PRINCIPAL_GROUP ? (normalized || null) : normalized),
+    str('email', normalized || null),
     str('displayName', displayName || null),
     str('role', storedRole),
     { name: 'isActive', type: TYPES.Bit, value: isActive ? 1 : 0 },
@@ -198,8 +234,13 @@ async function saveUser({
       const existing = kind === PRINCIPAL_GROUP
         ? await execSql(conn, 'SELECT id FROM app_users WHERE principal_type = @principalType AND entra_object_id = @entraObjectId',
           [str('principalType', kind), str('entraObjectId', objectId)])
-        : await execSql(conn, 'SELECT id FROM app_users WHERE principal_type = @principalType AND email = @email',
-          [str('principalType', kind), str('email', normalized)]);
+        // A person is matched on their object id as well, so re-granting a guest
+        // who was first recorded under their other address edits that entry rather
+        // than creating a second one that competes with it.
+        : await execSql(conn, `SELECT id FROM app_users
+             WHERE principal_type = @principalType
+               AND (email = @email OR (@entraObjectId IS NOT NULL AND entra_object_id = @entraObjectId))`,
+          [str('principalType', kind), str('email', normalized), str('entraObjectId', objectId)]);
       if (existing.length) userId = Number(existing[0].id);
     }
 
@@ -252,6 +293,6 @@ async function deleteUser(id) {
 }
 
 module.exports = {
-  listUsers, getUserByEmail, getGroupRecords, hasAnyAdmin, hasAnyGroupGrant, saveUser, deleteUser,
+  listUsers, getUserByEmail, getUserByIdentity, getGroupRecords, hasAnyAdmin, hasAnyGroupGrant, saveUser, deleteUser,
   PRINCIPAL_USER, PRINCIPAL_GROUP,
 };

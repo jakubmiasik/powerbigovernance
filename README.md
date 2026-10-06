@@ -134,6 +134,24 @@ Entra object id, so renaming a group in the directory does not lose its grant. O
 offered — a distribution or Microsoft 365 group's membership is maintained for delivering mail, not for
 deciding who may see a tenant.
 
+### Guest (external) users
+
+A B2B guest invited as `ann@contoso.com` is stored in the inviting tenant under a different principal
+name — `ann_contoso.com#EXT#@yourtenant.onmicrosoft.com` — and which of the two the sign-in token
+carries depends on tenant and identity-provider configuration. A grant recorded against one of them
+would therefore never match the other, and the failure is silent: the entry looks correct while the
+person is told they have no access.
+
+So a person is matched on their **Entra object id** first, which is the same whichever address they
+arrive under, with every address they are known by (both forms, plus any alternate claim) kept as a
+fallback so grants made before the object id was recorded keep working. Guests are marked as such in
+the picker and in the users table, and are shown by the address an administrator would recognise rather
+than the `#EXT#` form. Group membership is also resolved by object id — Graph cannot find a guest by an
+address that is not their principal name in this tenant.
+
+Guests granted before this release still match on their stored address. To move one onto object-id
+matching, open its entry in **Users & Access** and re-pick the person from the directory.
+
 This requires the service principal used for the directory lookup to hold the Microsoft Graph
 **application** permissions `User.Read.All` and `GroupMember.Read.All`, with admin consent granted. They
 are only needed once a security group has been granted something; an installation that names only

@@ -26,6 +26,60 @@ function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
 
+/**
+ * The original address hidden inside a guest's user principal name.
+ *
+ * A B2B guest invited as `jakub.miasik@softwareone.com` is stored in the inviting
+ * tenant as `jakub.miasik_softwareone.com#EXT#@contoso.onmicrosoft.com`. Which of
+ * the two forms arrives in the sign-in token depends on the tenant and the
+ * identity provider, so a grant recorded against one of them simply never matches
+ * the other — the entry looks correct and the person is told they have no access.
+ *
+ * Only the part before `#EXT#` is decoded, and only its *last* underscore becomes
+ * the `@`: `ann_marie_contoso.com#EXT#@...` is ann_marie at contoso.com, not ann
+ * at marie_contoso.com.
+ */
+function externalAddressFromGuestUpn(upn) {
+  const value = normalizeEmail(upn);
+  const marker = value.indexOf('#ext#');
+  if (marker === -1) return '';
+
+  const local = value.slice(0, marker);
+  const split = local.lastIndexOf('_');
+  if (split <= 0 || split === local.length - 1) return '';
+
+  const candidate = local.slice(0, split) + '@' + local.slice(split + 1);
+  return candidate.includes('.') ? candidate : '';
+}
+
+function isGuestUpn(upn) {
+  return normalizeEmail(upn).includes('#ext#');
+}
+
+/**
+ * Every address a signed-in person could be recorded under, best first.
+ *
+ * Both forms of a guest's identity are included so a grant matches whichever one
+ * the token happens to carry, and whichever one the administrator happened to see
+ * when they granted it.
+ */
+function identityEmails(user) {
+  const found = [];
+  const add = (value) => {
+    const email = normalizeEmail(value);
+    if (email && email.includes('@') && !found.includes(email)) found.push(email);
+  };
+
+  if (user) {
+    add(user.email);
+    add(user.userPrincipalName);
+    add(externalAddressFromGuestUpn(user.email));
+    add(externalAddressFromGuestUpn(user.userPrincipalName));
+    (user.alternateEmails || []).forEach(add);
+  }
+  return found;
+}
+
 function parseAdminEmails(raw) {
   return String(raw || '')
     .split(/[,;\s]+/)
@@ -54,7 +108,11 @@ function resolvePermissions({
   user, record, groupRecords = [], adminEmails = [], anyAdminConfigured = false, tenants = [],
 } = {}) {
   const email = normalizeEmail(user && user.email);
-  const envAdmin = Boolean(email) && adminEmails.map(normalizeEmail).includes(email);
+  // Both forms of a guest's address count, so naming either one in ADMIN_EMAILS
+  // works regardless of which the sign-in token carries.
+  const candidates = identityEmails(user);
+  const configured = adminEmails.map(normalizeEmail);
+  const envAdmin = candidates.some(candidate => configured.includes(candidate));
   // Nobody has been made an administrator yet, so the first arrivals must be able
   // to reach the panel and name one.
   const bootstrap = !anyAdminConfigured;
@@ -182,6 +240,9 @@ module.exports = {
   ROLE_USER,
   ROLES,
   normalizeEmail,
+  externalAddressFromGuestUpn,
+  isGuestUpn,
+  identityEmails,
   parseAdminEmails,
   resolvePermissions,
   canSeeSection,
