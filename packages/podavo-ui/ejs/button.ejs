@@ -1,0 +1,10 @@
+<%
+  // Button. { ui: { label, variant: primary|secondary|soft|ghost|danger|danger-outline, size: sm,
+  //                 icon, iconEnd, href, type, disabled, loading, block, attrs: {} } }
+  // A link-styled button uses href; everything else is a real <button>.
+  var p = (typeof ui !== 'undefined' && ui) || {};
+  function pdAttrs(o) { return Object.keys(o || {}).map(function (k) { var v = o[k]; if (v === false || v === null || v === undefined) return ""; return " " + k + (v === true ? "" : "=\"" + String(v).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;") + "\""); }).join(""); }
+  var cls = 'pd-btn' + (p.variant && p.variant !== 'secondary' ? ' pd-btn--' + p.variant : '') + (p.size === 'sm' ? ' pd-btn--sm' : '') + (p.block ? ' pd-btn--block' : '') + (p.class ? ' ' + p.class : '');
+  var extra = Object.assign({}, p.attrs || {});
+  if (p.loading) { extra['aria-busy'] = 'true'; }
+%><% if (p.href && !p.disabled) { %><a href="<%= p.href %>" class="<%= cls %>"<%- pdAttrs(extra) %>><% } else { %><button type="<%= p.type || 'button' %>" class="<%= cls %>"<%- pdAttrs(extra) %><%= p.disabled ? ' disabled' : '' %>><% } %><% if (p.icon) { %><i data-lucide="<%= p.icon %>" aria-hidden="true"></i><% } %><span><%= p.label %></span><% if (p.iconEnd) { %><i data-lucide="<%= p.iconEnd %>" aria-hidden="true"></i><% } %><% if (p.href && !p.disabled) { %></a><% } else { %></button><% } %>

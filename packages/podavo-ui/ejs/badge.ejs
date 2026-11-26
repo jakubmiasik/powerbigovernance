@@ -1,0 +1,5 @@
+<%
+  // Badge. { ui: { label, tone: neutral|success|warning|orange|danger|info|brand|outline, icon, pill, dot, title } }
+  // Always carries text: colour is never the only signal.
+  var p = (typeof ui !== 'undefined' && ui) || {};
+%><span class="pd-badge<%= p.tone && p.tone !== 'neutral' ? ' pd-badge--' + p.tone : '' %><%= p.pill ? ' pd-badge--pill' : '' %>"<% if (p.title) { %> title="<%= p.title %>"<% } %>><% if (p.dot) { %><span class="pd-dot pd-dot--<%= p.tone %>" aria-hidden="true"></span><% } %><% if (p.icon) { %><i data-lucide="<%= p.icon %>" aria-hidden="true"></i><% } %><%= p.label %></span>

@@ -1,0 +1,35 @@
+{
+  "name": "@podavo/ui",
+  "version": "1.0.0",
+  "description": "Podavo unified design system: tokens, components and behaviour shared by every Podavo product.",
+  "license": "UNLICENSED",
+  "private": true,
+  "files": ["css", "js", "ejs", "README.md", "CHANGELOG.md"],
+  "exports": {
+    "./css/podavo.css": "./css/podavo.css",
+    "./css/tokens.css": "./css/tokens.css",
+    "./css/base.css": "./css/base.css",
+    "./css/components.css": "./css/components.css",
+    "./css/bootstrap-bridge.css": "./css/bootstrap-bridge.css",
+    "./js/podavo.js": "./js/podavo.js",
+    "./ejs/*": "./ejs/*.ejs",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "catalogue": "node catalogue/build.js",
+    "test": "node --test tests/components.test.js",
+    "test:visual": "npm run catalogue && playwright test",
+    "test:visual:update": "npm run catalogue && playwright test --update-snapshots"
+  },
+  "peerDependencies": {
+    "ejs": "^3.1.10"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1",
+    "ejs": "^3.1.10"
+  },
+  "podavo": {
+    "icons": "lucide@0.517.0",
+    "breakpoints": { "sm": 640, "md": 768, "lg": 992, "xl": 1280, "2xl": 1440, "3xl": 1920, "4xl": 2560 }
+  }
+}

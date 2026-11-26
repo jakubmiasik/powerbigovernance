@@ -1,0 +1,16 @@
+<%
+  // Input with its label, help and error. { ui: { id, name, label, type, value, placeholder, help, error,
+  //                                               required, disabled, size: sm, attrs: {} } }
+  // An error sets aria-invalid and is announced through aria-describedby.
+  var p = (typeof ui !== 'undefined' && ui) || {};
+  function pdAttrs(o) { return Object.keys(o || {}).map(function (k) { var v = o[k]; if (v === false || v === null || v === undefined) return ""; return " " + k + (v === true ? "" : "=\"" + String(v).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;") + "\""); }).join(""); }
+  var described = [p.help ? p.id + '-help' : null, p.error ? p.id + '-error' : null].filter(Boolean).join(' ');
+  var extra = Object.assign({}, p.attrs || {});
+  if (described) extra['aria-describedby'] = described;
+  if (p.error) extra['aria-invalid'] = 'true';
+%><div class="pd-field">
+  <% if (p.label) { %><label class="pd-label" for="<%= p.id %>"><%= p.label %><% if (p.required) { %> <span aria-hidden="true">*</span><% } %></label><% } %>
+  <input class="pd-input<%= p.size === 'sm' ? ' pd-input--sm' : '' %>" id="<%= p.id %>" name="<%= p.name || p.id %>" type="<%= p.type || 'text' %>" value="<%= p.value === undefined || p.value === null ? '' : p.value %>"<% if (p.placeholder) { %> placeholder="<%= p.placeholder %>"<% } %><%= p.required ? ' required' : '' %><%= p.disabled ? ' disabled' : '' %><%- pdAttrs(extra) %>>
+  <% if (p.help) { %><span class="pd-help" id="<%= p.id %>-help"><%= p.help %></span><% } %>
+  <% if (p.error) { %><span class="pd-error-text" id="<%= p.id %>-error"><i data-lucide="circle-alert" aria-hidden="true"></i><%= p.error %></span><% } %>
+</div>

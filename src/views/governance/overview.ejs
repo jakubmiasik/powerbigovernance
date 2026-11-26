@@ -1,5 +1,6 @@
 <%- include('../partials/header') %>
 <%
+  var pd = '../../../packages/podavo-ui/ejs/';
   var governanceSummary = governance || {};
   var runId = run && run.id ? run.id : '';
   var runQuery = runId ? 'runId=' + runId : '';
@@ -9,7 +10,6 @@
   var defs = typeof findingDefs !== 'undefined' && findingDefs ? findingDefs : [];
   var sectionKeys = (typeof visibleSections !== 'undefined' && visibleSections ? visibleSections : []).map(function(s) { return s.key; });
   function canOpen(key) { return sectionKeys.indexOf(key) !== -1; }
-
   function formatBytesEjs(bytes) {
     if (!bytes || bytes === 0) return '0 B';
     var units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -22,9 +22,11 @@
     if (extra) params.push(extra);
     return '/workspaces' + (params.length ? '?' + params.join('&') : '');
   }
-  function severityTone(severity) {
-    return severity === 'high' ? 'danger' : severity === 'medium' ? 'warning' : 'secondary';
-  }
+  function pct(n, total) { return total ? (n / total * 100).toFixed(1) + '%' : '0%'; }
+  var BAND_TONE = { critical: 'danger', high: 'orange', medium: 'warning', low: 'info', clean: 'success' };
+  var SEV_TONE = { high: 'danger', medium: 'orange', low: 'neutral' };
+  var FINDING_ICON = { ownerless: 'user-x', orphanedAdmin: 'bot', singleAdmin: 'user-round', staleContent: 'hourglass', orphanedContent: 'file-x',
+    capacityRisk: 'zap', personalAccess: 'users', overShared: 'network', namingConvention: 'type', emptyWorkspace: 'inbox' };
 
   // Findings, worst first. A check that could not run is "Not evaluated", never a
   // zero: a zero would read as "clean" when nothing was looked at.
@@ -34,8 +36,7 @@
   var highRiskCount = 0;
   if (data) {
     defs.forEach(function(def) {
-      var evaluated = true;
-      var reason = '';
+      var evaluated = true, reason = '';
       if (def.key === 'namingConvention' && !data.namingConventionEnabled) { evaluated = false; reason = 'No naming convention is enforced.'; }
       if (def.key === 'orphanedContent' && !data.orphanDetectionAvailable) { evaluated = false; reason = 'This scan captured no workspace users to compare creators against.'; }
       findingRows.push({ def: def, count: (data.byFinding || {})[def.key] || 0, evaluated: evaluated, reason: reason });
@@ -50,114 +51,99 @@
   var actionable = findingRows.filter(function(r) { return r.evaluated && r.count > 0; });
   var quiet = findingRows.filter(function(r) { return r.evaluated && r.count === 0; });
   var notEvaluated = findingRows.filter(function(r) { return !r.evaluated; });
-
   var inventory = [
     { label: 'Total items', count: governanceSummary.totalItems || 0, icon: 'boxes', type: 'all' },
-    { label: 'Reports', count: governanceSummary.totalReports || 0, icon: 'file-earmark-bar-graph', type: 'Report' },
+    { label: 'Reports', count: governanceSummary.totalReports || 0, icon: 'file-text', type: 'Report' },
     { label: 'Semantic models', count: governanceSummary.totalDatasets || 0, icon: 'database', type: 'SemanticModel' },
-    { label: 'Dashboards', count: governanceSummary.totalDashboards || 0, icon: 'grid-1x2', type: 'Dashboard' },
-    { label: 'Dataflows', count: governanceSummary.totalDataflows || 0, icon: 'diagram-3', type: 'Dataflow' },
-    { label: 'Lakehouses', count: governanceSummary.totalLakehouses || 0, icon: 'bucket', type: 'Lakehouse' },
-    { label: 'Notebooks', count: governanceSummary.totalNotebooks || 0, icon: 'journal-code', type: 'Notebook' },
+    { label: 'Dashboards', count: governanceSummary.totalDashboards || 0, icon: 'layout-dashboard', type: 'Dashboard' },
+    { label: 'Dataflows', count: governanceSummary.totalDataflows || 0, icon: 'workflow', type: 'Dataflow' },
+    { label: 'Lakehouses', count: governanceSummary.totalLakehouses || 0, icon: 'hard-drive', type: 'Lakehouse' },
+    { label: 'Notebooks', count: governanceSummary.totalNotebooks || 0, icon: 'book-open', type: 'Notebook' },
     { label: 'Pipelines', count: governanceSummary.totalPipelines || 0, icon: 'arrow-left-right', type: 'DataPipeline' },
-    { label: 'Warehouses', count: governanceSummary.totalWarehouses || 0, icon: 'building', type: 'Warehouse' }
+    { label: 'Warehouses', count: governanceSummary.totalWarehouses || 0, icon: 'building-2', type: 'Warehouse' }
   ];
   var allCaps = governanceSummary.capacities || [];
   var activeCaps = allCaps.filter(function(c) { return c.state === 'Active'; });
   var suspendedCaps = allCaps.filter(function(c) { return c.state !== 'Active'; });
 %>
 
-<div class="page-header">
-  <%- include('../partials/ui/page-header', { ui: {
-    title: 'Governance Overview', icon: 'bi-shield-check',
-    subtitle: noData ? 'Tenant-wide governance findings and inventory.' : 'What needs attention across the tenant, worst first, followed by the inventory it was found in.'
-  } }) %>
-  <% if (!noData) { %>
-    <div class="page-actions">
-      <% if (canOpen('analysis')) { %>
-        <a href="/analysis" class="btn btn-sm btn-outline-secondary"><i class="bi bi-play-circle me-1" aria-hidden="true"></i>Run analysis</a>
-      <% } %>
-      <% if (canOpen('workspaces')) { %>
-        <a href="<%= triageHref() %>" class="btn btn-sm btn-primary"><i class="bi bi-clipboard-check me-1" aria-hidden="true"></i>Open workspace triage</a>
-      <% } %>
-    </div>
-  <% } %>
-</div>
+<%- include(pd + 'page-header', { ui: {
+  title: 'Governance Overview', icon: 'shield-check',
+  subtitle: noData ? 'Tenant-wide governance findings and inventory.' : 'What needs attention across the tenant, worst first, followed by the inventory it was found in.',
+  actionsHtml: noData ? '' :
+    (canOpen('analysis') ? include(pd + 'button', { ui: { label: 'Run analysis', icon: 'circle-play', href: '/analysis', size: 'sm' } }) : '') +
+    (canOpen('workspaces') ? include(pd + 'button', { ui: { label: 'Open workspace triage', icon: 'layers', href: triageHref(), size: 'sm', variant: 'primary' } }) : '')
+} }) %>
 
 <% if (noData) { %>
-  <div class="card">
-    <%- include('../partials/ui/state', { ui: {
-      kind: 'empty', icon: 'bi-clipboard-data',
+  <div class="pd-card">
+    <%- include(pd + 'state', { ui: {
+      kind: 'empty', icon: 'clipboard-list',
       title: 'No analysis data available',
       message: 'Governance findings are computed from a completed analysis scan. Select a scan in the bar above, or run an analysis first.',
-      actions: canOpen('analysis') ? [{ href: '/analysis', label: 'Run an analysis', icon: 'bi-play-circle', primary: true }] : []
+      actions: canOpen('analysis') ? [{ href: '/analysis', label: 'Run an analysis', icon: 'circle-play', primary: true }] : []
     } }) %>
   </div>
 <% } else { %>
 
-<div class="layout-split">
-  <div class="min-w-0">
+<div class="gov-summary">
+  <%- include(pd + 'metric-card', { ui: { label: 'Workspaces scanned', value: (governanceSummary.totalWorkspaces || 0).toLocaleString(), hint: activeWs + ' active' + (inactiveWs > 0 ? ' · ' + inactiveWs + ' other' : ''), icon: 'layers' } }) %>
+  <%- include(pd + 'metric-card', { ui: { label: 'Need attention', value: data ? data.flaggedCount : null, hint: data ? pct(data.flaggedCount, data.totalCount) : null, icon: 'triangle-alert', tone: 'warning', href: data && canOpen('workspaces') ? triageHref() : null } }) %>
+  <%- include(pd + 'metric-card', { ui: { label: 'High or critical risk', value: data ? highRiskCount : null, hint: data ? 'score 80 or more' : null, icon: 'shield-alert', tone: 'danger', href: data && canOpen('workspaces') ? triageHref() : null } }) %>
+  <div class="pd-card gov-dist">
+    <p class="gov-dist-title"><span>Risk distribution</span><% if (data) { %><span class="pd-card-meta"><%= data.totalCount %> workspaces</span><% } %></p>
+    <% if (!data) { %>
+      <span class="pd-not-evaluated">Not evaluated</span>
+    <% } else { %>
+      <div class="pd-dist-bar" role="img" aria-label="Workspaces by risk level: <%= (data.riskBands || []).map(function(b) { return b.label + ' ' + (bandCounts[b.key] || 0); }).join(', ') %>">
+        <% (data.riskBands || []).forEach(function(b) { var n = bandCounts[b.key] || 0; if (!n || !data.totalCount) return; %>
+          <span class="pd-fill-<%= BAND_TONE[b.key] || 'neutral' %>" style="width:<%= (n / data.totalCount * 100).toFixed(2) %>%"></span>
+        <% }) %>
+      </div>
+      <ul class="pd-dist-legend">
+        <% (data.riskBands || []).forEach(function(b) { %><li title="<%= b.description %>"><span class="pd-dot pd-dot--<%= BAND_TONE[b.key] || 'neutral' %>" aria-hidden="true"></span><%= b.label %> <strong><%= bandCounts[b.key] || 0 %></strong></li><% }) %>
+      </ul>
+    <% } %>
+  </div>
+</div>
 
-    <!-- Headline: how many workspaces need attention, and how badly -->
-    <div class="kpi-grid cols-4" aria-label="Headline figures">
-      <%- include('../partials/ui/kpi', { ui: { label: 'Workspaces scanned', icon: 'bi-collection', tone: 'brand',
-            value: (governanceSummary.totalWorkspaces || 0).toLocaleString(),
-            hint: activeWs + ' active' + (inactiveWs > 0 ? ' · ' + inactiveWs + ' other states' : '') } }) %>
-      <%- include('../partials/ui/kpi', { ui: { label: 'Need attention', icon: 'bi-exclamation-triangle', tone: 'warning',
-            value: data ? data.flaggedCount.toLocaleString() : null,
-            hint: data ? 'at least one finding' : 'Findings could not be evaluated',
-            href: data && canOpen('workspaces') ? triageHref() : null } }) %>
-      <%- include('../partials/ui/kpi', { ui: { label: 'High or critical risk', icon: 'bi-shield-exclamation', tone: 'danger',
-            value: data ? highRiskCount.toLocaleString() : null,
-            hint: data ? 'risk score of 80 or more' : null,
-            href: data && canOpen('workspaces') ? triageHref() : null } }) %>
-      <%- include('../partials/ui/kpi', { ui: { label: 'Clean', icon: 'bi-check-circle', tone: 'success',
-            value: data ? data.healthyCount.toLocaleString() : null,
-            hint: data ? 'no check fired' : null } }) %>
-    </div>
+<div class="gov-overview-grid">
+  <div class="pd-min-w-0 gov-stack">
 
-    <!-- Prioritized findings -->
-    <section class="card mb-4" aria-labelledby="findingsHeading">
-      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-        <h2 class="section-title mb-0" id="findingsHeading"><i class="bi bi-list-check" aria-hidden="true"></i>Prioritized findings</h2>
-        <% if (data) { %><span class="section-meta">Ordered by the weight each check adds to a workspace's risk score</span><% } %>
+    <section class="pd-card" aria-labelledby="findingsHeading">
+      <div class="pd-card-header">
+        <h2 class="pd-card-title" id="findingsHeading"><i data-lucide="list-checks" aria-hidden="true"></i>Prioritized findings</h2>
+        <% if (data) { %><span class="pd-card-meta">Ordered by the weight each check adds to a workspace's risk score</span><% } %>
       </div>
       <% if (!data) { %>
-        <%- include('../partials/ui/state', { ui: { kind: 'unavailable', compact: true, title: 'Not evaluated',
-              message: 'The governance checks could not be evaluated for this scan. The inventory below is unaffected.' } }) %>
+        <%- include(pd + 'state', { ui: { kind: 'unavailable', compact: true, title: 'Not evaluated', message: 'The governance checks could not be evaluated for this scan. The inventory below is unaffected.' } }) %>
       <% } else if (!actionable.length) { %>
-        <%- include('../partials/ui/state', { ui: { kind: 'empty', icon: 'bi-check2-circle', compact: true, title: 'No findings',
-              message: 'None of the evaluated checks fired on any workspace in this scan.' } }) %>
+        <%- include(pd + 'state', { ui: { kind: 'empty', icon: 'circle-check-big', compact: true, title: 'No findings', message: 'None of the evaluated checks fired on any workspace in this scan.' } }) %>
       <% } else { %>
-        <ul class="finding-list">
+        <div>
           <% actionable.forEach(function(row) { var def = row.def; %>
-            <li class="finding-item">
-              <span class="finding-icon sev-<%= def.severity %>" aria-hidden="true"><i class="bi bi-<%= def.icon %>"></i></span>
-              <div class="min-w-0">
-                <div class="finding-title"><%= def.label %></div>
-                <div class="finding-desc"><%= def.description %></div>
+            <div class="gov-finding-row">
+              <span class="gov-finding-icon sev-<%= def.severity %>" aria-hidden="true"><i data-lucide="<%= FINDING_ICON[def.key] || 'circle-alert' %>"></i></span>
+              <div class="pd-min-w-0">
+                <div class="gov-finding-title"><%= def.label %></div>
+                <div class="gov-finding-desc"><%= def.description %></div>
               </div>
-              <div class="finding-meta">
-                <span class="sev sev-<%= def.severity %>"><%= def.severity %></span>
-                <span class="finding-count" aria-label="<%= row.count %> workspaces"><%= row.count %></span>
+              <div class="gov-row-meta">
+                <span class="pd-badge pd-badge--<%= SEV_TONE[def.severity] %>"><%= def.severity %></span>
+                <span class="gov-finding-count" aria-label="<%= row.count %> workspaces"><%= row.count %></span>
                 <% if (canOpen('workspaces')) { %>
-                  <a class="btn btn-sm btn-outline-secondary" href="<%= triageHref('finding=' + encodeURIComponent(def.key)) %>"
-                     aria-label="Review <%= row.count %> workspaces: <%= def.label %>">Review</a>
+                  <a class="pd-btn pd-btn--sm" href="<%= triageHref('finding=' + encodeURIComponent(def.key)) %>" aria-label="Review <%= row.count %> workspaces: <%= def.label %>"><span>Review</span><i data-lucide="arrow-right" aria-hidden="true"></i></a>
                 <% } %>
               </div>
-            </li>
+            </div>
           <% }) %>
-        </ul>
+        </div>
         <% if (quiet.length || notEvaluated.length) { %>
-          <div class="card-footer">
-            <% if (quiet.length) { %>
-              <div><strong>No workspaces affected:</strong> <%= quiet.map(function(r) { return r.def.label; }).join(', ') %>.</div>
-            <% } %>
+          <div class="pd-card-footer">
+            <% if (quiet.length) { %><div><strong>No workspaces affected:</strong> <%= quiet.map(function(r) { return r.def.label; }).join(', ') %>.</div><% } %>
             <% notEvaluated.forEach(function(r) { %>
-              <div><strong><%= r.def.label %>:</strong> <span class="not-evaluated">Not evaluated</span> — <%= r.reason %>
-                <% if (r.def.key === 'namingConvention' && typeof permissions !== 'undefined' && permissions && permissions.isAdmin) { %>
-                  <a href="/settings/governance">Define a convention</a>.
-                <% } %>
+              <div><strong><%= r.def.label %>:</strong> <span class="pd-not-evaluated">Not evaluated</span> — <%= r.reason %>
+                <% if (r.def.key === 'namingConvention' && typeof permissions !== 'undefined' && permissions && permissions.isAdmin) { %><a href="/settings/governance">Define a convention</a>.<% } %>
               </div>
             <% }) %>
           </div>
@@ -165,44 +151,31 @@
       <% } %>
     </section>
 
-    <!-- The workspaces to start with -->
     <% if (data) { %>
-      <section class="card mb-4" aria-labelledby="attentionHeading">
-        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-          <h2 class="section-title mb-0" id="attentionHeading"><i class="bi bi-sort-down" aria-hidden="true"></i>Workspaces to address first</h2>
-          <% if (canOpen('workspaces') && attention.length) { %>
-            <a href="<%= triageHref() %>" class="small">View all <%= attention.length %> in triage <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
-          <% } %>
+      <section class="pd-card" aria-labelledby="attentionHeading">
+        <div class="pd-card-header">
+          <h2 class="pd-card-title" id="attentionHeading"><i data-lucide="arrow-down-wide-narrow" aria-hidden="true"></i>Workspaces to address first</h2>
+          <% if (canOpen('workspaces') && attention.length) { %><a href="<%= triageHref() %>" class="small">View all <%= attention.length %> in triage</a><% } %>
         </div>
         <% if (!attention.length) { %>
-          <%- include('../partials/ui/state', { ui: { kind: 'empty', icon: 'bi-check2-circle', compact: true, title: 'Nothing to address',
-                message: 'No workspace in this scan has a finding.' } }) %>
+          <%- include(pd + 'state', { ui: { kind: 'empty', icon: 'circle-check-big', compact: true, title: 'Nothing to address', message: 'No workspace in this scan has a finding.' } }) %>
         <% } else { %>
-          <div class="table-responsive" style="max-height:none;">
-            <table class="table table-hover mb-0" data-no-sort>
-              <thead>
-                <tr><th scope="col" style="width:72px;">Risk</th><th scope="col">Workspace</th><th scope="col">Findings</th><th scope="col" class="text-end">Users</th><th scope="col" class="text-end hide-below-1440">Items</th><th scope="col" class="hide-below-1440">Last activity</th></tr>
-              </thead>
+          <div class="pd-grid-scroll" style="max-height:none;">
+            <table class="pd-table" data-no-sort>
+              <thead><tr><th scope="col">Workspace</th><th scope="col" class="is-num">Risk score</th><th scope="col">Risk level</th><th scope="col">Top findings</th><th scope="col" class="is-num hide-below-1440">Users</th><th scope="col" class="hide-below-1440">Last activity</th></tr></thead>
               <tbody>
                 <% attention.slice(0, 8).forEach(function(ws) {
-                     var band = ws.band || { label: '', color: 'secondary' };
+                     var band = ws.band || { key: 'low', label: 'Low' };
+                     var tone = BAND_TONE[band.key] || 'neutral';
                      var sum = ws.findings.map(function(f) { return f.label + ' +' + f.weight; }).join(', ');
                 %>
                   <tr>
-                    <td><span class="badge bg-<%= band.color %>" title="<%= band.label %> risk — <%= ws.score %> = <%= sum %>"><%= ws.score %></span>
-                      <span class="visually-hidden"><%= band.label %> risk</span></td>
-                    <td class="text-truncate-cell">
-                      <% if (canOpen('workspaces')) { %><a href="/workspaces/<%= ws.id %><%= runQuery ? '?' + runQuery : '' %>"><strong><%= ws.name %></strong></a><% } else { %><strong><%= ws.name %></strong><% } %>
-                      <div class="small text-muted"><%= ws.licenseType %><% if (ws.capacitySku) { %> · <%= ws.capacitySku %><% } %></div>
-                    </td>
-                    <td>
-                      <% ws.findings.slice(0, 3).forEach(function(f) { %>
-                        <span class="badge bg-<%= severityTone(f.severity) %> me-1 mb-1" title="<%= f.detail %>"><i class="bi bi-<%= f.icon %> me-1" aria-hidden="true"></i><%= f.label %></span>
-                      <% }) %>
-                      <% if (ws.findings.length > 3) { %><span class="small text-muted">+<%= ws.findings.length - 3 %> more</span><% } %>
-                    </td>
-                    <td class="text-end"><%= ws.userCount %></td>
-                    <td class="text-end hide-below-1440"><%= ws.totalItems %></td>
+                    <td class="pd-cell-truncate"><% if (canOpen('workspaces')) { %><a class="gov-ws-name" href="/workspaces/<%= ws.id %><%= runQuery ? '?' + runQuery : '' %>"><i data-lucide="layers" aria-hidden="true"></i><span><%= ws.name %></span></a><% } else { %><strong><%= ws.name %></strong><% } %>
+                      <div class="pd-cell-sub"><%= ws.licenseType %><% if (ws.capacitySku) { %> · <%= ws.capacitySku %><% } %></div></td>
+                    <td class="is-num"><span class="gov-score gov-score--<%= tone %>" title="<%= band.label %> risk — <%= ws.score %> = <%= sum %>"><%= ws.score %></span></td>
+                    <td><span class="pd-badge pd-badge--<%= tone %>"><%= band.label %></span></td>
+                    <td><% ws.findings.slice(0, 2).forEach(function(f) { %><span class="pd-badge pd-badge--<%= SEV_TONE[f.severity] %> me-1" title="<%= f.detail %>"><%= f.label %></span><% }) %><% if (ws.findings.length > 2) { %><span class="pd-cell-sub">+<%= ws.findings.length - 2 %></span><% } %></td>
+                    <td class="is-num hide-below-1440"><%= ws.userCount %></td>
                     <td class="hide-below-1440"><%= ws.lastActivityDays === null ? '—' : ws.lastActivityDays + 'd ago' %></td>
                   </tr>
                 <% }) %>
@@ -213,78 +186,56 @@
       </section>
     <% } %>
 
-    <!-- Inventory: context for the findings above, not the headline -->
-    <h2 class="section-title mt-2" id="inventoryHeading"><i class="bi bi-boxes" aria-hidden="true"></i>Inventory <span class="section-meta">from scan #<%= run.id %></span></h2>
-    <div class="inventory-grid mb-4" aria-labelledby="inventoryHeading">
-      <% inventory.forEach(function(entry) { %>
-        <a class="kpi" href="/governance/artifacts?type=<%= entry.type %><%= runQuery ? '&' + runQuery : '' %>">
-          <span class="kpi-label"><i class="bi bi-<%= entry.icon %>" aria-hidden="true"></i><%= entry.label %></span>
-          <span class="kpi-value" style="font-size:1.125rem;"><%= Number(entry.count).toLocaleString() %></span>
-        </a>
-      <% }) %>
-      <a class="kpi" href="/governance/users<%= runQuery ? '?' + runQuery : '' %>">
-        <span class="kpi-label"><i class="bi bi-people" aria-hidden="true"></i>Unique users</span>
-        <span class="kpi-value" style="font-size:1.125rem;"><%= Number(governanceSummary.totalUsers || 0).toLocaleString() %></span>
-        <span class="kpi-hint"><%= typeof creatorCount !== 'undefined' ? creatorCount : 0 %> creators · <%= typeof explorerCount !== 'undefined' ? explorerCount : 0 %> explorers</span>
-      </a>
+    <div>
+      <h2 class="gov-section-title" id="inventoryHeading">Inventory · scan #<%= run.id %></h2>
+      <div class="gov-inventory" aria-labelledby="inventoryHeading">
+        <% inventory.forEach(function(entry) { %>
+          <%- include(pd + 'metric-card', { ui: { label: entry.label, value: Number(entry.count).toLocaleString(), icon: entry.icon, tone: 'neutral', href: '/governance/artifacts?type=' + entry.type + (runQuery ? '&' + runQuery : '') } }) %>
+        <% }) %>
+        <%- include(pd + 'metric-card', { ui: { label: 'Unique users', value: Number(governanceSummary.totalUsers || 0).toLocaleString(), hint: (typeof creatorCount !== 'undefined' ? creatorCount : 0) + ' creators', icon: 'users', tone: 'neutral', href: '/governance/users' + (runQuery ? '?' + runQuery : '') } }) %>
+      </div>
     </div>
 
-    <div class="panel-grid cols-3">
-      <section class="card" aria-labelledby="statesHeading">
-        <div class="card-header"><h3 class="section-title mb-0" id="statesHeading"><i class="bi bi-pie-chart" aria-hidden="true"></i>Workspace states</h3></div>
-        <div class="table-responsive" style="max-height: 280px;">
-          <table class="table table-sm mb-0" id="governance-states-table">
-            <thead><tr><th scope="col">State</th><th scope="col" class="text-end">Count</th><th scope="col" class="text-end">%</th></tr></thead>
+    <div class="gov-panels">
+      <section class="pd-card" aria-labelledby="statesHeading">
+        <div class="pd-card-header"><h3 class="pd-card-title" id="statesHeading"><i data-lucide="chart-pie" aria-hidden="true"></i>Workspace states</h3></div>
+        <div class="pd-grid-scroll" style="max-height:280px;">
+          <table class="pd-table" id="governance-states-table">
+            <thead><tr><th scope="col">State</th><th scope="col" class="is-num">Count</th><th scope="col" class="is-num">%</th></tr></thead>
             <tbody>
               <% Object.entries(governanceSummary.workspacesByState || {}).forEach(function(entry) { var state = entry[0]; var count = entry[1]; %>
-                <tr data-filter="<%= [state, count].join(' ').toLowerCase() %>">
-                  <td><span class="badge bg-<%= state === 'Active' ? 'success' : state === 'Deleted' ? 'danger' : 'warning' %>"><%= state %></span></td>
-                  <td class="text-end"><%= count %></td>
-                  <td class="text-end"><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td>
-                </tr>
+                <tr><td><span class="pd-badge pd-badge--<%= state === 'Active' ? 'success' : state === 'Deleted' ? 'danger' : 'warning' %>"><%= state %></span></td>
+                  <td class="is-num"><%= count %></td><td class="is-num"><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td></tr>
               <% }) %>
             </tbody>
           </table>
         </div>
       </section>
-
-      <section class="card" aria-labelledby="licenseHeading">
-        <div class="card-header"><h3 class="section-title mb-0" id="licenseHeading"><i class="bi bi-diagram-2" aria-hidden="true"></i>License types</h3></div>
-        <div class="table-responsive" style="max-height: 280px;">
-          <table class="table table-sm mb-0" id="governance-types-table">
-            <thead><tr><th scope="col">License</th><th scope="col">SKU</th><th scope="col" class="text-end">Count</th><th scope="col" class="text-end">%</th></tr></thead>
+      <section class="pd-card" aria-labelledby="licenseHeading">
+        <div class="pd-card-header"><h3 class="pd-card-title" id="licenseHeading"><i data-lucide="network" aria-hidden="true"></i>License types</h3></div>
+        <div class="pd-grid-scroll" style="max-height:280px;">
+          <table class="pd-table" id="governance-types-table">
+            <thead><tr><th scope="col">License</th><th scope="col">SKU</th><th scope="col" class="is-num">Count</th><th scope="col" class="is-num">%</th></tr></thead>
             <tbody>
-              <% Object.entries(governanceSummary.workspacesBySku || {}).sort(function(a,b){ return b[1]-a[1]; }).forEach(function(entry) { var sku = entry[0]; var count = entry[1]; var s = sku.toUpperCase(); var licType = s.startsWith('F') && s !== 'FREE' && s !== 'SHARED (PRO)' ? 'Fabric' : s === 'PPU' ? 'PPU' : s.startsWith('P') || s.startsWith('EM') || s.startsWith('A') ? 'Premium' : 'Pro'; var licColor = licType === 'Fabric' ? 'success' : licType === 'Premium' ? 'warning' : licType === 'PPU' ? 'info' : 'secondary'; %>
-                <tr data-filter="<%= [sku, licType, count].join(' ').toLowerCase() %>">
-                  <td><span class="badge bg-<%= licColor %>"><%= licType %></span></td>
-                  <td><code><%= sku %></code></td>
-                  <td class="text-end"><%= count %></td>
-                  <td class="text-end"><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td>
-                </tr>
+              <% Object.entries(governanceSummary.workspacesBySku || {}).sort(function(a,b){ return b[1]-a[1]; }).forEach(function(entry) { var sku = entry[0]; var count = entry[1]; var s = sku.toUpperCase(); var licType = s.startsWith('F') && s !== 'FREE' && s !== 'SHARED (PRO)' ? 'Fabric' : s === 'PPU' ? 'PPU' : s.startsWith('P') || s.startsWith('EM') || s.startsWith('A') ? 'Premium' : 'Pro'; var licTone = licType === 'Fabric' ? 'success' : licType === 'Premium' ? 'warning' : licType === 'PPU' ? 'info' : 'neutral'; %>
+                <tr><td><span class="pd-badge pd-badge--<%= licTone %>"><%= licType %></span></td><td><code><%= sku %></code></td>
+                  <td class="is-num"><%= count %></td><td class="is-num"><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td></tr>
               <% }) %>
-              <% if (!governanceSummary.workspacesBySku || Object.keys(governanceSummary.workspacesBySku).length === 0) { Object.entries(governanceSummary.workspacesByLicense || governanceSummary.workspacesByType || {}).forEach(function(entry) { var license = entry[0]; var count = entry[1]; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
-                <tr data-filter="<%= [license, count].join(' ').toLowerCase() %>">
-                  <td><span class="badge bg-<%= licColor %>"><%= license %></span></td>
-                  <td>—</td>
-                  <td class="text-end"><%= count %></td>
-                  <td class="text-end"><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td>
-                </tr>
+              <% if (!governanceSummary.workspacesBySku || Object.keys(governanceSummary.workspacesBySku).length === 0) { Object.entries(governanceSummary.workspacesByLicense || governanceSummary.workspacesByType || {}).forEach(function(entry) { var license = entry[0]; var count = entry[1]; var licTone = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'neutral'; %>
+                <tr><td><span class="pd-badge pd-badge--<%= licTone %>"><%= license %></span></td><td>—</td>
+                  <td class="is-num"><%= count %></td><td class="is-num"><%= governanceSummary.totalWorkspaces ? Math.round((count / governanceSummary.totalWorkspaces) * 100) : 0 %>%</td></tr>
               <% }) } %>
             </tbody>
           </table>
         </div>
       </section>
-
-      <section class="card" aria-labelledby="capacityHeading">
-        <div class="card-header d-flex justify-content-between align-items-center">
-          <h3 class="section-title mb-0" id="capacityHeading"><i class="bi bi-lightning" aria-hidden="true"></i>Capacities</h3>
-          <% if (canOpen('capacities')) { %><a href="/capacities" class="small">Manage</a><% } %>
-        </div>
-        <div class="card-body">
-          <dl class="meta-list">
+      <section class="pd-card" aria-labelledby="capacityHeading">
+        <div class="pd-card-header"><h3 class="pd-card-title" id="capacityHeading"><i data-lucide="zap" aria-hidden="true"></i>Capacities</h3><% if (canOpen('capacities')) { %><a href="/capacities" class="small">Manage</a><% } %></div>
+        <div class="pd-card-body">
+          <dl class="pd-meta">
             <dt>Total</dt><dd><strong><%= allCaps.length %></strong></dd>
-            <dt>Active</dt><dd><span class="pill is-success"><%= activeCaps.length %></span></dd>
-            <dt>Suspended</dt><dd><span class="pill <%= suspendedCaps.length ? 'is-warning' : '' %>"><%= suspendedCaps.length %></span></dd>
+            <dt>Active</dt><dd><span class="pd-badge pd-badge--success"><%= activeCaps.length %></span></dd>
+            <dt>Suspended</dt><dd><span class="pd-badge <%= suspendedCaps.length ? 'pd-badge--warning' : '' %>"><%= suspendedCaps.length %></span></dd>
             <dt>On dedicated</dt><dd><%= governanceSummary.workspacesOnCapacity || 0 %> workspaces</dd>
             <dt>On shared</dt><dd><%= governanceSummary.workspacesOnSharedCapacity || 0 %> workspaces</dd>
           </dl>
@@ -292,12 +243,11 @@
       </section>
     </div>
 
-    <!-- Tenant Storage Summary -->
-    <section class="card mb-4" id="tenant-storage-card" aria-labelledby="storageHeading">
-      <div class="card-header"><h3 class="section-title mb-0" id="storageHeading"><i class="bi bi-hdd" aria-hidden="true"></i>OneLake storage</h3></div>
+    <section class="pd-card" id="tenant-storage-card" aria-labelledby="storageHeading">
+      <div class="pd-card-header"><h3 class="pd-card-title" id="storageHeading"><i data-lucide="hard-drive" aria-hidden="true"></i>OneLake storage</h3></div>
       <% if (governanceSummary.totalStorageSize) { %>
-        <div class="card-body pb-0">
-          <dl class="meta-list mb-3">
+        <div class="pd-card-body">
+          <dl class="pd-meta">
             <dt>Total tenant storage</dt><dd><strong><%= formatBytesEjs(governanceSummary.totalStorageSize) %></strong></dd>
             <dt>Files</dt><dd><%= (governanceSummary.totalStorageFiles || 0).toLocaleString() %></dd>
             <dt>Workspaces with data</dt><dd><%= governanceSummary.storageScannedCount || 0 %> of <%= governanceSummary.totalWorkspaces || 0 %> scanned</dd>
@@ -305,87 +255,77 @@
         </div>
         <% var storageWs = workspaces.filter(function(w) { return w.storageSize > 0; }).sort(function(a, b) { return (b.storageSize || 0) - (a.storageSize || 0); }); %>
         <% if (storageWs.length) { %>
-          <div class="table-responsive" style="max-height: 300px;">
-            <table class="table table-sm table-hover mb-0">
-              <thead><tr><th scope="col">Workspace</th><th scope="col" class="text-end">Files</th><th scope="col" class="text-end">Size</th><th scope="col">% of total</th></tr></thead>
+          <div class="pd-grid-scroll" style="max-height:300px;">
+            <table class="pd-table">
+              <thead><tr><th scope="col">Workspace</th><th scope="col" class="is-num">Files</th><th scope="col" class="is-num">Size</th><th scope="col">% of total</th></tr></thead>
               <tbody>
-                <% storageWs.forEach(function(ws) { var pct = governanceSummary.totalStorageSize > 0 ? ((ws.storageSize / governanceSummary.totalStorageSize) * 100).toFixed(1) : '0'; %>
-                  <tr>
-                    <td><a href="/workspaces/<%= ws.id %>"><%= ws.name %></a></td>
-                    <td class="text-end"><%= (ws.storageFiles || 0).toLocaleString() %></td>
-                    <td class="text-end fw-semibold" data-sort-value="<%= ws.storageSize %>"><%= formatBytesEjs(ws.storageSize) %></td>
-                    <td data-sort-value="<%= pct %>"><div class="d-flex align-items-center gap-2"><div class="progress flex-grow-1" style="height:8px;min-width:80px;" aria-hidden="true"><div class="progress-bar" style="width:<%= pct %>%"></div></div><span class="small tabular-nums" style="min-width:4ch;"><%= pct %>%</span></div></td>
-                  </tr>
+                <% storageWs.forEach(function(ws) { var share = governanceSummary.totalStorageSize > 0 ? ((ws.storageSize / governanceSummary.totalStorageSize) * 100).toFixed(1) : '0'; %>
+                  <tr><td><a href="/workspaces/<%= ws.id %>"><%= ws.name %></a></td><td class="is-num"><%= (ws.storageFiles || 0).toLocaleString() %></td>
+                    <td class="is-num" data-sort-value="<%= ws.storageSize %>"><strong><%= formatBytesEjs(ws.storageSize) %></strong></td>
+                    <td data-sort-value="<%= share %>"><div class="d-flex align-items-center gap-2"><div class="pd-dist-bar flex-grow-1" aria-hidden="true" style="min-width:80px;"><span class="pd-fill-info" style="width:<%= share %>%"></span></div><span class="pd-num small" style="min-width:4ch;"><%= share %>%</span></div></td></tr>
                 <% }) %>
               </tbody>
             </table>
           </div>
         <% } %>
       <% } else { %>
-        <%- include('../partials/ui/state', { ui: { kind: 'unavailable', icon: 'bi-hdd', compact: true, title: 'Not calculated',
-              message: 'Storage is calculated during the next analysis run, or with Calculate Storage on an individual workspace page.' } }) %>
+        <%- include(pd + 'state', { ui: { kind: 'unavailable', icon: 'hard-drive', compact: true, title: 'Not calculated', message: 'Storage is calculated during the next analysis run, or with Calculate Storage on an individual workspace page.' } }) %>
       <% } %>
     </section>
 
-    <!-- Tenant Settings (snapshot captured with this run) -->
-    <section class="card mb-4" id="tenant-settings-summary-card" aria-labelledby="tenantSettingsHeading">
-      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-        <h3 class="section-title mb-0" id="tenantSettingsHeading"><i class="bi bi-sliders" aria-hidden="true"></i>Tenant settings <span class="section-meta">snapshot from this run</span></h3>
-        <a href="/governance/tenant-settings" class="small">View all settings <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
+    <section class="pd-card" id="tenant-settings-summary-card" aria-labelledby="tenantSettingsHeading">
+      <div class="pd-card-header">
+        <h3 class="pd-card-title" id="tenantSettingsHeading"><i data-lucide="sliders-horizontal" aria-hidden="true"></i>Tenant settings</h3>
+        <span class="pd-card-meta">Snapshot from this run · <a href="/governance/tenant-settings">View all settings</a></span>
       </div>
-      <div class="card-body py-3" id="tenantSettingsPanel" aria-live="polite">
-        <div class="text-muted small d-flex align-items-center gap-2" id="tenantSettingsLoading">
-          <span class="spinner-border spinner-border-sm" aria-hidden="true"></span> Reading tenant settings captured with this scan...
-        </div>
+      <div class="pd-card-body" id="tenantSettingsPanel" aria-live="polite">
+        <div class="d-flex align-items-center gap-2 pd-help" id="tenantSettingsLoading"><span class="pd-spinner" aria-hidden="true"></span> Reading tenant settings captured with this scan…</div>
       </div>
     </section>
 
-    <!-- Full workspace inventory -->
-    <section class="card mb-4" id="workspace-governance-card" aria-labelledby="allWorkspacesHeading">
-      <div class="card-header">
-        <h3 class="section-title mb-0" id="allWorkspacesHeading"><i class="bi bi-table" aria-hidden="true"></i>All workspaces <span class="section-meta"><%= workspaces.length %></span></h3>
-      </div>
-      <div class="table-responsive">
-        <table class="table table-hover table-sm mb-0" id="governance-workspaces-table"
-               data-grid data-grid-label="workspaces" data-grid-search-placeholder="Search workspaces"
-               data-grid-empty="This scan contains no workspaces.">
+    <section class="pd-card pd-grid" id="workspace-governance-card" aria-labelledby="allWorkspacesHeading">
+      <div class="pd-card-header"><h3 class="pd-card-title" id="allWorkspacesHeading"><i data-lucide="table" aria-hidden="true"></i>All workspaces</h3><span class="pd-card-meta"><%= workspaces.length %></span></div>
+      <div class="pd-grid-scroll">
+        <table class="pd-table" id="governance-workspaces-table"
+               data-grid data-grid-label="workspaces" data-grid-search-placeholder="Search workspaces…"
+               data-grid-empty="This scan contains no workspaces." data-grid-export-name="workspace-inventory">
           <thead>
             <tr>
               <th scope="col" data-col="name" data-col-required>Workspace</th>
               <th scope="col" data-col="license" data-filter-col>License</th>
               <th scope="col" data-col="state" data-filter-col>State</th>
-              <th scope="col" data-col="size" class="text-end">Size</th>
-              <th scope="col" data-col="items" class="text-end">Items</th>
-              <th scope="col" data-col="reports" class="text-end">Reports</th>
-              <th scope="col" data-col="models" class="text-end">Models</th>
-              <th scope="col" data-col="dashboards" class="text-end" data-col-default="wide">Dashboards</th>
-              <th scope="col" data-col="dataflows" class="text-end" data-col-default="wide">Dataflows</th>
-              <th scope="col" data-col="lakehouses" class="text-end" data-col-default="wide">Lakehouses</th>
-              <th scope="col" data-col="notebooks" class="text-end" data-col-default="wide">Notebooks</th>
-              <th scope="col" data-col="pipelines" class="text-end" data-col-default="wide">Pipelines</th>
-              <th scope="col" data-col="warehouses" class="text-end" data-col-default="wide">Warehouses</th>
-              <th scope="col" data-col="users" class="text-end">Users</th>
-              <th scope="col" data-col-required><span class="visually-hidden">Actions</span></th>
+              <th scope="col" class="is-num" data-col="size">Size</th>
+              <th scope="col" class="is-num" data-col="items">Items</th>
+              <th scope="col" class="is-num" data-col="reports">Reports</th>
+              <th scope="col" class="is-num" data-col="models">Models</th>
+              <th scope="col" class="is-num" data-col="dashboards" data-col-default="wide">Dashboards</th>
+              <th scope="col" class="is-num" data-col="dataflows" data-col-default="wide">Dataflows</th>
+              <th scope="col" class="is-num" data-col="lakehouses" data-col-default="wide">Lakehouses</th>
+              <th scope="col" class="is-num" data-col="notebooks" data-col-default="wide">Notebooks</th>
+              <th scope="col" class="is-num" data-col="pipelines" data-col-default="wide">Pipelines</th>
+              <th scope="col" class="is-num" data-col="warehouses" data-col-default="wide">Warehouses</th>
+              <th scope="col" class="is-num" data-col="users">Users</th>
+              <th scope="col" data-col-required data-no-export><span class="pd-visually-hidden">Actions</span></th>
             </tr>
           </thead>
           <tbody>
-            <% workspaces.forEach(function(ws) { var license = ws.licenseType || 'Pro'; var licColor = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'secondary'; %>
+            <% workspaces.forEach(function(ws) { var license = ws.licenseType || 'Pro'; var licTone = license === 'Fabric' ? 'success' : license === 'Premium' ? 'warning' : license === 'Premium Per User' ? 'info' : 'neutral'; %>
               <tr data-filter="<%= [ws.name || '', license, ws.state || ''].join(' ').toLowerCase() %>">
-                <td class="text-truncate-cell"><a href="/workspaces/<%= ws.id %>"><%= ws.name || 'Unnamed' %></a></td>
-                <td data-filter-value="<%= license %>"><span class="badge bg-<%= licColor %>"><%= license %></span></td>
-                <td data-filter-value="<%= ws.state || 'Unknown' %>"><span class="badge bg-<%= ws.state === 'Active' ? 'success' : 'warning' %>"><%= ws.state || '—' %></span></td>
-                <td class="text-end" data-sort-value="<%= ws.storageSize || 0 %>"><%= ws.storageSize ? formatBytesEjs(ws.storageSize) : '—' %></td>
-                <td class="text-end"><%= ws.totalItems || 0 %></td>
-                <td class="text-end"><%= ws.reportCount || 0 %></td>
-                <td class="text-end"><%= ws.datasetCount || 0 %></td>
-                <td class="text-end"><%= ws.dashboardCount || 0 %></td>
-                <td class="text-end"><%= ws.dataflowCount || 0 %></td>
-                <td class="text-end"><%= ws.lakehouseCount || 0 %></td>
-                <td class="text-end"><%= ws.notebookCount || 0 %></td>
-                <td class="text-end"><%= ws.pipelineCount || 0 %></td>
-                <td class="text-end"><%= ws.warehouseCount || 0 %></td>
-                <td class="text-end"><%= ws.userCount || 0 %></td>
-                <td class="text-end"><a href="/workspaces/<%= ws.id %>" class="btn btn-sm btn-outline-secondary" aria-label="Details for <%= ws.name || 'workspace' %>">Details</a></td>
+                <td class="pd-cell-truncate"><a class="gov-ws-name" href="/workspaces/<%= ws.id %>"><i data-lucide="layers" aria-hidden="true"></i><span><%= ws.name || 'Unnamed' %></span></a></td>
+                <td data-filter-value="<%= license %>"><span class="pd-badge pd-badge--<%= licTone %>"><%= license %></span></td>
+                <td data-filter-value="<%= ws.state || 'Unknown' %>"><span class="pd-badge pd-badge--<%= ws.state === 'Active' ? 'success' : 'warning' %>"><%= ws.state || '—' %></span></td>
+                <td class="is-num" data-sort-value="<%= ws.storageSize || 0 %>"><%= ws.storageSize ? formatBytesEjs(ws.storageSize) : '—' %></td>
+                <td class="is-num"><%= ws.totalItems || 0 %></td>
+                <td class="is-num"><%= ws.reportCount || 0 %></td>
+                <td class="is-num"><%= ws.datasetCount || 0 %></td>
+                <td class="is-num"><%= ws.dashboardCount || 0 %></td>
+                <td class="is-num"><%= ws.dataflowCount || 0 %></td>
+                <td class="is-num"><%= ws.lakehouseCount || 0 %></td>
+                <td class="is-num"><%= ws.notebookCount || 0 %></td>
+                <td class="is-num"><%= ws.pipelineCount || 0 %></td>
+                <td class="is-num"><%= ws.warehouseCount || 0 %></td>
+                <td class="is-num"><%= ws.userCount || 0 %></td>
+                <td><a href="/workspaces/<%= ws.id %>" class="pd-icon-btn pd-icon-btn--sm" aria-label="Open <%= ws.name || 'workspace' %>" title="Open workspace"><i data-lucide="external-link" aria-hidden="true"></i></a></td>
               </tr>
             <% }) %>
           </tbody>
@@ -394,64 +334,34 @@
     </section>
   </div>
 
-  <!-- Context panel: what this screen is built from, and how risk is spread -->
-  <aside class="layout-aside" aria-label="Scan context and risk distribution">
-    <section class="card" aria-labelledby="scanContextHeading">
-      <div class="card-header"><h2 class="section-title mb-0" id="scanContextHeading"><i class="bi bi-info-circle" aria-hidden="true"></i>Scan context</h2></div>
-      <div class="card-body">
-        <dl class="meta-list">
+  <aside class="gov-aside" aria-label="Scan context">
+    <section class="pd-card" aria-labelledby="scanContextHeading">
+      <div class="pd-card-header"><h2 class="pd-card-title" id="scanContextHeading"><i data-lucide="info" aria-hidden="true"></i>Scan context</h2></div>
+      <div class="pd-card-body">
+        <dl class="pd-meta">
           <dt>Scan</dt><dd>Run #<%= run.id %></dd>
           <dt>Service principal</dt><dd><%= run.sp_name || '—' %></dd>
           <dt>Tenant ID</dt><dd><%= run.tenant_id || '—' %></dd>
-          <dt>Started</dt><dd><% if (run.started_at) { %><time datetime="<%= new Date(run.started_at).toISOString() %>" data-local-time><%= new Date(run.started_at).toISOString().replace('T', ' ').slice(0, 16) %> UTC</time><% } else { %><span class="not-evaluated">Not available</span><% } %></dd>
-          <dt>Completed</dt><dd><% if (run.completed_at) { %><time datetime="<%= new Date(run.completed_at).toISOString() %>" data-local-time><%= new Date(run.completed_at).toISOString().replace('T', ' ').slice(0, 16) %> UTC</time><% } else { %><span class="not-evaluated">Not available</span><% } %></dd>
+          <dt>Started</dt><dd><% if (run.started_at) { %><time datetime="<%= new Date(run.started_at).toISOString() %>" data-local-time><%= new Date(run.started_at).toISOString().replace('T', ' ').slice(0, 16) %> UTC</time><% } else { %><span class="pd-not-evaluated">Not available</span><% } %></dd>
+          <dt>Completed</dt><dd><% if (run.completed_at) { %><time datetime="<%= new Date(run.completed_at).toISOString() %>" data-local-time><%= new Date(run.completed_at).toISOString().replace('T', ' ').slice(0, 16) %> UTC</time><% } else { %><span class="pd-not-evaluated">Not available</span><% } %></dd>
           <% if (data) { %>
             <dt>Stale after</dt><dd><%= data.thresholds.staleDays %> days</dd>
             <dt>Broadly shared at</dt><dd><%= data.thresholds.overSharedUsers %> principals</dd>
             <dt>Naming checks</dt><dd><%= data.namingConventionEnabled ? 'Enforced' : 'Not configured' %></dd>
           <% } %>
         </dl>
-        <p class="small text-muted mt-3 mb-0">
-          Findings describe the tenant as it was when this scan ran. Staleness is measured against the scan date, not today.
-          <% if (canOpen('analysis')) { %><a href="/analysis">Run a new analysis</a> to refresh.<% } %>
-        </p>
+        <p class="pd-help mt-3 mb-0">Findings describe the tenant as it was when this scan ran. Staleness is measured against the scan date, not today.
+          <% if (canOpen('analysis')) { %><a href="/analysis">Run a new analysis</a> to refresh.<% } %></p>
       </div>
     </section>
-
-    <section class="card" aria-labelledby="riskDistHeading">
-      <div class="card-header"><h2 class="section-title mb-0" id="riskDistHeading"><i class="bi bi-bar-chart" aria-hidden="true"></i>Risk distribution</h2></div>
-      <div class="card-body">
-        <% if (!data) { %>
-          <p class="not-evaluated mb-0">Not evaluated</p>
-        <% } else { var total = data.totalCount || 0; %>
-          <div class="dist-bar" role="img" aria-label="Workspaces by risk band: <%= (data.riskBands || []).map(function(b) { return b.label + ' ' + (bandCounts[b.key] || 0); }).join(', ') %>">
-            <% (data.riskBands || []).forEach(function(band) { var n = bandCounts[band.key] || 0; if (!n || !total) return; %>
-              <span class="tone-bg-<%= band.key %>" style="width: <%= (n / total * 100).toFixed(2) %>%"></span>
-            <% }) %>
-          </div>
-          <ul class="dist-legend">
-            <% (data.riskBands || []).forEach(function(band) { var n = bandCounts[band.key] || 0; %>
-              <li title="<%= band.description %>">
-                <span class="swatch tone-bg-<%= band.key %>" aria-hidden="true"></span>
-                <span><%= band.label %> <span class="text-muted small"><%= band.min > 0 ? band.min + '+' : '0' %></span></span>
-                <span class="dist-value"><%= n %></span>
-                <span class="dist-pct"><%= total ? Math.round(n / total * 100) : 0 %>%</span>
-              </li>
-            <% }) %>
-          </ul>
-          <p class="small text-muted mt-3 mb-0">A score is the sum of the weights of every check that fired on a workspace. <% if (canOpen('workspaces')) { %><a href="<%= triageHref() %>">See how it is calculated</a>.<% } %></p>
-        <% } %>
-      </div>
-    </section>
-
-    <section class="card" aria-labelledby="quickLinksHeading">
-      <div class="card-header"><h2 class="section-title mb-0" id="quickLinksHeading"><i class="bi bi-signpost" aria-hidden="true"></i>Go to</h2></div>
-      <div class="list-group list-group-flush">
-        <% if (canOpen('workspaces')) { %><a class="list-group-item list-group-item-action" href="<%= triageHref() %>"><i class="bi bi-clipboard-check me-2" aria-hidden="true"></i>Workspace triage</a><% } %>
-        <a class="list-group-item list-group-item-action" href="/governance/users<%= runQuery ? '?' + runQuery : '' %>"><i class="bi bi-person-lines-fill me-2" aria-hidden="true"></i>User 360</a>
-        <a class="list-group-item list-group-item-action" href="/governance/artifacts?type=all<%= runQuery ? '&' + runQuery : '' %>"><i class="bi bi-boxes me-2" aria-hidden="true"></i>All artifacts</a>
-        <% if (canOpen('tenant-settings')) { %><a class="list-group-item list-group-item-action" href="/tenant-settings"><i class="bi bi-sliders me-2" aria-hidden="true"></i>Tenant settings (live)</a><% } %>
-        <% if (canOpen('security-groups')) { %><a class="list-group-item list-group-item-action" href="/quality/security-groups"><i class="bi bi-people me-2" aria-hidden="true"></i>Security groups</a><% } %>
+    <section class="pd-card" aria-labelledby="quickLinksHeading">
+      <div class="pd-card-header"><h2 class="pd-card-title" id="quickLinksHeading"><i data-lucide="signpost" aria-hidden="true"></i>Go to</h2></div>
+      <div class="pd-menu" style="min-width:0">
+        <% if (canOpen('workspaces')) { %><a class="pd-menu-item" href="<%= triageHref() %>"><i data-lucide="layers" aria-hidden="true"></i>Workspace triage</a><% } %>
+        <a class="pd-menu-item" href="/governance/users<%= runQuery ? '?' + runQuery : '' %>"><i data-lucide="contact" aria-hidden="true"></i>User 360</a>
+        <a class="pd-menu-item" href="/governance/artifacts?type=all<%= runQuery ? '&' + runQuery : '' %>"><i data-lucide="boxes" aria-hidden="true"></i>All artifacts</a>
+        <% if (canOpen('tenant-settings')) { %><a class="pd-menu-item" href="/tenant-settings"><i data-lucide="sliders-horizontal" aria-hidden="true"></i>Tenant settings (live)</a><% } %>
+        <% if (canOpen('security-groups')) { %><a class="pd-menu-item" href="/quality/security-groups"><i data-lucide="users" aria-hidden="true"></i>Security groups</a><% } %>
       </div>
     </section>
   </aside>
@@ -487,8 +397,8 @@
           { label: 'Delegated', value: data.delegated }
         ];
         var tileHtml = tiles.map(function(t) {
-          return '<div class="kpi"><span class="kpi-label">' + esc(t.label) + '</span>' +
-            '<span class="kpi-value" style="font-size:1.125rem;">' + esc(t.value) + '</span></div>';
+          return '<div class="pd-metric"><span class="pd-metric-body"><span class="pd-metric-label">' + esc(t.label) + '</span>' +
+            '<span class="pd-metric-value" style="font-size:1.125rem;">' + esc(t.value) + '</span></span></div>';
         }).join('');
 
         var rows = (data.groups || []).map(function(g) {
@@ -496,13 +406,13 @@
           return '<tr><td>' + esc(g.name) + '</td>' +
             '<td class="text-end"><strong>' + esc(g.total) + '</strong></td><td class="text-end">' + esc(g.enabled) + '</td>' +
             '<td class="text-end">' + esc(g.total - g.enabled) + '</td>' +
-            '<td><div class="d-flex align-items-center gap-2"><div class="progress flex-grow-1" style="height:8px;min-width:80px;" aria-hidden="true"><div class="progress-bar" style="width:' + pct + '%"></div></div><span class="small" style="min-width:4ch;">' + pct + '%</span></div></td></tr>';
+            '<td><div class="d-flex align-items-center gap-2"><div class="pd-dist-bar flex-grow-1" style="min-width:80px;" aria-hidden="true"><span class="pd-fill-success" style="width:' + pct + '%"></span></div><span class="small" style="min-width:4ch;">' + pct + '%</span></div></td></tr>';
         }).join('');
 
         panel.innerHTML =
-          '<div class="inventory-grid mb-3">' + tileHtml + '</div>' +
-          (rows ? '<div class="table-responsive" style="max-height:300px;">' +
-            '<table class="table table-sm table-hover mb-0"><thead><tr><th scope="col">Group</th><th scope="col" class="text-end">Total</th><th scope="col" class="text-end">Enabled</th><th scope="col" class="text-end">Disabled</th><th scope="col" style="width:160px;">Enabled %</th></tr></thead>' +
+          '<div class="gov-inventory">' + tileHtml + '</div>' +
+          (rows ? '<div class="pd-grid-scroll" style="max-height:300px;">' +
+            '<table class="pd-table"><thead><tr><th scope="col">Group</th><th scope="col" class="text-end">Total</th><th scope="col" class="text-end">Enabled</th><th scope="col" class="text-end">Disabled</th><th scope="col" style="width:160px;">Enabled %</th></tr></thead>' +
             '<tbody>' + rows + '</tbody></table></div>' : '');
       })
       .catch(function(err) { fail(err.message); });

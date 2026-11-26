@@ -8,7 +8,9 @@
     "dev": "node --watch src/server.js",
     "test": "node --test",
     "check": "npm run check:js && npm test",
-    "check:js": "node scripts/check-js.js"
+    "check:js": "node scripts/check-js.js",
+    "test:visual": "node visual/render-fixtures.js && playwright test -c visual/playwright.config.js",
+    "test:visual:update": "node visual/render-fixtures.js && playwright test -c visual/playwright.config.js --update-snapshots"
   },
   "dependencies": {
     "@azure/identity": "^4.13.1",

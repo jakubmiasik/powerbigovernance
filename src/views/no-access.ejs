@@ -10,15 +10,15 @@
   }
   var notConfigured = !(typeof message !== 'undefined' && message) && typeof permissions !== 'undefined' && permissions && !permissions.isKnown;
 %>
-<div class="card">
-  <%- include('partials/ui/state', { ui: {
+<div class="pd-card">
+  <%- include('../../packages/podavo-ui/ejs/state', { ui: {
     kind: 'denied',
     title: 'No access to this section',
     message: deniedMessage,
-    actions: [{ href: '/', label: 'Back to Home', icon: 'bi-house', primary: true }]
+    actions: [{ href: '/', label: 'Back to Home', icon: 'house', primary: true }]
   } }) %>
   <% if (notConfigured) { %>
-    <p class="text-muted small text-center px-4 pb-4 mb-0">
+    <p class="pd-help text-center px-4 pb-4 mb-0">
       Your account<%= permissions.email ? ' (' + permissions.email + ')' : '' %> is not configured in this
       application yet. An administrator can grant you tenants and sections under
       Configuration &rsaquo; Users &amp; Access.

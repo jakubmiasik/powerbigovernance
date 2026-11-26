@@ -1,0 +1,5 @@
+<%
+  // Icon — a Lucide icon. { ui: { name, class, label } }
+  // Decorative by default (aria-hidden). Pass label for a meaningful standalone icon.
+  var p = (typeof ui !== 'undefined' && ui) || {};
+%><i data-lucide="<%= p.name %>" class="pd-icon <%= p.class || '' %>"<% if (p.label) { %> role="img" aria-label="<%= p.label %>"<% } else { %> aria-hidden="true"<% } %>></i>

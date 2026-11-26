@@ -7285,21 +7285,26 @@ test('group membership for a guest is resolved by object id, not by their addres
   assert.equal(askedFor, 'guest-oid');
 });
 
-// ── UI modernization: shell, components and the findings-first overview ──
+// ── Podavo design system: shell, components and the governance screens ──
 
-test('the sidebar groups sections as Overview, Governance, Security & Access, Operations, Configuration', async () => {
+test('the sidebar groups sections as Overview, Governance, Operations, Data Quality, Configuration', async () => {
   const ejs = require('ejs');
   const html = await ejs.renderFile('src/views/partials/header.ejs', {
     currentUser: { name: 'T' }, currentPath: '/governance', breadcrumb: [],
     availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
     visibleSections: sections.APP_SECTIONS, permissions: { isAdmin: true }, navGroups: sections.NAV_GROUPS,
   });
-  const titles = [...html.matchAll(/class="nav-section-title"[^>]*>([^<]+)</g)].map(m => m[1]);
-  assert.deepEqual(titles, ['Overview', 'Governance', 'Security &amp; Access', 'Operations', 'Configuration']);
+  const titles = [...html.matchAll(/class="pd-nav-title"[^>]*>([^<]+)</g)].map(m => m[1]);
+  assert.deepEqual(titles, ['Overview', 'Governance', 'Operations', 'Data Quality', 'Configuration']);
   // The active page is announced, not only coloured.
-  assert.match(html, /href="\/governance" class="sidebar-link active" aria-current="page"/);
-  // Every section the guard knows about sits in one of the menu's groups.
-  for (const section of sections.APP_SECTIONS) assert.ok(sections.NAV_GROUPS.includes(section.group), section.key);
+  assert.match(html, /href="\/governance" class="pd-nav-link sidebar-link active" aria-current="page"/);
+  // Every section the guard knows about sits in one of the menu's groups, with a Lucide icon.
+  for (const section of sections.APP_SECTIONS) {
+    assert.ok(sections.NAV_GROUPS.includes(section.group), section.key);
+    assert.ok(section.lucide, section.key + ' has no Lucide icon');
+  }
+  // The application keeps its own name; Podavo is the suite it belongs to.
+  assert.match(html, /class="pd-brand-name">Fabric Governance</);
 });
 
 test('the shell says which tenant and scan the page describes, and when the data store is down', async () => {
@@ -7313,6 +7318,8 @@ test('the shell says which tenant and scan the page describes, and when the data
   assert.match(loaded, /tenant-guid/);
   assert.match(loaded, /Scan data loaded/);
   assert.match(loaded, /<time datetime="2026-11-25T02:40:00.000Z" data-local-time>/);
+  // No notification feed exists, so the shell offers no bell.
+  assert.doesNotMatch(loaded, /data-lucide="bell"/);
 
   const down = await ejs.renderFile('src/views/partials/header.ejs', {
     currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [], title: 'x',
@@ -7325,15 +7332,16 @@ test('the shell says which tenant and scan the page describes, and when the data
 
 test('the state component renders each kind with the right live-region role', async () => {
   const ejs = require('ejs');
-  const error = await ejs.renderFile('src/views/partials/ui/state.ejs', { ui: { kind: 'error', title: 'Failed', message: '<b>x</b>' } });
-  assert.match(error, /class="state is-error"/);
+  const dir = 'packages/podavo-ui/ejs/';
+  const error = await ejs.renderFile(dir + 'state.ejs', { ui: { kind: 'error', title: 'Failed', message: '<b>x</b>' } });
+  assert.match(error, /class="pd-state pd-state--error"/);
   assert.match(error, /role="alert"/);
   assert.doesNotMatch(error, /<b>x<\/b>/, 'messages are escaped');
-  const empty = await ejs.renderFile('src/views/partials/ui/state.ejs', { ui: { kind: 'empty', title: 'Nothing' } });
+  const empty = await ejs.renderFile(dir + 'state.ejs', { ui: { kind: 'empty', title: 'Nothing' } });
   assert.match(empty, /role="status"/);
-  // A KPI with no value says so rather than showing a made-up number.
-  const kpi = await ejs.renderFile('src/views/partials/ui/kpi.ejs', { ui: { label: 'Compliance', value: null } });
-  assert.match(kpi, /Not evaluated/);
+  // A metric with no value says so rather than showing a made-up number.
+  const metric = await ejs.renderFile(dir + 'metric-card.ejs', { ui: { label: 'Compliance', value: null } });
+  assert.match(metric, /Not evaluated/);
 });
 
 test('the governance overview leads with findings and marks unrun checks as not evaluated', async () => {
@@ -7358,12 +7366,12 @@ test('the governance overview leads with findings and marks unrun checks as not 
   assert.match(html, /No admin/);
   assert.match(html, /href="\/workspaces\?runId=3&amp;finding=ownerless"/);
   // No convention configured: the naming check was not run, and must not read as clean.
-  assert.match(html, /Off-convention names:<\/strong> <span class="not-evaluated">Not evaluated/);
+  assert.match(html, /Off-convention names:<\/strong> <span class="pd-not-evaluated">Not evaluated/);
   // Nothing on the page invents a compliance score or a trend.
   assert.doesNotMatch(html, /[Cc]ompliance (score|trend)/);
 });
 
-test('the triage page renders its table as a data grid with a details drawer', async () => {
+test('the triage page is a data grid with finding filters and a docked details drawer', async () => {
   const ejs = require('ejs');
   const insights = require('../src/services/workspaceInsightsService');
   const computed = insights.computeWorkspaceInsights({ workspaces: [{ id: 'a', name: 'x</script><b>', state: 'Active', items: [], users: [] }] }, {});
@@ -7371,20 +7379,49 @@ test('the triage page renders its table as a data grid with a details drawer', a
     user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [],
     availableRuns: [], globalRun: null, title: 'Workspaces', fromSavedData: true, run: null,
     insights: computed, findingDefs: insights.FINDING_DEFS, namingPattern: null,
+    workspaceContext: { a: { owner: null, groupCount: 0, peopleCount: 0, usersRead: false, capacityName: null } }, reportCount: 0,
   });
   assert.match(html, /id="triage-table"[\s\S]*?data-grid/);
-  assert.match(html, /id="workspaceDrawer" role="dialog" aria-modal="true"/);
+  assert.match(html, /class="pd-dock"[\s\S]*?id="workspaceDrawer" role="dialog" aria-modal="true"/);
+  assert.match(html, /data-filter-key="ownerless"/);
+  // The scoring explanation and thresholds moved into a dialog and a popover, with their wording intact.
+  assert.match(html, /<dialog class="pd-dialog pd-dialog--lg" id="riskExplainerDialog"/);
+  assert.match(html, /id="thresholdsPopover"/);
+  // An unreadable access list is "Not available", not a person or a zero.
+  assert.match(html, /Not available/);
   // Workspace names are data: they cannot close the script block they are embedded in.
   const script = html.slice(html.indexOf('var triageRows'));
   assert.ok(!script.slice(0, script.indexOf('var findingLabels')).includes('</script'));
 });
 
-test('the stylesheet carries the brand colour and keeps controls focus-visible', () => {
+test('the triage owner column reads the same principal rules the checks use', () => {
+  const insights = require('../src/services/workspaceInsightsService');
+  assert.equal(insights.isPersonPrincipal({ type: 'User' }), true);
+  assert.equal(insights.isGroupPrincipal({ type: 'Group' }), true);
+  assert.equal(insights.isAdminRole('Admin'), true);
+});
+
+test('the design tokens carry the brand colour, focus style and every breakpoint', () => {
   const fs = require('fs');
-  const css = fs.readFileSync('src/public/css/style.css', 'utf8');
-  assert.match(css, /--color-primary: #0f766e;/);
-  assert.match(css, /--bs-primary-rgb: 15, 118, 110;/);
-  assert.match(css, /:focus-visible \{ outline: 2px solid var\(--color-primary\)/);
+  const css = ['tokens', 'base', 'components', 'bootstrap-bridge']
+    .map(name => fs.readFileSync('packages/podavo-ui/css/' + name + '.css', 'utf8')).join('\n')
+    + fs.readFileSync('src/public/css/style.css', 'utf8');
+  assert.match(css, /--pd-primary: #0f766e;/);
+  assert.match(css, /--bs-primary-rgb: var\(--pd-primary-rgb\);|--bs-primary-rgb: 15, 118, 110;/);
+  assert.match(css, /:focus-visible \{ outline: 2px solid var\(--pd-primary\)/);
   assert.match(css, /prefers-reduced-motion: reduce/);
+  assert.match(css, /\[data-pd-variant="consumer"\]/);
   for (const width of ['1280px', '1440px', '1920px', '2560px']) assert.match(css, new RegExp('min-width: ' + width));
+  // Shared components never hard-code a product colour: products override --pd-accent only.
+  const components = fs.readFileSync('packages/podavo-ui/css/components.css', 'utf8');
+  assert.doesNotMatch(components, /#0f766e/i);
+});
+
+test('the shared package is versioned and only its assets are served', () => {
+  const pkg = require('../packages/podavo-ui/package.json');
+  assert.equal(pkg.name, '@podavo/ui');
+  assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
+  const appSource = require('fs').readFileSync('src/app.js', 'utf8');
+  assert.match(appSource, /'\/podavo-ui\/css'/);
+  assert.match(appSource, /'\/podavo-ui\/js'/);
 });

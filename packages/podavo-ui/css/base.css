@@ -1,0 +1,48 @@
+/* @podavo/ui — base: element defaults, focus, motion. No component classes here. */
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--pd-bg);
+  color: var(--pd-text);
+  font-family: var(--pd-font);
+  font-size: var(--pd-body-size);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, h4, h5, h6 { color: var(--pd-text); font-weight: var(--pd-weight-semibold); letter-spacing: -0.005em; line-height: 1.3; }
+a { color: var(--pd-primary); text-decoration-thickness: 1px; text-underline-offset: 3px; text-decoration-color: rgba(var(--pd-primary-rgb), .45); }
+a:hover { color: var(--pd-primary-hover); text-decoration-color: currentColor; }
+code { font-family: var(--pd-font-mono); font-size: .8125em; }
+
+/* One focus treatment everywhere (WCAG 2.4.7 / 2.4.11) */
+:focus-visible { outline: 2px solid var(--pd-primary); outline-offset: 2px; }
+
+.pd-visually-hidden {
+  position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important;
+  overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important;
+}
+.pd-skip-link {
+  position: absolute; left: var(--pd-space-2); top: -48px; z-index: 2100;
+  padding: var(--pd-space-2) var(--pd-space-4); background: var(--pd-primary); color: var(--pd-on-primary);
+  border-radius: var(--pd-radius-md); font-weight: var(--pd-weight-semibold); text-decoration: none;
+}
+.pd-skip-link:focus { top: var(--pd-space-2); color: var(--pd-on-primary); }
+.pd-tabular, .pd-num { font-variant-numeric: tabular-nums; }
+.pd-min-w-0 { min-width: 0; }
+
+/* Icons (Lucide renders <svg class="lucide …">) */
+svg.lucide, .pd-icon { width: 1em; height: 1em; flex-shrink: 0; vertical-align: -0.125em; stroke-width: 2; }
+.pd-icon-md, svg.lucide.pd-icon-md { width: 18px; height: 18px; }
+.pd-icon-lg, svg.lucide.pd-icon-lg { width: 20px; height: 20px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
+@media (forced-colors: active) {
+  .pd-badge, .pd-chip, .pd-filter-tile, .pd-metric { border: 1px solid CanvasText; }
+}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--pd-border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--pd-text-subtle); }

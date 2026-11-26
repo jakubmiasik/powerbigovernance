@@ -1,10 +1,10 @@
 <%- include('partials/header') %>
-<div class="card">
-  <%- include('partials/ui/state', { ui: {
+<div class="pd-card">
+  <%- include('../../packages/podavo-ui/ejs/state', { ui: {
     kind: 'error',
     title: 'Something went wrong',
     message: (typeof message !== 'undefined' && message) || 'An unexpected error occurred.',
-    actions: [{ href: '/', label: 'Back to Home', icon: 'bi-house', primary: true }]
+    actions: [{ href: '/', label: 'Back to Home', icon: 'house', primary: true }]
   } }) %>
 </div>
 <%- include('partials/footer') %>

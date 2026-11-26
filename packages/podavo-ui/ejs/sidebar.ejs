@@ -1,0 +1,30 @@
+<%
+  // Sidebar — Podavo navigation. { ui: { brand: { name, suite, href, mark }, groups: [{ title, items: [{ href, label, icon,
+  //                                     fallbackClass, active }] }], footerText } }
+  // fallbackClass keeps an older icon font visible if Lucide cannot load.
+  var p = (typeof ui !== 'undefined' && ui) || {};
+  var brand = p.brand || {};
+  function slug(s) { return String(s).replace(/[^a-z0-9]+/gi, '-').toLowerCase(); }
+%><aside class="pd-sidebar" id="<%= p.id || 'pdSidebar' %>" aria-label="Application">
+  <div class="pd-sidebar-brand">
+    <a href="<%= brand.href || '/' %>" class="pd-brand" aria-label="<%= brand.name %> home">
+      <span class="pd-brand-mark" aria-hidden="true"><i data-lucide="<%= brand.mark || 'layers' %>"></i></span>
+      <span class="pd-brand-text"><% if (brand.suite) { %><span class="pd-brand-suite"><%= brand.suite %></span><% } %><span class="pd-brand-name"><%= brand.name %></span></span>
+    </a>
+    <button type="button" class="pd-icon-btn pd-sidebar-collapse" data-pd-collapse aria-label="Collapse navigation" aria-controls="<%= p.id || 'pdSidebar' %>"><i data-lucide="panel-left" aria-hidden="true"></i></button>
+  </div>
+  <nav class="pd-sidebar-nav" aria-label="Main navigation">
+    <% (p.groups || []).forEach(function (g) { if (!g.items || !g.items.length) return; var gid = 'nav-group-' + slug(g.title); %>
+      <div class="pd-nav-group" role="group" aria-labelledby="<%= gid %>">
+        <p class="pd-nav-title" id="<%= gid %>"><%= g.title %></p>
+        <% g.items.forEach(function (it) { %>
+          <a href="<%= it.href %>" class="pd-nav-link sidebar-link <%= it.active ? 'active' : '' %>"<% if (it.active) { %> aria-current="page"<% } %> title="<%= it.label %>" data-nav-group="<%= g.title %>">
+            <i data-lucide="<%= it.icon %>" class="<%= it.fallbackClass || '' %>"></i> <span><%= it.label %></span>
+          </a>
+        <% }) %>
+      </div>
+    <% }) %>
+  </nav>
+  <% if (p.footerText) { %><div class="pd-sidebar-footer"><span class="pd-sidebar-footer-text"><%= p.footerText %></span></div><% } %>
+</aside>
+<div class="pd-backdrop" data-pd-nav-toggle></div>

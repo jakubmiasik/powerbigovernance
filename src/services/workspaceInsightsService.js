@@ -378,6 +378,12 @@ function computeWorkspaceInsights(results, options = {}) {
 }
 
 module.exports = {
+  // The principal predicates the checks use, so screens describe access the same
+  // way the checks judge it.
+  isAdminRole,
+  isPersonPrincipal,
+  isGroupPrincipal,
+  userDisplay,
   FINDING_DEFS,
   RISK_BANDS,
   riskBand,

@@ -2,7 +2,29 @@ const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService } = require('../services/powerbiService');
-const { computeWorkspaceInsights, FINDING_DEFS } = require('../services/workspaceInsightsService');
+const { computeWorkspaceInsights, FINDING_DEFS, isAdminRole, isPersonPrincipal, isGroupPrincipal, userDisplay } = require('../services/workspaceInsightsService');
+
+/**
+ * Display facts for the triage table that the insights do not carry: who the
+ * accountable admin is, how access is held, and the capacity's name. Read from the
+ * same scan with the same principal rules the checks use; nothing is scored here.
+ */
+function workspaceDisplayContext(workspaces) {
+  const byId = {};
+  for (const ws of workspaces || []) {
+    const users = ws.users || [];
+    const humanAdmins = users.filter(u => isAdminRole(u.role) && isPersonPrincipal(u));
+    byId[ws.id] = {
+      owner: humanAdmins.length ? userDisplay(humanAdmins[0]) : null,
+      ownerCount: humanAdmins.length,
+      groupCount: users.filter(isGroupPrincipal).length,
+      peopleCount: users.filter(isPersonPrincipal).length,
+      usersRead: users.length > 0,
+      capacityName: ws.capacityName || null,
+    };
+  }
+  return byId;
+}
 const { loadNamingConvention } = require('../services/namingConventionStore');
 const { checkWorkspace, describeConvention } = require('../services/namingConventionService');
 const { buildItemDetails } = require('../services/itemDetailsService');
@@ -160,6 +182,8 @@ router.get('/', async (req, res) => {
     res.render('workspaces/list', {
       title: 'Workspaces', user: req.user, fromSavedData: true, run,
       insights,
+      workspaceContext: workspaceDisplayContext(savedWorkspaces),
+      reportCount: savedWorkspaces.reduce((sum, ws) => sum + (Number(ws.reportCount) || 0), 0),
       findingDefs: FINDING_DEFS,
       namingPattern: describeConvention(namingConvention),
     });

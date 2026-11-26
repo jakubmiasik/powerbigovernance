@@ -1,0 +1,12 @@
+<%
+  // Popover — anchored panel. { ui: { id, title, triggerLabel, triggerIcon, align: end, bodyHtml, role: menu } }
+  // Renders its trigger button; Esc and outside clicks close it and focus returns to the trigger.
+  // *Html slots are inserted unescaped: pass markup you rendered, never raw user input.
+  var p = (typeof ui !== 'undefined' && ui) || {};
+%><div class="pd-popover-anchor">
+  <button type="button" class="pd-btn pd-btn--sm<%= p.triggerClass ? ' ' + p.triggerClass : '' %>" data-pd-popover="<%= p.id %>" aria-controls="<%= p.id %>" aria-expanded="false"<% if (p.role === 'menu') { %> aria-haspopup="menu"<% } %>><% if (p.triggerIcon) { %><i data-lucide="<%= p.triggerIcon %>" aria-hidden="true"></i><% } %><span><%= p.triggerLabel %></span></button>
+  <div class="pd-popover<%= p.align === 'end' ? ' pd-popover--end' : '' %><%= p.role === 'menu' ? ' pd-menu' : '' %>" id="<%= p.id %>" hidden<% if (p.role === 'menu') { %> role="menu"<% } else { %> role="dialog" aria-label="<%= p.title || p.triggerLabel %>"<% } %>>
+    <% if (p.title) { %><p class="pd-popover-title"><%= p.title %></p><% } %>
+    <%- p.bodyHtml || '' %>
+  </div>
+</div>

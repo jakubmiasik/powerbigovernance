@@ -1,0 +1,9 @@
+<%
+  // IconButton. { ui: { icon, label (required: becomes aria-label and tooltip), variant: outline, size: sm,
+  //                     href, pressed, disabled, attrs: {} } }
+  var p = (typeof ui !== 'undefined' && ui) || {};
+  function pdAttrs(o) { return Object.keys(o || {}).map(function (k) { var v = o[k]; if (v === false || v === null || v === undefined) return ""; return " " + k + (v === true ? "" : "=\"" + String(v).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;") + "\""); }).join(""); }
+  var cls = 'pd-icon-btn' + (p.variant === 'outline' ? ' pd-icon-btn--outline' : '') + (p.size === 'sm' ? ' pd-icon-btn--sm' : '') + (p.class ? ' ' + p.class : '');
+  var extra = Object.assign({ 'aria-label': p.label, title: p.label }, p.attrs || {});
+  if (p.pressed !== undefined) extra['aria-pressed'] = p.pressed ? 'true' : 'false';
+%><% if (p.href) { %><a href="<%= p.href %>" class="<%= cls %>"<%- pdAttrs(extra) %>><i data-lucide="<%= p.icon %>" aria-hidden="true"></i></a><% } else { %><button type="button" class="<%= cls %>"<%- pdAttrs(extra) %><%= p.disabled ? ' disabled' : '' %>><i data-lucide="<%= p.icon %>" aria-hidden="true"></i></button><% } %>

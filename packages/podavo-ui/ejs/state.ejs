@@ -1,0 +1,16 @@
+<%
+  // State — empty | error | denied | loading | unavailable.
+  // { ui: { kind, title, message, icon, compact, actions: [{ href, label, icon, primary }] } }
+  var p = (typeof ui !== 'undefined' && ui) || {};
+  var kind = p.kind || 'empty';
+  var icons = { empty: 'inbox', error: 'octagon-alert', denied: 'lock-keyhole', loading: null, unavailable: 'circle-minus' };
+%><div class="pd-state pd-state--<%= kind %><%= p.compact ? ' pd-state--compact' : '' %>" role="<%= kind === 'error' ? 'alert' : 'status' %>"<% if (kind === 'loading') { %> aria-busy="true"<% } %>>
+  <div class="pd-state-icon" aria-hidden="true"><% if (kind === 'loading') { %><span class="pd-spinner"></span><% } else { %><i data-lucide="<%= p.icon || icons[kind] || 'info' %>"></i><% } %></div>
+  <% if (p.title) { %><p class="pd-state-title"><%= p.title %></p><% } %>
+  <% if (p.message) { %><p class="pd-state-message"><%= p.message %></p><% } %>
+  <% if (p.actions && p.actions.length) { %>
+    <div class="pd-state-actions">
+      <% p.actions.forEach(function (a) { %><a href="<%= a.href %>" class="pd-btn pd-btn--sm<%= a.primary ? ' pd-btn--primary' : '' %>"><% if (a.icon) { %><i data-lucide="<%= a.icon %>" aria-hidden="true"></i><% } %><span><%= a.label %></span></a><% }) %>
+    </div>
+  <% } %>
+</div>

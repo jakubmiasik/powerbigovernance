@@ -1,0 +1,27 @@
+<%
+  // AppShell (opening half). Pair with app-shell-end. Renders: skip link, Sidebar, Topbar
+  // (menu toggle, breadcrumb, search, actions), an optional context band, then opens <main>.
+  // { ui: { sidebar: { …Sidebar props }, breadcrumb: [{ label, href }], search: { …SearchField props },
+  //         actionsHtml, contextHtml, mainId: 'main' } }
+  // *Html slots are inserted unescaped: pass markup you rendered.
+  var shell = (typeof ui !== 'undefined' && ui) || {};
+  var crumbs = shell.breadcrumb || [];
+%><a class="pd-skip-link" href="#<%= shell.mainId || 'main' %>">Skip to main content</a>
+<div class="pd-shell">
+  <%- include('./sidebar', { ui: shell.sidebar || {} }) %>
+  <div class="pd-main">
+    <header class="pd-topbar">
+      <button type="button" class="pd-icon-btn pd-menu-toggle" data-pd-nav-toggle aria-label="Open navigation" aria-controls="<%= (shell.sidebar && shell.sidebar.id) || 'pdSidebar' %>" aria-expanded="false"><i data-lucide="menu" aria-hidden="true"></i></button>
+      <nav class="pd-breadcrumb" aria-label="Breadcrumb">
+        <ol>
+          <li><a href="/" aria-label="Home"><i data-lucide="house" aria-hidden="true"></i></a></li>
+          <% crumbs.forEach(function (c, i) { %>
+            <li><span class="pd-sep" aria-hidden="true">/</span><% if (i === crumbs.length - 1) { %><span aria-current="page"><%= c.label %></span><% } else { %><a href="<%= c.href %>"><%= c.label %></a><% } %></li>
+          <% }) %>
+        </ol>
+      </nav>
+      <% if (shell.search) { %><div class="pd-topbar-search"><%- include('./search-field', { ui: Object.assign({ shell: true, command: true, kbd: 'Ctrl K' }, shell.search) }) %></div><% } %>
+      <div class="pd-topbar-actions"><%- shell.actionsHtml || '' %></div>
+    </header>
+    <%- shell.contextHtml || '' %>
+    <main class="pd-page" id="<%= shell.mainId || 'main' %>" tabindex="-1">

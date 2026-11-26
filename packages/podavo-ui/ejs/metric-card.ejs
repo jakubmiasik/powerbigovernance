@@ -1,0 +1,18 @@
+<%
+  // MetricCard — concise and left-aligned. { ui: { label, value, hint, icon, tone: brand|success|warning|orange|danger|info|neutral,
+  //                                               href, attrs: {}, unavailableText } }
+  // value null/undefined renders "Not evaluated": a number is never invented to fill the card.
+  var p = (typeof ui !== 'undefined' && ui) || {};
+  function pdAttrs(o) { return Object.keys(o || {}).map(function (k) { var v = o[k]; if (v === false || v === null || v === undefined) return ""; return " " + k + (v === true ? "" : "=\"" + String(v).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;") + "\""); }).join(""); }
+  var missing = p.value === null || p.value === undefined;
+  var tag = p.href ? 'a' : (p.attrs && p.attrs.onclick ? 'button' : 'div');
+%><<%= tag %> class="pd-metric<%= p.tone && p.tone !== 'brand' ? ' pd-metric--' + p.tone : '' %>"<% if (p.href) { %> href="<%= p.href %>"<% } %><% if (tag === 'button') { %> type="button"<% } %><%- pdAttrs(p.attrs) %>>
+  <% if (p.icon) { %><span class="pd-metric-icon" aria-hidden="true"><i data-lucide="<%= p.icon %>"></i></span><% } %>
+  <span class="pd-metric-body">
+    <span class="pd-metric-label"><%= p.label %></span>
+    <span class="pd-metric-row">
+      <% if (missing) { %><span class="pd-metric-value is-unavailable"><%= p.unavailableText || 'Not evaluated' %></span><% } else { %><span class="pd-metric-value"><%= p.value %></span><% } %>
+      <% if (p.hint) { %><span class="pd-metric-hint"><%= p.hint %></span><% } %>
+    </span>
+  </span>
+</<%= tag %>>
