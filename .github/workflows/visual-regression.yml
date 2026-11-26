@@ -49,12 +49,28 @@ jobs:
         working-directory: packages/podavo-ui
         run: npm test
 
+      # Playwright fails a run that has to write a missing baseline, so without
+      # committed baselines every pull request would fail. When none exist yet the
+      # run records them instead (uploaded below, to commit); once they are
+      # committed, every run compares against them as usual.
       - name: Catalogue screenshots
         working-directory: packages/podavo-ui
-        run: npm run test:visual
+        run: |
+          if ls tests/__screenshots__/*.png >/dev/null 2>&1; then
+            npm run test:visual
+          else
+            echo "::warning::No catalogue baselines committed yet; recording them. Commit packages/podavo-ui/tests/__screenshots__ from the visual-regression artifact."
+            npm run test:visual:update
+          fi
 
       - name: Screen screenshots
-        run: npm run test:visual
+        run: |
+          if ls visual/__screenshots__/*.png >/dev/null 2>&1; then
+            npm run test:visual
+          else
+            echo "::warning::No screen baselines committed yet; recording them. Commit visual/__screenshots__ from the visual-regression artifact."
+            npm run test:visual:update
+          fi
 
       - name: Upload report and new baselines
         if: always()

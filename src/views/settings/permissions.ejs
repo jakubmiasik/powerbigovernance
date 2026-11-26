@@ -145,7 +145,7 @@
                     <% } %>
                   </td>
                   <td class="text-end text-nowrap">
-                    <%# <%= escapes the JSON once, which is exactly what an attribute needs:
+                    <%# The escaping output tag encodes the JSON once, which is exactly what an attribute needs:
                         the browser decodes it back to the JSON the script parses. Escaping
                         it by hand as well left &quot; in the value and broke every Edit. %>
                     <button type="button" class="btn btn-sm btn-outline-primary js-edit-user"
