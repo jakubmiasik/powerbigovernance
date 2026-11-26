@@ -7599,3 +7599,23 @@ test('the sidebar names the application only', async () => {
   assert.match(html, /class="pd-brand-name">Fabric Governance</);
   assert.doesNotMatch(html, /pd-brand-suite/);
 });
+
+test('every view compiles with EJS, so a malformed tag cannot reach production', () => {
+  const ejs = require('ejs');
+  const fs = require('fs');
+  const path = require('path');
+  const views = [];
+  (function walk(dir) {
+    fs.readdirSync(dir, { withFileTypes: true }).forEach(entry => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.ejs')) views.push(full);
+    });
+  })(path.join(__dirname, '..', 'src', 'views'));
+  assert.ok(views.length > 10);
+  views.forEach(file => {
+    // A comment that mentions a tag (an output tag written inside a comment, say)
+    // ends the comment early and the whole page fails to render.
+    assert.doesNotThrow(() => ejs.compile(fs.readFileSync(file, 'utf8'), { filename: file }), file);
+  });
+});
