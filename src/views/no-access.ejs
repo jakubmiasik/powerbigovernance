@@ -15,7 +15,9 @@
     kind: 'denied',
     title: 'No access to this section',
     message: deniedMessage,
-    actions: [{ href: '/', label: 'Back to Home', icon: 'house', primary: true }]
+    actions: (typeof switchTo !== 'undefined' && switchTo && switchTo.length
+      ? switchTo.map(function(link, i) { return { href: link.href, label: link.label, icon: 'arrow-left-right', primary: i === 0 }; })
+      : []).concat([{ href: '/', label: 'Back to Home', icon: 'house', primary: !(typeof switchTo !== 'undefined' && switchTo && switchTo.length) }])
   } }) %>
   <% if (notConfigured) { %>
     <p class="pd-help text-center px-4 pb-4 mb-0">

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
 const { buildUser360, summarizeTenantSettings } = require('../services/runMetricsService');
+const { canUseSectionInTenant, fallbackTenant } = require('../services/permissionService');
 const { computeWorkspaceInsights, FINDING_DEFS } = require('../services/workspaceInsightsService');
 const { loadNamingConvention } = require('../services/namingConventionStore');
 
@@ -290,7 +291,14 @@ router.post('/grant-sp-access', async (req, res) => {
     // regardless of what the page offered — with more than one tenant registered
     // that silently granted access to the wrong application.
     const wanted = Number.parseInt(req.body.spId, 10);
-    const sp = (Number.isFinite(wanted) && sps.find(candidate => Number(candidate.id) === wanted)) || sps[0];
+    // Only into a tenant where this person holds Governance; naming another is
+    // refused rather than quietly redirected to a permitted one.
+    if (Number.isFinite(wanted) && !canUseSectionInTenant(req.permissions, 'governance', wanted)) {
+      return res.status(403).json({ success: false, message: 'You do not have Governance in that tenant.' });
+    }
+    const sp = (Number.isFinite(wanted) && sps.find(candidate => Number(candidate.id) === wanted))
+      || fallbackTenant(req.permissions, 'governance', sps);
+    if (!sp) return res.status(403).json({ success: false, message: 'No tenant is available to you for Governance.' });
 
     if (!sp.enterprise_app_object_id) {
       return res.json({

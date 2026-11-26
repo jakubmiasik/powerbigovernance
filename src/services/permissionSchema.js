@@ -112,6 +112,26 @@ const PERMISSION_MIGRATIONS = [
           WHERE principal_type = 'user' AND entra_object_id IS NOT NULL;
     `,
   },
+  {
+    // Sections granted in one tenant only. A person can run analysis in one tenant
+    // and only read workspaces in another; a single section list for every tenant
+    // could not say that. Sections that are not about a tenant (quality rules,
+    // reconciliation, master data) stay in app_user_sections.
+    label: 'create app_user_tenant_sections',
+    sql: `
+      IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'app_user_tenant_sections') AND type = 'U')
+      BEGIN
+        CREATE TABLE app_user_tenant_sections (
+          user_id INT NOT NULL,
+          sp_id INT NOT NULL,
+          section_key NVARCHAR(64) NOT NULL,
+          granted_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+          CONSTRAINT PK_app_user_tenant_sections PRIMARY KEY (user_id, sp_id, section_key)
+        );
+        CREATE INDEX IX_app_user_tenant_sections_sp ON app_user_tenant_sections (sp_id);
+      END
+    `,
+  },
 ];
 
 module.exports = { PERMISSION_MIGRATIONS };

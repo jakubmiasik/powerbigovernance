@@ -16,7 +16,7 @@
  *      moment the first administrator is saved.
  */
 
-const { APP_SECTIONS, SECTION_KEYS, sectionForPath, isAlwaysAllowed } = require('./appSectionService');
+const { APP_SECTIONS, SECTION_KEYS, sectionForPath, isAlwaysAllowed, isTenantScoped } = require('./appSectionService');
 
 const ROLE_ADMIN = 'admin';
 const ROLE_USER = 'user';
@@ -157,16 +157,45 @@ function resolvePermissions({
     };
   }
 
+  const grantable = key => {
+    if (!SECTION_KEYS.includes(key)) return false;
+    // An ordinary user can never hold an admin-only section, whatever the table says.
+    const section = APP_SECTIONS.find(candidate => candidate.key === key);
+    return Boolean(section && !section.adminOnly);
+  };
+
   const tenantIds = [...new Set(
     applicable.flatMap(entry => (entry.tenantIds || []).map(Number)).filter(Number.isFinite),
   )];
-  const sectionKeys = [...new Set(applicable.flatMap(entry => entry.sectionKeys || []))]
-    .filter(key => SECTION_KEYS.includes(key))
-    // An ordinary user can never hold an admin-only section, whatever the table says.
-    .filter(key => {
-      const section = APP_SECTIONS.find(candidate => candidate.key === key);
-      return section && !section.adminOnly;
+
+  // What each tenant grants. Combined additively across the person's own entry and
+  // their groups, like everything else. A tenant-bound section listed in an entry's
+  // plain section list (how every grant was stored before sections could differ by
+  // tenant) still applies to every tenant that entry grants, so existing access is
+  // unchanged until an administrator edits it.
+  const tenantSections = {};
+  tenantIds.forEach(spId => { tenantSections[spId] = []; });
+  const appSections = new Set();
+  // Sections from the older single list still open their pages even where the
+  // entry grants no tenant, exactly as before; what they may act on there is
+  // decided per tenant like everything else (and with no tenant, that is nothing).
+  const legacyPageKeys = new Set();
+  applicable.forEach(entry => {
+    const entryTenants = (entry.tenantIds || []).map(Number).filter(Number.isFinite);
+    const legacyTenantKeys = [];
+    (entry.sectionKeys || []).filter(grantable).forEach(key => {
+      if (isTenantScoped(key)) { legacyTenantKeys.push(key); legacyPageKeys.add(key); } else appSections.add(key);
     });
+    const perTenant = entry.tenantSections || {};
+    entryTenants.forEach(spId => {
+      const keys = legacyTenantKeys.concat((perTenant[spId] || perTenant[String(spId)] || []).filter(key => grantable(key) && isTenantScoped(key)));
+      keys.forEach(key => { if (!tenantSections[spId].includes(key)) tenantSections[spId].push(key); });
+    });
+  });
+
+  // Every section the person holds anywhere: what the menu shows and which pages
+  // they may open at all. Which tenant a page may act on is decided per request.
+  const sectionKeys = [...new Set([...appSections, ...legacyPageKeys, ...Object.values(tenantSections).flat()])];
 
   return {
     email,
@@ -176,6 +205,7 @@ function resolvePermissions({
     reason: 'granted',
     allTenants: false,
     tenantIds,
+    tenantSections,
     sectionKeys,
     allSections: false,
     // Which groups did the granting, so the panel and the refusal page can say
@@ -190,6 +220,37 @@ function canSeeSection(permissions, key) {
   if (!permissions) return false;
   if (permissions.isAdmin) return true;
   return (permissions.sectionKeys || []).includes(key);
+}
+
+/**
+ * Whether a section may be used in one particular tenant. Sections that are not
+ * about a tenant only need the section itself.
+ */
+function canUseSectionInTenant(permissions, key, spId) {
+  if (!permissions) return false;
+  if (permissions.isAdmin) return true;
+  if (!isTenantScoped(key)) return canSeeSection(permissions, key);
+  const wanted = Number(spId);
+  if (!Number.isFinite(wanted)) return false;
+  const keys = (permissions.tenantSections || {})[wanted] || [];
+  return keys.includes(key);
+}
+
+/** The tenants in which this user may use a section, in the order given. */
+function tenantsForSection(permissions, key, tenants = []) {
+  if (permissions && permissions.isAdmin) return tenants.slice();
+  return tenants.filter(tenant => canUseSectionInTenant(permissions, key, tenant.id));
+}
+
+/**
+ * The tenant a page acts on when no scan names one.
+ *
+ * Pages that read the selected scan's tenant used to fall back to the first
+ * configured service principal, which may be a tenant this person was never
+ * granted. The fallback is now the first tenant where they hold the section.
+ */
+function fallbackTenant(permissions, key, tenants = []) {
+  return tenantsForSection(permissions, key, tenants)[0] || null;
 }
 
 function canSeeTenant(permissions, spId) {
@@ -247,6 +308,9 @@ module.exports = {
   resolvePermissions,
   canSeeSection,
   canSeeTenant,
+  canUseSectionInTenant,
+  tenantsForSection,
+  fallbackTenant,
   canAccessPath,
   visibleSections,
   visibleTenants,

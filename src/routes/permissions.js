@@ -4,12 +4,31 @@ const db = require('../services/databaseService');
 const permissionRepository = require('../services/permissionRepository');
 const directory = require('../services/directoryService');
 const { clearPermissionCache } = require('../middleware/permissions');
-const { GRANTABLE_SECTIONS } = require('../services/appSectionService');
+const { GRANTABLE_SECTIONS, TENANT_SECTIONS, APP_WIDE_SECTIONS, isTenantScoped } = require('../services/appSectionService');
 const { ROLE_ADMIN, ROLE_USER, normalizeEmail } = require('../services/permissionService');
 
 function asArray(value) {
   if (value === undefined || value === null) return [];
   return Array.isArray(value) ? value : [value];
+}
+
+/**
+ * The grant as submitted by the tenant × section grid.
+ *
+ * Each tenant row posts `ts_<spId>` with the sections ticked in it (flat names,
+ * because bracketed numeric keys are read as array indexes by the body parser).
+ * A tenant is granted when its row is ticked; its sections only count then.
+ * Application-wide sections arrive as `sectionKeys`; anything tenant-bound posted
+ * there is ignored, so a section can only ever be granted in a named tenant.
+ */
+function readGrant(body, knownTenantIds) {
+  const tenantIds = asArray(body.tenantIds).map(Number).filter(id => knownTenantIds.includes(id));
+  const tenantSections = {};
+  tenantIds.forEach(spId => {
+    tenantSections[spId] = [...new Set(asArray(body['ts_' + spId]).filter(isTenantScoped))];
+  });
+  const sectionKeys = [...new Set(asArray(body.sectionKeys).filter(key => !isTenantScoped(key)))];
+  return { tenantIds, tenantSections, sectionKeys };
 }
 
 /**
@@ -43,6 +62,8 @@ router.get('/', async (req, res) => {
       // Only the identifying fields: this page has no business holding credentials.
       tenants: servicePrincipals.map(sp => ({ id: Number(sp.id), name: sp.name, tenant_id: sp.tenant_id })),
       sections: GRANTABLE_SECTIONS,
+      tenantSectionDefs: TENANT_SECTIONS,
+      appSectionDefs: APP_WIDE_SECTIONS,
       bootstrap: Boolean(req.permissions && req.permissions.isBootstrap),
       success: req.flash('success'),
       error: req.flash('error'),
@@ -52,7 +73,7 @@ router.get('/', async (req, res) => {
     res.render('settings/permissions', {
       title: 'Users & Access',
       user: req.user,
-      users: [], tenants: [], sections: GRANTABLE_SECTIONS, bootstrap: false,
+      users: [], tenants: [], sections: GRANTABLE_SECTIONS, tenantSectionDefs: TENANT_SECTIONS, appSectionDefs: APP_WIDE_SECTIONS, bootstrap: false,
       success: [], error: [err.message],
       hideRunSelector: true,
     });
@@ -81,6 +102,8 @@ router.post('/save', async (req, res) => {
     }
 
     const isAdmin = role === ROLE_ADMIN;
+    const knownTenantIds = (await db.getServicePrincipals()).map(sp => Number(sp.id));
+    const grant = readGrant(req.body, knownTenantIds);
     await permissionRepository.saveUser({
       id: id || null,
       email,
@@ -92,8 +115,9 @@ router.post('/save', async (req, res) => {
       // An administrator's grants are not stored: they see everything by role, and
       // keeping a half-filled list beside that would suggest a restriction that is
       // not being applied.
-      tenantIds: isAdmin ? [] : asArray(req.body.tenantIds),
-      sectionKeys: isAdmin ? [] : asArray(req.body.sectionKeys),
+      tenantIds: isAdmin ? [] : grant.tenantIds,
+      tenantSections: isAdmin ? {} : grant.tenantSections,
+      sectionKeys: isAdmin ? [] : grant.sectionKeys,
       actor: req.user ? req.user.email : null,
     });
 
@@ -135,3 +159,4 @@ router.post('/delete/:id', async (req, res) => {
 });
 
 module.exports = router;
+module.exports._readGrant = readGrant;

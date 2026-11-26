@@ -18,35 +18,35 @@ const NAV_GROUPS = ['Overview', 'Governance', 'Operations', 'Data Quality', 'Con
 const APP_SECTIONS = [
   {
     key: 'governance', label: 'Governance Overview', icon: 'bi-shield-check', lucide: 'shield-check', href: '/governance',
-    group: 'Overview', prefixes: ['/governance'],
+    group: 'Overview', prefixes: ['/governance'], tenantScoped: true,
   },
   {
     key: 'workspaces', label: 'Workspaces', icon: 'bi-collection', lucide: 'layers', href: '/workspaces',
-    group: 'Governance', prefixes: ['/workspaces'],
+    group: 'Governance', prefixes: ['/workspaces'], tenantScoped: true,
   },
   {
     key: 'pipelines', label: 'Deployment Pipelines', icon: 'bi-diagram-3', lucide: 'workflow', href: '/pipelines',
-    group: 'Governance', prefixes: ['/pipelines'],
+    group: 'Governance', prefixes: ['/pipelines'], tenantScoped: true,
   },
   {
     key: 'tenant-settings', label: 'Tenant Settings', icon: 'bi-sliders', lucide: 'sliders-horizontal', href: '/tenant-settings',
-    group: 'Governance', prefixes: ['/tenant-settings'],
+    group: 'Governance', prefixes: ['/tenant-settings'], tenantScoped: true,
   },
   {
     key: 'analysis', label: 'Run Analysis', icon: 'bi-play-circle', lucide: 'circle-play', href: '/analysis',
-    group: 'Operations', prefixes: ['/analysis'],
+    group: 'Operations', prefixes: ['/analysis'], tenantScoped: true,
   },
   {
     key: 'migrate', label: 'Migrate Workspaces', icon: 'bi-arrow-left-right', lucide: 'arrow-left-right', href: '/migrate',
-    group: 'Operations', prefixes: ['/migrate'],
+    group: 'Operations', prefixes: ['/migrate'], tenantScoped: true,
   },
   {
     key: 'capacities', label: 'Capacities', icon: 'bi-lightning', lucide: 'zap', href: '/capacities',
-    group: 'Operations', prefixes: ['/capacities'],
+    group: 'Operations', prefixes: ['/capacities'], tenantScoped: true,
   },
   {
     key: 'security-groups', label: 'Security Groups', icon: 'bi-people', lucide: 'users', href: '/quality/security-groups',
-    group: 'Data Quality', prefixes: ['/quality/security-groups'],
+    group: 'Data Quality', prefixes: ['/quality/security-groups'], tenantScoped: true,
   },
   {
     key: 'quality', label: 'Quality Configuration', icon: 'bi-patch-check', lucide: 'badge-check', href: '/quality',
@@ -70,6 +70,16 @@ const APP_SECTIONS = [
 
 const SECTION_KEYS = APP_SECTIONS.map(section => section.key);
 const GRANTABLE_SECTIONS = APP_SECTIONS.filter(section => !section.adminOnly);
+// Sections that act on one tenant's data (a scan, its capacities, its pipelines)
+// are granted per tenant. The rest configure the application itself and are
+// granted once.
+const TENANT_SECTIONS = GRANTABLE_SECTIONS.filter(section => section.tenantScoped);
+const APP_WIDE_SECTIONS = GRANTABLE_SECTIONS.filter(section => !section.tenantScoped);
+const TENANT_SECTION_KEYS = TENANT_SECTIONS.map(section => section.key);
+
+function isTenantScoped(key) {
+  return TENANT_SECTION_KEYS.includes(key);
+}
 
 // Paths every signed-in user may reach regardless of grants: the home page, the
 // shared APIs the layout itself calls, and the "you have no access" page. Guarding
@@ -109,6 +119,10 @@ module.exports = {
   APP_SECTIONS,
   SECTION_KEYS,
   GRANTABLE_SECTIONS,
+  TENANT_SECTIONS,
+  APP_WIDE_SECTIONS,
+  TENANT_SECTION_KEYS,
+  isTenantScoped,
   sectionForPath,
   getSection,
   sectionLabel,
