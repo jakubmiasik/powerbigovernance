@@ -76,7 +76,7 @@
   function header(o) {
     var r = o.run;
     var dl = h('dl', { class: 'go-facts' }, []);
-    [['Tenant', o.tenant.name || 'Unknown'], ['Tenant ID', o.tenant.id], ['Run', '#' + r.id], ['Scan started', utc(r.startedAt)],
+    [['Tenant', o.tenant.name || 'Unknown'], ['Tenant ID', o.tenant.id], ['Scan', r.label || ('#' + r.id)], ['Scan started', utc(r.startedAt)],
      ['Scan completed', utc(r.completedAt)], ['Run by', r.runBy || 'Unknown']].forEach(function (pair) {
       dl.appendChild(h('div', null, [h('dt', { text: pair[0] }), h('dd', { text: pair[1], class: pair[0] === 'Tenant ID' ? 'go-mono' : null })]));
     });
@@ -174,7 +174,7 @@
     return card('Findings', 'list-checks', [
       table('Findings from the fixed rules, most severe first', [{ label: 'ID' }, { label: 'Rule' }, { label: 'Severity' }, { label: 'Status' }, { label: 'Count / of', num: true }], rows),
       h('div', { class: 'pd-card-footer', text: 'Rules and thresholds come from the rules file (admin share ' + t.adminSharePct + '%, top-' + t.topWorkspacesCount + ' item share ' + t.topWorkspacesItemSharePct + '%, trend ±' + t.trendChangePct + '%). Pass means the rule found nothing; it is not a compliance statement.' }),
-    ], 'go-findings', 'Run #' + o.run.id + ' · data as of ' + utc(o.dataAsOf));
+    ], 'go-findings', (o.run.label || '') + ' · data as of ' + utc(o.dataAsOf));
   }
 
   var RIGHT_CLASS = { Admin: 'go-r-admin', Member: 'go-r-member', Contributor: 'go-r-contributor', Viewer: 'go-r-viewer' };
@@ -198,8 +198,8 @@
       h('div', null, [h('span', { class: 'go-big', text: a.adminSharePct === null ? 'Unknown' : a.adminSharePct + '%' }), h('span', { class: 'go-dim', text: ' Admin share · ' + num(a.adminAssignments) + ' of ' + num(a.totalAssignments) + ' assignments' })]),
       h('div', null, [h('span', { class: 'go-big', text: num(a.groupAssignments) }), h('span', { class: 'go-dim', text: ' group assignments' })]),
     ]);
-    var banner = a.isLatestRun ? null : h('div', { class: 'go-banner', role: 'note', text: 'Access data from run ' + a.runId + ' (' + utc(a.completedAt) + '); latest run has no access data.' });
-    return card('Access', 'key-round', [banner, facts, bars, legend], null, 'As of run #' + a.runId);
+    var banner = a.isLatestRun ? null : h('div', { class: 'go-banner', role: 'note', text: 'Access data from ' + a.label + ' (' + utc(a.completedAt) + '); latest run has no access data.' });
+    return card('Access', 'key-round', [banner, facts, bars, legend], null, 'As of ' + a.label);
   }
 
   function sparkline(metric, runs) {
@@ -211,7 +211,7 @@
     function xy(i, v) { return [(pad + i * step).toFixed(1), (hgt - pad - ((v - min) / range) * (hgt - pad * 2)).toFixed(1)]; }
     var pts = [];
     vals.forEach(function (v, i) { if (v !== null) pts.push(xy(i, v).join(',')); });
-    var svg = s('svg', { viewBox: '0 0 ' + w + ' ' + hgt, width: '100%', height: hgt, role: 'img', 'aria-label': metric.label + ' per run, oldest first: ' + runs.map(function (r, i) { return 'run ' + r.runId + ' ' + (vals[i] === null ? 'Unknown' : vals[i]); }).join(', ') });
+    var svg = s('svg', { viewBox: '0 0 ' + w + ' ' + hgt, width: '100%', height: hgt, role: 'img', 'aria-label': metric.label + ' per scan, oldest first: ' + runs.map(function (r, i) { return r.label + ' ' + (vals[i] === null ? 'Unknown' : vals[i]); }).join(', ') });
     svg.appendChild(s('polyline', { points: pts.join(' '), fill: 'none', stroke: 'currentColor', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
     runs.forEach(function (r, i) {
       if (vals[i] === null) return;
@@ -231,26 +231,26 @@
     var t = o.trend;
     if (t.runs.length < 2) return card('Trend', 'chart-line', [h('div', { class: 'go-empty', text: 'Unknown: fewer than two completed tenant scans have totals.' })]);
     var charts = h('div', { class: 'go-sparks' }, t.metrics.map(function (m) { return sparkline(m, t.runs); }));
-    var headers = [{ label: 'Run' }, { label: 'Completed (UTC)' }].concat(t.metrics.map(function (m) { return { label: m.label, num: true }; }));
+    var headers = [{ label: 'Scan' }, { label: 'Completed (UTC)' }].concat(t.metrics.map(function (m) { return { label: m.label, num: true }; }));
     var rows = t.runs.map(function (r) {
-      return h('tr', null, [td('#' + r.runId, false, 'go-mono'), td(utc(r.completedAt))].concat(t.metrics.map(function (m) {
+      return h('tr', null, [td(r.label), td(utc(r.completedAt))].concat(t.metrics.map(function (m) {
         var c = r.changes[m.key];
         var cell = h('div', null, [h('div', { text: num(r.values[m.key]) })]);
         if (c) cell.appendChild(h('div', { class: 'go-dim', text: (c.abs === null ? 'Unknown' : (c.abs > 0 ? '+' : '') + c.abs) + ' · ' + pct(c.pct) }));
         return td(cell, true, c && c.hit ? 'go-cell-hit' : null);
       })));
     });
-    return card('Trend across whole-tenant scans', 'chart-line', [
+    return card('Trend across whole-tenant scans of ' + (o.run.principal || 'this principal'), 'chart-line', [
       charts,
       table('Totals per run with change against the previous run', headers, rows),
-      h('div', { class: 'pd-card-footer', text: 'Highlighted: a change of more than ±' + t.thresholdPct + '% against the previous run (rule T1). A change from 0 has no percentage and shows as Unknown.' }),
-    ], null, t.runs.length + ' runs');
+      h('div', { class: 'pd-card-footer', text: 'Scans of ' + (o.run.principal || 'this principal') + ' in scan-number order. Highlighted: a change of more than ±' + t.thresholdPct + '% against the same principal\'s previous scan (rule T1). A change from 0 has no percentage and shows as Unknown.' }),
+    ], null, t.runs.length + ' scans');
   }
 
   function deletions(o) {
-    var rows = o.deletions.map(function (d) { return h('tr', null, [td(d.workspaceName), td(d.state), td(utc(d.deletedAt)), td('#' + d.runId, false, 'go-mono')]); });
+    var rows = o.deletions.map(function (d) { return h('tr', null, [td(d.workspaceName), td(d.state), td(utc(d.deletedAt)), td(d.scan || 'Unknown')]); });
     return card('Recorded workspace deletions', 'trash-2', [
-      o.deletions.length ? table('Workspace deletions recorded for this tenant', [{ label: 'Workspace' }, { label: 'State' }, { label: 'Deleted (UTC)' }, { label: 'Run' }], rows, { scroll: true })
+      o.deletions.length ? table('Workspace deletions recorded for this tenant', [{ label: 'Workspace' }, { label: 'State' }, { label: 'Deleted (UTC)' }, { label: 'Scan' }], rows, { scroll: true })
         : h('div', { class: 'go-empty', text: 'No deletions recorded for this tenant.' }),
     ], null, o.deletions.length + ' recorded');
   }

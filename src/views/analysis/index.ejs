@@ -121,7 +121,7 @@
         <table class="table table-hover table-sm mb-0" id="analysis-runs-table">
           <thead>
             <tr>
-              <th>ID</th>
+              <th title="Each service principal numbers its own scans from 1">Scan</th>
               <th>Tenant</th>
               <th>Status</th>
               <th>Workspaces</th>
@@ -139,6 +139,8 @@
               <tr data-filter="no runs"><td colspan="11" class="text-center text-muted py-3">No analysis runs yet</td></tr>
             <% } %>
             <% runs.forEach(function(runItem) {
+                 // Already escaped by the partial, so it is written out unescaped below.
+                 var scanName = include('../partials/scan-name', { run: runItem }).trim();
                  var live = (typeof liveProgress !== 'undefined' && liveProgress) ? liveProgress[runItem.id] : null;
                  // A run the process no longer heartbeats is shown as interrupted even
                  // if its row still says running — the row is only updated by the
@@ -150,8 +152,8 @@
                    : effectiveStatus === 'interrupted' ? 'warning' : 'danger';
                  var isLive = effectiveStatus === 'running' || effectiveStatus === 'cancelling';
             %>
-              <tr data-filter="<%= [runItem.id, runItem.sp_name || '', runItem.status || '', runItem.run_by || '', runItem.tenant_id || '', runItem.scopeLabel || ''].join(' ').toLowerCase() %>" data-run-id="<%= runItem.id %>">
-                <td><%= runItem.id %></td>
+              <tr data-filter="<%= [runItem.sp_run_number ? '#' + runItem.sp_run_number : '', runItem.sp_name || '', runItem.status || '', runItem.run_by || '', runItem.tenant_id || '', runItem.scopeLabel || ''].join(' ').toLowerCase() %>" data-run-id="<%= runItem.id %>" data-run-label="<%- scanName %>">
+                <td class="text-nowrap" title="<%- scanName %>"><%= runItem.sp_run_number ? '#' + runItem.sp_run_number : '—' %></td>
                 <td style="min-width: 180px;">
                   <strong><%= runItem.sp_name || '-' %></strong>
                   <div class="text-nowrap" style="font-size: 0.7rem;">
@@ -424,7 +426,7 @@ function renderScopeWorkspaces() {
 
   var source = document.getElementById('scopeSource');
   if (scopePicker.source && scopePicker.source.source === 'scan') {
-    source.textContent = 'From scan #' + scopePicker.source.runId +
+    source.textContent = 'From ' + labelFor(scopePicker.source.runId).replace('The new scan', 'the latest scan') +
       (scopePicker.source.scannedAt ? ' on ' + new Date(scopePicker.source.scannedAt).toLocaleDateString() : '') +
       ' — refresh to include workspaces created since.';
   } else if (scopePicker.source && scopePicker.source.source === 'live') {
@@ -525,10 +527,10 @@ function sendToBackground() {
   // A run started from this page has no row in the table yet, so there would be
   // nothing to click. Reload so it appears — already showing its live progress.
   if (!document.querySelector('[data-run-status-for="' + runId + '"]')) {
-    reloadPageWithMessage('Run #' + runId + ' continues in the background. Reloading...');
+    reloadPageWithMessage(labelFor(runId) + ' continues in the background. Reloading...');
     return;
   }
-  showBackgroundNote('Run #' + runId + ' is still running. Click its Status in the table below to come back to it.');
+  showBackgroundNote(labelFor(runId) + ' is still running. Click its Status in the table below to come back to it.');
   pollRunList();
 }
 
@@ -558,6 +560,12 @@ function resetProgressUi(message) {
   document.getElementById('analysisSpinner').style.display = '';
 }
 
+// Scans are named by principal and number; the table row carries the label.
+function labelFor(runId) {
+  var row = document.querySelector('[data-run-id="' + runId + '"]');
+  return (row && row.getAttribute('data-run-label')) || 'The new scan';
+}
+
 function startPolling(runId) {
   if (progressInterval) clearInterval(progressInterval);
   activeRunId = runId;
@@ -573,7 +581,7 @@ function startPolling(runId) {
  */
 function showRunProgress(runId) {
   if (!runId) return;
-  resetProgressUi('Reading progress for run #' + runId + '...');
+  resetProgressUi('Reading progress for ' + labelFor(runId) + '...');
   getProgressModal().show();
   // The buttons that only make sense for a run in flight are revealed by the first
   // poll, so opening a finished run does not flash a Cancel it cannot honour.
@@ -802,7 +810,7 @@ function finishWatching(runId, data) {
 
   if (data.status === 'unknown') {
     document.getElementById('progressMessage').textContent =
-      'No progress is being reported for run #' + runId + '.';
+      'No progress is being reported for ' + labelFor(runId) + '.';
   }
   pollRunList();
 }
@@ -853,7 +861,7 @@ async function pollRunList() {
       // totals columns, so the page is reloaded once — only on the transition out
       // of a live state, and never while the user is reading the modal.
       if (wasLive && !isLive && !isProgressModalOpen()) {
-        reloadPageWithMessage('Analysis run #' + runId + ' finished (' + run.status + '). Reloading...');
+        reloadPageWithMessage(labelFor(runId) + ' finished (' + run.status + '). Reloading...');
       }
     });
 

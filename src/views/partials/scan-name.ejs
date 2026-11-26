@@ -1,0 +1,2 @@
+<%# A scan's name: its service principal and that principal's own scan number. Expects `run`. -%>
+<%= typeof runLabel === 'function' ? runLabel(run) : ((run.sp_name || (run.sp_id === null || run.sp_id === undefined ? 'Managed identity' : 'Principal ' + run.sp_id)) + (run.sp_run_number ? ' #' + run.sp_run_number : ' (unnumbered, id ' + run.id + ')')) %>

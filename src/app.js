@@ -27,6 +27,10 @@ app.set('view engine', 'ejs');
 // Middleware
 app.use(securityHeaders);
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Every view names scans the same way: principal and that principal's scan number.
+app.locals = app.locals || {};
+app.locals.runLabel = require('./services/runLabelService').runLabel;
 // The shared Podavo design system. Only its stylesheets and scripts are served;
 // its templates are read from disk by the views.
 const podavoUi = path.join(__dirname, '..', 'packages', 'podavo-ui');

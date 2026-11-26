@@ -129,6 +129,11 @@
       var spName = r.sp_name || 'Unknown Service Principal';
       (runsBySp[spName] = runsBySp[spName] || []).push(r);
     });
+    // Scans are named by principal and that principal's own number; the id is only
+    // the value sent back to the server.
+    var labelOf = typeof runLabel === 'function' ? runLabel : function(r) {
+      return (r.sp_name || 'Unknown principal') + (r.sp_run_number ? ' #' + r.sp_run_number : ' (unnumbered, id ' + r.id + ')');
+    };
     ctx += '<span class="gov-context-select"><span class="pd-dot pd-dot--' + dataStatus.tone + '" aria-hidden="true"></span>'
       + '<select class="pd-select pd-select--sm" id="globalRunSelector" onchange="switchGlobalRun(this.value)"' + (runSelectorLocked ? ' disabled' : '') + '>';
     Object.keys(runsBySp).sort(function(a, b) { return a.localeCompare(b); }).forEach(function(spName) {
@@ -141,7 +146,7 @@
       spRuns.forEach(function(r) {
         ctx += '<option value="' + escapeFn(r.id) + '"' + (runSelectorValue === r.id ? ' selected' : '')
           + ' title="' + escapeFn(r.scopeTagTitle || '') + '">'
-          + '[' + escapeFn(r.scopeTag || 'WT') + '] ' + escapeFn(spName) + ': Run#' + escapeFn(r.id) + ' &mdash; '
+          + '[' + escapeFn(r.scopeTag || 'WT') + '] ' + escapeFn(labelOf(r)) + ' &mdash; '
           + escapeFn(r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A') + '</option>';
       });
       ctx += '</optgroup>';
@@ -152,10 +157,10 @@
     }
     if (runSelectorLocked) {
       var lockedInfo = (typeof lockedRun !== 'undefined' && lockedRun) ? lockedRun : null;
-      ctx += '<span class="pd-badge pd-badge--brand"><i data-lucide="eye" aria-hidden="true"></i>Viewing Run #' + escapeFn(lockedInfo ? lockedInfo.id : '-') + '</span>'
+      ctx += '<span class="pd-badge pd-badge--brand"><i data-lucide="eye" aria-hidden="true"></i>Viewing ' + escapeFn(lockedInfo ? labelOf(lockedInfo) : '-') + '</span>'
         + '<span class="gov-context-note"><i data-lucide="lock" aria-hidden="true"></i>Scan switching is disabled while exploring this run.</span>';
     } else if (activeRun) {
-      ctx += '<span class="pd-badge pd-badge--brand"><i data-lucide="play" aria-hidden="true"></i>Run #' + escapeFn(activeRun.id) + '</span>'
+      ctx += '<span class="pd-badge pd-badge--brand"><i data-lucide="play" aria-hidden="true"></i>' + escapeFn(labelOf(activeRun)) + '</span>'
         + '<span class="gov-context-stats hide-below-1440">Workspaces: <strong>' + escapeFn(activeRun.total_workspaces || '-') + '</strong> <span aria-hidden="true">|</span> Reports: <strong>' + escapeFn(activeRun.total_reports || '-') + '</strong></span>';
     }
   } else {

@@ -10,7 +10,7 @@
     <p class="text-muted mb-0">
       Who can reach which workspace, and adding the service principal where it is missing.
       <% if (run) { %>
-        · From scan #<%= run.id %>, <%= run.started_at ? new Date(run.started_at).toLocaleString() : 'date unknown' %>
+        · From <%- include('../partials/scan-name', { run: run }).trim() %>, <%= run.started_at ? new Date(run.started_at).toLocaleString() : 'date unknown' %>
         · <%= describeScope(scopeFromRow(run)) %>
       <% } %>
     </p>
@@ -24,7 +24,7 @@
               onchange="window.location = '/settings/access?accessRunId=' + this.value">
         <% runs.forEach(function(r) { %>
           <option value="<%= r.id %>" <%= run && Number(run.id) === Number(r.id) ? 'selected' : '' %>>
-            Scan #<%= r.id %> — <%= r.started_at ? new Date(r.started_at).toLocaleDateString() : 'unknown' %>
+            <%- include('../partials/scan-name', { run: r }).trim() %> — <%= r.started_at ? new Date(r.started_at).toLocaleDateString() : 'unknown' %>
             (<%= describeScope(scopeFromRow(r), { limit: 1 }) %>)
           </option>
         <% }) %>

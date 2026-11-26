@@ -4734,7 +4734,7 @@ test('with a scan of its own still running, the schedule records a skip', async 
     assert.equal(result.status, 'skipped');
     assert.equal(launched, 0, 'a skip must not also start a scan');
     assert.equal(logged[0][2], 'skipped');
-    assert.match(logged[0][3], /#9/, 'the skip names the run that is in the way');
+    assert.match(logged[0][3], /\bid 9\b/, 'the skip names the run that is in the way (unnumbered here, so by id)');
   } finally {
     Object.assign(dbService, original);
     analysisLauncher._reset();
@@ -4829,7 +4829,7 @@ test('the analysis page offers a scope picker and its schedules', async () => {
   assert.match(html, /Scoped · 1 workspace/);
   // The runs table no longer carries a Scope column of its own. (The schedules
   // table still does — there the scope is the point of the row.)
-  assert.match(html, /<th>ID<\/th>\s*<th>Tenant<\/th>\s*<th>Status<\/th>/);
+  assert.match(html, /<th title="Each service principal numbers its own scans from 1">Scan<\/th>\s*<th>Tenant<\/th>\s*<th>Status<\/th>/);
 });
 
 test('the Grant Access page says so when the scan behind it was scoped', async () => {
@@ -4927,7 +4927,7 @@ test('the pre-scoping fallback names only columns the full read also names', () 
   const legacy = dbPrivate.RUN_META_COLUMNS_LEGACY.split(',').map(name => name.trim());
   for (const column of legacy) assert.ok(columns.includes(column), column + ' is not in the full read');
   // And it must drop exactly the columns the migration adds.
-  assert.deepEqual(columns.filter(c => !legacy.includes(c)), ['scope_kind', 'scope_workspaces', 'schedule_id']);
+  assert.deepEqual(columns.filter(c => !legacy.includes(c)), ['scope_kind', 'scope_workspaces', 'schedule_id', 'sp_run_number']);
 });
 
 test('a run gets a two-letter coverage tag for the run selector', () => {
@@ -4948,16 +4948,17 @@ test('a run gets a two-letter coverage tag for the run selector', () => {
 test('the run selector shows each scan\'s coverage, and the current one carries a badge', async () => {
   const ejs = require('ejs');
   const decorate = run => ({ ...run, scopeTag: analysisScope.scopeTag(run), scopeTagTitle: analysisScope.scopeTagTitle(run) });
-  const scoped = decorate({ id: 7, sp_name: 'Contoso SP', status: 'completed', started_at: '2026-08-26T02:00:00Z', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]' });
-  const wide = decorate({ id: 6, sp_name: 'Contoso SP', status: 'completed', started_at: '2026-08-25T02:00:00Z', scope_kind: 'tenant' });
+  const scoped = decorate({ id: 7, sp_name: 'Contoso SP', sp_run_number: 2, status: 'completed', started_at: '2026-08-26T02:00:00Z', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]' });
+  const wide = decorate({ id: 6, sp_name: 'Contoso SP', sp_run_number: 1, status: 'completed', started_at: '2026-08-25T02:00:00Z', scope_kind: 'tenant' });
 
   const html = await ejs.renderFile('src/views/partials/header.ejs', {
     currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [], title: 'x',
     availableRuns: [scoped, wide], globalRun: scoped, selectedRunId: 7,
   });
 
-  assert.match(html, /\[SC\] Contoso SP: Run#7/);
-  assert.match(html, /\[WT\] Contoso SP: Run#6/);
+  // Named by principal and that principal's scan number, not the database id.
+  assert.match(html, /\[SC\] Contoso SP #2/);
+  assert.match(html, /\[WT\] Contoso SP #1/);
   assert.match(html, /title="SC — scoped to 1 workspace: Finance"/);
 });
 
@@ -4970,7 +4971,7 @@ test('a run list with no scope decoration still renders the selector', async () 
     availableRuns: [{ id: 1, sp_name: 'SP', status: 'completed', started_at: '2026-08-01T00:00:00Z' }],
     globalRun: null, selectedRunId: 1,
   });
-  assert.match(html, /\[WT\] SP: Run#1/, 'an undecorated run reads as whole tenant, which is what it was');
+  assert.match(html, /\[WT\] SP \(unnumbered, id 1\)/, 'an undecorated run reads as whole tenant, which is what it was');
 });
 
 test('the middleware decorates every run it hands the selector', async () => {
@@ -5001,8 +5002,8 @@ test('comparing two scans of different coverage says so before the numbers', asy
   // workspaces", which reads as the estate having shrunk. The page still shows
   // the comparison — refusing would be worse — but it must not be read as change.
   const ejs = require('ejs');
-  const scoped = { id: 7, sp_name: 'SP', tenant_id: 't', started_at: '2026-08-26T00:00:00Z', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]', total_workspaces: 1 };
-  const wide = { id: 6, sp_name: 'SP', tenant_id: 't', started_at: '2026-08-25T00:00:00Z', scope_kind: 'tenant', total_workspaces: 48 };
+  const scoped = { id: 7, sp_name: 'SP', sp_run_number: 7, tenant_id: 't', started_at: '2026-08-26T00:00:00Z', scope_kind: 'workspaces', scope_workspaces: '[{"id":"a","name":"Finance"}]', total_workspaces: 1 };
+  const wide = { id: 6, sp_name: 'SP', sp_run_number: 6, tenant_id: 't', started_at: '2026-08-25T00:00:00Z', scope_kind: 'tenant', total_workspaces: 48 };
   const base = {
     user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis/compare',
     breadcrumb: [], availableRuns: [], globalRun: null, title: 'Compare Runs',
@@ -5020,8 +5021,8 @@ test('comparing two scans of different coverage says so before the numbers', asy
   assert.doesNotMatch(matched, /did not cover the same thing/);
 
   // And the picker leads with the coverage either way.
-  assert.match(mismatched, /\[SC\] Run #7/);
-  assert.match(mismatched, /\[WT\] Run #6/);
+  assert.match(mismatched, /\[SC\] SP #7/);
+  assert.match(mismatched, /\[WT\] SP #6/);
 });
 
 // ── Fabric artifact naming conventions ──
@@ -7620,166 +7621,6 @@ test('every view compiles with EJS, so a malformed tag cannot reach production',
   });
 });
 
-// ── Since the last scan ──
-
-function changesFixture() {
-  const ann = { name: 'Ann', email: 'ann@contoso.com', role: 'Admin', type: 'User' };
-  const bob = { name: 'Bob', email: 'bob@contoso.com', role: 'Member', type: 'User' };
-  const guest = { name: 'Gus', email: 'gus_fabrikam.com#EXT#@contoso.onmicrosoft.com', role: 'Viewer', type: 'User' };
-  const by = (name, upn) => ({ name, upn });
-  const from = { workspaces: [
-    { id: 'w1', name: 'Sales', users: [ann, bob], items: [
-      { id: 'i1', name: 'R1', type: 'Report', lastUpdated: '2026-11-01T00:00:00Z', creator: by('Ann', 'ann@contoso.com') },
-      { id: 'i2', name: 'M1', type: 'SemanticModel', lastUpdated: '2026-11-01T00:00:00Z', creator: by('Bob', 'bob@contoso.com') },
-    ] },
-    { id: 'w2', name: 'Retired', users: [ann], items: [] },
-  ] };
-  const to = { workspaces: [
-    { id: 'w1', name: 'Sales', users: [bob, guest], items: [
-      { id: 'i1', name: 'R1', type: 'Report', lastUpdated: '2026-11-20T00:00:00Z', creator: by('Ann', 'ann@contoso.com') },
-      { id: 'i2', name: 'M1', type: 'SemanticModel', lastUpdated: '2026-11-01T00:00:00Z', creator: by('Bob', 'bob@contoso.com') },
-      { id: 'i3', name: 'LH', type: 'Lakehouse', lastUpdated: '2026-11-21T00:00:00Z', creator: by('Bob', 'bob@contoso.com') },
-    ] },
-    { id: 'w3', name: 'New Team', users: [ann], items: [] },
-  ] };
-  return { from, to };
-}
-
-test('since the last scan compares only with an earlier scan of the same tenant and scope', () => {
-  const { comparableRuns, previousRun } = require('../src/services/scanChangesService');
-  const runs = [
-    { id: 5, tenant_id: 'T1', status: 'completed', started_at: '2026-11-26T06:00:00Z' },
-    { id: 4, tenant_id: 'T2', status: 'completed', started_at: '2026-11-25T06:00:00Z' },
-    { id: 3, tenant_id: 'T1', status: 'completed', started_at: '2026-11-24T06:00:00Z', scope_kind: 'workspaces', scope_workspaces: JSON.stringify([{ id: 'w1' }]) },
-    { id: 2, tenant_id: 'T1', status: 'failed', started_at: '2026-11-22T06:00:00Z' },
-    { id: 1, tenant_id: 'T1', status: 'completed', started_at: '2026-11-19T06:00:00Z' },
-  ];
-  assert.equal(previousRun(runs[0], runs).id, 1, 'another tenant, a failed scan and a scoped scan are all skipped');
-  assert.equal(previousRun(runs[4], runs), null, 'the first scan has nothing before it');
-  assert.deepEqual(comparableRuns(runs[0], runs).map(r => r.id), [1]);
-});
-
-test('since the last scan marks findings new, still open or resolved, and never resolves a removed workspace', () => {
-  const { buildScanChanges } = require('../src/services/scanChangesService');
-  const { from, to } = changesFixture();
-  const out = buildScanChanges({ toResults: to, fromResults: from, toRun: { started_at: '2026-11-26' }, fromRun: { started_at: '2026-11-19' } });
-  const find = (key, ws) => out.findings.rows.find(r => r.key === key && r.workspaceName === ws);
-
-  assert.equal(out.hasBaseline, true);
-  assert.equal(find('ownerless', 'Sales').status, 'new', 'Sales lost its only admin');
-  assert.equal(find('singleAdmin', 'Sales').status, 'resolved');
-  assert.equal(find('singleAdmin', 'New Team').status, 'new', 'a workspace that did not exist before raises new findings');
-  assert.ok(!out.findings.rows.some(r => r.workspaceName === 'Retired'), 'a deleted workspace is removed inventory, not a fixed finding');
-  assert.deepEqual(find('ownerless', 'Sales').owners, []);
-  assert.equal(out.summary.newFindings, out.findings.tally.new);
-  assert.equal(out.findings.rows[0].status, 'new', 'new findings come first');
-});
-
-test('since the last scan counts inventory, activity and access changes from the two scans only', () => {
-  const { buildScanChanges } = require('../src/services/scanChangesService');
-  const { from, to } = changesFixture();
-  const out = buildScanChanges({ toResults: to, fromResults: from, toRun: {}, fromRun: {} });
-
-  assert.deepEqual(out.inventory.workspaces, { now: 2, added: 1, removed: 1 });
-  assert.deepEqual(out.inventory.totals, { now: 3, added: 1, removed: 0, updated: 1 });
-  assert.deepEqual(out.summary.items, { now: 3, added: 1, removed: 0, updated: 1 });
-
-  const bob = out.people.active.find(p => p.name === 'Bob');
-  const ann = out.people.active.find(p => p.name === 'Ann');
-  assert.equal(bob.newItems, 1);
-  assert.equal(ann.updatedItems, 1, 'an update is credited to the creator, as the page says');
-
-  assert.equal(out.people.access.grantedCount, 1);
-  assert.equal(out.people.access.granted[0].guest, true);
-  assert.equal(out.people.access.removed[0].name, 'Ann');
-  assert.deepEqual(out.summary.guests, { now: 1, change: 1 });
-});
-
-test('since the last scan reports storage as not collected rather than as zero', () => {
-  const { buildScanChanges } = require('../src/services/scanChangesService');
-  const { from, to } = changesFixture();
-  const without = buildScanChanges({ toResults: to, fromResults: from, toRun: {}, fromRun: {} });
-  assert.equal(without.storage.collected, false);
-  assert.equal(without.summary.storage, null);
-
-  to.workspaces[0].storageSize = 5000;
-  to.workspaces[0].storageFiles = 9;
-  to.workspaces[0].storageItems = { i3: { size: 4000, files: 6, name: 'LH', type: 'Lakehouse' } };
-  const measured = buildScanChanges({ toResults: to, fromResults: from, toRun: {}, fromRun: {} });
-  assert.equal(measured.storage.total, 5000);
-  assert.equal(measured.storage.change, null, 'the earlier scan measured nothing, so there is no change to show');
-  assert.equal(measured.storage.byType[0].type, 'Lakehouse');
-
-  from.workspaces[0].storageSize = 1000;
-  const both = buildScanChanges({ toResults: to, fromResults: from, toRun: {}, fromRun: {} });
-  assert.equal(both.storage.change, 4000);
-  assert.equal(both.storage.growing[0].change, 4000);
-});
-
-test('since the last scan on a first scan shows the current state and invents no change', () => {
-  const { buildScanChanges } = require('../src/services/scanChangesService');
-  const { to } = changesFixture();
-  const out = buildScanChanges({ toResults: to, toRun: {} });
-  assert.equal(out.hasBaseline, false);
-  assert.equal(out.summary.newFindings, null);
-  assert.equal(out.summary.needAttention.change, null);
-  assert.equal(out.summary.items.added, null);
-  assert.ok(out.findings.rows.every(r => r.status === 'open'));
-  assert.equal(out.people.activeCount, 0);
-});
-
-test('scan trends plot only stored scans and need two of them', () => {
-  const { buildTrends, compareTenants } = require('../src/services/scanChangesService');
-  assert.equal(buildTrends([{ run_id: 1, run_started_at: '2026-11-19', total_items: 4 }]).available, false);
-  const trend = buildTrends([
-    { run_id: 3, run_started_at: '2026-11-26', total_workspaces: 3, total_items: 9 },
-    { run_id: 1, run_started_at: '2026-11-12', total_workspaces: 2, total_items: 4 },
-    { run_id: 2, run_started_at: '2026-11-19', total_workspaces: 2, total_items: 7 },
-  ]);
-  const items = trend.metrics.find(m => m.label === 'Items');
-  assert.deepEqual(items.values, [4, 7, 9], 'oldest first');
-  assert.equal(items.change, 2);
-  assert.equal(items.points.split(' ').length, 3);
-  assert.ok(!trend.metrics.some(m => m.label === 'OneLake storage'), 'storage is left out when no scan measured it');
-
-  const rows = compareTenants(
-    [{ latest: { id: 9, sp_name: 'Contoso' }, previous: { id: 8 } }, { latest: { id: 7, sp_name: 'Fabrikam' }, previous: null }],
-    new Map([[9, { total_workspaces: 10, total_storage_size: 0 }], [8, { total_workspaces: 8 }], [7, { total_workspaces: 3 }]]),
-  );
-  assert.equal(rows[0].workspacesChange, 2);
-  assert.equal(rows[0].storage, null, 'zero storage means it was not measured');
-  assert.equal(rows[1].workspacesChange, null);
-});
-
-test('the Since Last Scan page renders a comparison and a first scan', async () => {
-  const ejs = require('ejs');
-  const { buildScanChanges, buildTrends } = require('../src/services/scanChangesService');
-  const { from, to } = changesFixture();
-  const locals = {
-    user: { name: 'T' }, currentUser: { name: 'T', email: 't@example.com' }, title: 'Since the Last Scan',
-    currentPath: '/governance/changes', pagePath: '/governance/changes', breadcrumb: [],
-    availableRuns: [], globalRun: null, hideRunSelector: true, noData: false,
-    visibleSections: [{ key: 'governance', group: 'Overview', href: '/governance', label: 'Governance Overview', prefixes: ['/governance'] }, { key: 'workspaces', group: 'Governance', href: '/workspaces', label: 'Workspaces', prefixes: ['/workspaces'] }],
-    run: { id: 5, started_at: '2026-11-26T06:00:00Z', sp_name: 'Contoso' },
-    fromRun: { id: 4, started_at: '2026-11-19T06:00:00Z' },
-    candidates: [{ id: 4, started_at: '2026-11-19T06:00:00Z' }, { id: 2, started_at: '2026-11-12T06:00:00Z' }],
-    baselineError: null,
-    changes: buildScanChanges({ toResults: to, fromResults: from, toRun: {}, fromRun: {} }),
-    trends: buildTrends([]), tenants: [],
-  };
-  const html = await ejs.renderFile('src/views/governance/changes.ejs', locals);
-  assert.match(html, /Since the Last Scan/);
-  assert.match(html, /data-status="new"/);
-  assert.match(html, /<option value="4" selected>/);
-  assert.match(html, /href="\/workspaces\/w1\?runId=5"/);
-  assert.match(html, /Not collected in this scan/);
-  assert.match(html, /href="\/governance\/changes"[^>]*>[\s\S]*?Since Last Scan/, 'the sidebar offers the page to anyone who can see the overview');
-
-  const first = await ejs.renderFile('src/views/governance/changes.ejs', { ...locals, fromRun: null, candidates: [], changes: buildScanChanges({ toResults: to, toRun: {} }) });
-  assert.match(first, /No earlier scan to compare with/);
-  assert.doesNotMatch(first, /data-status="new"/);
-});
-
 // ── Governance Outcome (fixed rules, no generated text) ──
 
 const SOFTWAREONE = '77f4d6ee-95d6-499c-bdfc-786d81583d02';
@@ -7797,7 +7638,7 @@ function outcomeFixture() {
   filler.forEach((items, i) => workspaces.push(ws('ws_' + i, items, 2, { sku: i < 9 ? null : (i < 25 ? 'F2' : 'F8') })));
   workspaces.push(ws('Microsoft Fabric Capacity Metrics', 0 + 1, 2), ws('Microsoft Fabric Capacity Metrics 2', 1, 2));
   workspaces.push(ws('ws_poc_adventureworks', 0, 2), ws('test_gn', 0, 1));
-  const run = { run_id: 37, tenant_id: SOFTWAREONE, sp_name: 'SoftwareOne', status: 'completed', started_at: new Date('2026-11-26T09:20:00Z'), completed_at: new Date('2026-11-26T09:52:30Z'), run_by: 'scheduler', scope_kind: 'tenant' };
+  const run = { run_id: 37, sp_id: 1, sp_run_number: 12, tenant_id: SOFTWAREONE, sp_name: 'SoftwareOne', status: 'completed', started_at: new Date('2026-11-26T09:20:00Z'), completed_at: new Date('2026-11-26T09:52:30Z'), run_by: 'scheduler', scope_kind: 'tenant' };
   const totals = {
     total_workspaces: '63', total_items: '578', total_reports: '45', total_datasets: '94', total_dashboards: '0', total_dataflows: '6',
     total_lakehouses: '48', total_notebooks: '104', total_pipelines: '76', total_warehouses: '67', total_users: '27', creator_count: '17',
@@ -7805,7 +7646,7 @@ function outcomeFixture() {
     total_storage_files: '0', storage_scanned_count: '0', tenant_settings_total: '189', tenant_settings_enabled: '120', tenant_settings_disabled: '69',
     tenant_settings_group_scoped: '3', tenant_settings_delegated: '21', captured_at: new Date('2026-11-26T09:52:31Z'),
   };
-  const trendRow = (id, at, w, items, wh, nb, pl, st) => ({ run_id: id, completed_at: new Date(at), total_workspaces: w, total_items: items, total_warehouses: wh, total_notebooks: nb, total_pipelines: pl, tenant_settings_total: st });
+  const trendRow = (id, at, w, items, wh, nb, pl, st) => ({ run_id: id, sp_id: 1, sp_name: 'SoftwareOne', sp_run_number: { 24: 7, 28: 9, 29: 10, 36: 11, 37: 12 }[id], completed_at: new Date(at), total_workspaces: w, total_items: items, total_warehouses: wh, total_notebooks: nb, total_pipelines: pl, tenant_settings_total: st });
   return {
     run,
     data: {
@@ -7813,7 +7654,7 @@ function outcomeFixture() {
       workspacesByType: [{ type: 'Workspace', workspaces: 37 }, { type: 'AdminWorkspace', workspaces: 1 }, { type: 'Personal', workspaces: 25 }],
       skus: [{ sku: 'F8', workspaces: 12, items: 407, pct_items: 70.4 }, { sku: 'F2', workspaces: 16, items: 120, pct_items: 20.8 }, { sku: '(not recorded)', workspaces: 9, items: 51, pct_items: 8.8 }],
       workspaces,
-      accessRun: { access_run_id: 36, access_completed_at: new Date('2026-11-25T18:10:00Z') },
+      accessRun: { access_run_id: 36, sp_id: 1, sp_name: 'SoftwareOne', sp_run_number: 11, access_completed_at: new Date('2026-11-25T18:10:00Z') },
       access: [
         { principal_type: 'User', access_right: 'Admin', assignments: 55, distinct_principals: 12 },
         { principal_type: 'User', access_right: 'Member', assignments: 10, distinct_principals: 6 },
@@ -7827,7 +7668,7 @@ function outcomeFixture() {
         trendRow(36, '2026-11-25T18:10:00Z', 62, 560, 36, 102, 75, 189),
         trendRow(37, '2026-11-26T09:52:30Z', 63, 578, 67, 104, 76, 189),
       ],
-      deletions: Array.from({ length: 28 }, (_, i) => ({ workspace_name: 'old_' + i, state: 'Deleted', deleted_at: new Date(Date.UTC(2026, 10, 1 + (i % 25))), run_id: 29 })),
+      deletions: Array.from({ length: 28 }, (_, i) => ({ workspace_name: 'old_' + i, state: 'Deleted', deleted_at: new Date(Date.UTC(2026, 10, 1 + (i % 25))), run_id: 29, sp_id: 1, sp_name: 'SoftwareOne', sp_run_number: 10 })),
     },
   };
 }
@@ -7842,6 +7683,8 @@ function buildFixtureOutcome(mutate) {
 test('governance outcome: KPIs, types and SKUs are the stored values, read as numbers', () => {
   const o = buildFixtureOutcome();
   assert.equal(o.run.id, 37);
+  assert.deepEqual([o.run.principal, o.run.number, o.run.label], ['SoftwareOne', 12, 'SoftwareOne #12'], 'a scan is named by principal and number');
+  assert.equal(o.findings[0].scan.label, 'SoftwareOne #12');
   assert.equal(o.dataAsOf, '2026-11-26T09:52:30.000Z');
   assert.deepEqual([o.kpis.workspaces, o.kpis.items, o.kpis.users, o.kpis.creators, o.kpis.explorers, o.kpis.capacities], [63, 578, 27, 17, 10, 11]);
   assert.deepEqual(o.kpis.settings, { total: 189, enabled: 120, disabled: 69, groupScoped: 3, delegated: 21 });
@@ -7877,12 +7720,16 @@ test('governance outcome: access, trend, deletions and data gaps follow the spec
   assert.equal(o.access.isLatestRun, false);
   assert.deepEqual([o.access.totalAssignments, o.access.adminAssignments, o.access.adminSharePct, o.access.groupAssignments], [108, 96, 88.9, 0]);
   assert.deepEqual(o.trend.runs.map(r => r.runId), [24, 28, 29, 36, 37]);
+  assert.deepEqual(o.trend.runs.map(r => r.label), ['SoftwareOne #7', 'SoftwareOne #9', 'SoftwareOne #10', 'SoftwareOne #11', 'SoftwareOne #12']);
+  assert.equal(o.findings.find(f => f.id === 'T1').detail, 'SoftwareOne #12 compared with SoftwareOne #11 (threshold ±25%).');
+  assert.equal(o.deletions[0].scan, 'SoftwareOne #10');
   assert.deepEqual(o.trend.runs[4].changes.total_warehouses, { abs: 31, pct: 86.1, hit: true });
   assert.equal(o.deletions.length, 28);
   const gapIds = o.gaps.map(g => g.id);
   assert.ok(gapIds.includes('storage-not-collected'));
   assert.ok(gapIds.includes('access-older-run'));
-  assert.match(o.gaps.find(g => g.id === 'access-older-run').message, /^Access data from run 36 \(2026-11-25 18:10:00 UTC\); latest run has no access data\.$/);
+  assert.equal(o.gaps.find(g => g.id === 'access-older-run').message, 'Access data from SoftwareOne #11 (2026-11-25 18:10:00 UTC); latest run has no access data.');
+  assert.equal(o.access.label, 'SoftwareOne #11');
   assert.ok(gapIds.includes('sku-not-recorded'));
 });
 
@@ -7940,7 +7787,7 @@ test('governance outcome: cached per tenant and run, regenerated by a new scan o
   let reads = 0;
   const repo = {
     latestRun: async tenantId => (tenantId === SOFTWAREONE ? latest : null),
-    readOutcomeData: async (tenantId, runId) => { reads += 1; assert.equal(tenantId, SOFTWAREONE); assert.equal(runId, latest.run_id); return fx.data; },
+    readOutcomeData: async (tenantId, run) => { reads += 1; assert.equal(tenantId, SOFTWAREONE); assert.equal(run.run_id, latest.run_id); assert.equal(run.sp_id, 1, 'the principal decides the access fallback and trend'); return fx.data; },
   };
   assert.equal((await service.getOutcome(OTHER_TENANT, { repo })).status, 404, 'No completed tenant scan');
   const first = await service.getOutcome(SOFTWAREONE, { repo });
@@ -7950,10 +7797,10 @@ test('governance outcome: cached per tenant and run, regenerated by a new scan o
   assert.equal(first.outcome.tenant.id, SOFTWAREONE);
   await service.getOutcome(SOFTWAREONE, { repo, force: true });
   assert.equal(reads, 2, 'Regenerate reads again');
-  latest = { ...fx.run, run_id: 38 };
+  latest = { ...fx.run, run_id: 38, sp_run_number: 13 };
   const after = await service.getOutcome(SOFTWAREONE, { repo });
   assert.equal(reads, 3, 'a new scan makes the cached outcome stale');
-  assert.equal(after.outcome.run.id, 38);
+  assert.equal(after.outcome.run.label, 'SoftwareOne #13');
   const generated = await service.generateAfterScan(SOFTWAREONE, { repo });
   assert.equal(generated.generated, true);
   assert.deepEqual(await service.generateAfterScan(SOFTWAREONE, { scopeKind: 'workspaces', repo }), { generated: false, reason: 'scoped scan' });
@@ -8021,4 +7868,135 @@ test('Home shows the governance outcome for a tenant the reader may see, and not
   assert.match(shown, /id="goTenant"/);
   const hidden = await ejs.renderFile('src/views/home.ejs', { ...locals, outcomeTenants: [], outcomeTenantId: null });
   assert.doesNotMatch(hidden, /governanceOutcome/);
+});
+
+// ── Scans numbered per service principal ──
+
+test('a scan is named by its service principal and that principal\'s own number', () => {
+  const { runLabel, runNumber } = require('../src/services/runLabelService');
+  assert.equal(runLabel({ id: 212, sp_id: 3, sp_name: 'SoftwareOne', sp_run_number: 5 }), 'SoftwareOne #5');
+  assert.equal(runLabel({ id: 9, sp_id: null, sp_name: null, sp_run_number: 2 }), 'Managed identity #2');
+  assert.equal(runLabel({ id: 9, sp_id: 4, sp_run_number: 1 }), 'Principal 4 #1');
+  assert.equal(runLabel({ id: 77, sp_name: 'Contoso' }), 'Contoso (unnumbered, id 77)', 'an id is never passed off as a scan number');
+  assert.equal(runNumber({ sp_run_number: '0' }), null);
+});
+
+test('scan numbers start at 1 per principal, follow start order, and are unique per principal', () => {
+  const db = require('../src/services/databaseService');
+  const { RUN_NUMBER_BACKFILL_SQL, ASSIGN_RUN_NUMBER_SQL } = db._runNumbers;
+  // Backfill: per principal, oldest first, after any number it already has, unnumbered rows only.
+  assert.match(RUN_NUMBER_BACKFILL_SQL, /ROW_NUMBER\(\) OVER \(PARTITION BY sp_id ORDER BY started_at, id\)/);
+  assert.match(RUN_NUMBER_BACKFILL_SQL, /WHERE sp_run_number IS NULL/);
+  assert.match(RUN_NUMBER_BACKFILL_SQL, /ISNULL\(b\.last_number, 0\) \+ t\.position/);
+  // New scan: the principal's next number, under a range lock so two scans cannot share it.
+  assert.match(ASSIGN_RUN_NUMBER_SQL, /MAX\(x\.sp_run_number\), 0\) \+ 1/);
+  assert.match(ASSIGN_RUN_NUMBER_SQL, /WITH \(UPDLOCK, HOLDLOCK\)/);
+  assert.match(ASSIGN_RUN_NUMBER_SQL, /x\.sp_id = r\.sp_id OR \(x\.sp_id IS NULL AND r\.sp_id IS NULL\)/);
+  assert.match(ASSIGN_RUN_NUMBER_SQL, /r\.sp_run_number IS NULL/, 'a numbered scan is never renumbered');
+  const source = require('fs').readFileSync('src/services/databaseService.js', 'utf8');
+  assert.match(source, /CREATE UNIQUE INDEX UX_analysis_runs_sp_number ON analysis_runs \(sp_id, sp_run_number\)/);
+  assert.match(source, /RUN_META_COLUMNS = `[^`]*sp_run_number/);
+
+  // What the backfill does, on rows: two principals, out-of-order ids, one already numbered.
+  const rows = [
+    { id: 1, sp_id: 1, started_at: '2026-11-02', n: null }, { id: 2, sp_id: 2, started_at: '2026-11-01', n: null },
+    { id: 3, sp_id: 1, started_at: '2026-11-01', n: null }, { id: 4, sp_id: 2, started_at: '2026-11-03', n: null },
+    { id: 5, sp_id: 3, started_at: '2026-11-05', n: 4 }, { id: 6, sp_id: 3, started_at: '2026-11-06', n: null },
+  ];
+  const last = {};
+  rows.forEach(r => { if (r.n) last[r.sp_id] = Math.max(last[r.sp_id] || 0, r.n); });
+  const pending = rows.filter(r => r.n === null).sort((a, b) => a.sp_id - b.sp_id || a.started_at.localeCompare(b.started_at) || a.id - b.id);
+  const position = {};
+  pending.forEach(r => { position[r.sp_id] = (position[r.sp_id] || 0) + 1; r.n = (last[r.sp_id] || 0) + position[r.sp_id]; });
+  assert.deepEqual(rows.map(r => r.sp_id + '#' + r.n), ['1#2', '2#1', '1#1', '2#2', '3#4', '3#5']);
+});
+
+test('the scan selector and pages name scans by principal and number', async () => {
+  const ejs = require('ejs');
+  const runs = [
+    { id: 212, sp_id: 3, sp_name: 'SoftwareOne', sp_run_number: 5, status: 'completed', started_at: '2026-11-26T09:00:00Z', scopeTag: 'WT', scopeTagTitle: 'WT' },
+    { id: 199, sp_id: 3, sp_name: 'SoftwareOne', sp_run_number: 4, status: 'completed', started_at: '2026-11-25T09:00:00Z', scopeTag: 'WT', scopeTagTitle: 'WT' },
+  ];
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/governance', breadcrumb: [], title: 'x',
+    availableRuns: runs, globalRun: runs[0], selectedRunId: 212, hideRunSelector: false,
+    visibleSections: [], permissions: { isAdmin: true },
+  });
+  assert.match(html, /<option value="212" selected[^>]*>\[WT\] SoftwareOne #5 &mdash;/);
+  assert.match(html, /<option value="199"[^>]*>\[WT\] SoftwareOne #4 &mdash;/);
+  assert.doesNotMatch(html, /Run#212|Run #212/);
+});
+
+test('Since Last Scan pairs a scan with the same principal\'s previous scan of the same scope', () => {
+  const { comparableRuns, previousOfPrincipal, defaultPair } = require('../src/routes/compareRuns');
+  const T = SOFTWAREONE;
+  const runs = [
+    { id: 50, sp_id: 1, sp_name: 'SoftwareOne', sp_run_number: 3, tenant_id: T, status: 'completed', started_at: '2026-11-26' },
+    { id: 49, sp_id: 2, sp_name: 'Backup SP', sp_run_number: 8, tenant_id: T, status: 'completed', started_at: '2026-11-25' },
+    { id: 48, sp_id: 1, sp_name: 'SoftwareOne', sp_run_number: 2, tenant_id: T, status: 'completed', started_at: '2026-11-24', scope_kind: 'workspaces', scope_workspaces: JSON.stringify([{ id: 'w1' }]) },
+    { id: 40, sp_id: 1, sp_name: 'SoftwareOne', sp_run_number: 1, tenant_id: T, status: 'completed', started_at: '2026-11-20' },
+    { id: 41, sp_id: 1, sp_name: 'SoftwareOne', sp_run_number: 4, tenant_id: T, status: 'failed', started_at: '2026-11-27' },
+  ];
+  const all = comparableRuns({ isAdmin: true }, runs);
+  assert.ok(!all.some(r => r.id === 41), 'only completed scans');
+  assert.equal(previousOfPrincipal(all.find(r => r.id === 50), all).id, 40, 'not the other principal\'s newer scan, not the scoped one');
+  assert.equal(previousOfPrincipal(all.find(r => r.id === 40), all), null);
+  const pair = defaultPair(all, { id: 50 });
+  assert.deepEqual([pair.to.id, pair.from.id], [50, 40]);
+
+  const reader = resolveFor({ role: 'user', is_active: true, tenantIds: [1, 2], sectionKeys: [], tenantSections: { 1: ['governance'], 2: ['workspaces'] } });
+  assert.deepEqual(comparableRuns(reader, runs, 'governance').map(r => r.id).sort(), [40, 48, 50], 'only principals where the reader holds the section');
+});
+
+test('Compare runs refuses scans the reader cannot see, on the page and on the details endpoint', async () => {
+  const { comparePage, compareDetails } = require('../src/routes/compareRuns');
+  const visible = [{ id: 50, sp_id: 1, sp_name: 'SoftwareOne', sp_run_number: 3, tenant_id: SOFTWAREONE, status: 'completed', started_at: '2026-11-26' }];
+  function fakeResponse() {
+    return {
+      locals: { availableRuns: visible, globalRun: visible[0] }, statusCode: 200, rendered: null, body: null,
+      status(code) { this.statusCode = code; return this; },
+      render(view, model) { this.rendered = { view, model }; return this; },
+      json(body) { this.body = body; return this; },
+    };
+  }
+  const page = comparePage({ basePath: '/analysis/compare', detailsPath: '/analysis/compare/details', title: 'Compare Runs' });
+  const res = fakeResponse();
+  await page({ query: { from: '50', to: '999' }, permissions: { isAdmin: true }, user: {} }, res);
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.rendered.model.error, 'You do not have access to one of those scans.');
+
+  const details = compareDetails();
+  const jres = fakeResponse();
+  await details({ query: { from: '999', to: '50' }, permissions: { isAdmin: true } }, jres);
+  assert.equal(jres.statusCode, 403);
+  assert.equal(jres.body.success, false);
+
+  // Since Last Scan with nothing earlier: says so instead of comparing with anything.
+  const since = comparePage({ basePath: '/governance/changes', detailsPath: '/governance/changes/details', section: 'governance', title: 'Since Last Scan', defaultToLatest: true });
+  const sres = fakeResponse();
+  await since({ query: {}, permissions: { isAdmin: true }, user: {} }, sres);
+  assert.equal(sres.rendered.view, 'analysis/compare');
+  assert.equal(sres.rendered.model.compare.basePath, '/governance/changes');
+  assert.match(sres.rendered.model.notice, /^SoftwareOne #3 is the first whole-tenant scan of this principal/);
+});
+
+test('the compare view posts to the page it is shown on and names scans by principal and number', async () => {
+  const ejs = require('ejs');
+  const { scopeTag, scopeTagTitle, describeScope, scopeFromRow } = require('../src/services/analysisScopeService');
+  const runs = [
+    { id: 50, sp_id: 1, sp_name: 'SoftwareOne', sp_run_number: 3, tenant_id: SOFTWAREONE, status: 'completed', started_at: '2026-11-26T06:00:00Z' },
+    { id: 40, sp_id: 1, sp_name: 'SoftwareOne', sp_run_number: 1, tenant_id: SOFTWAREONE, status: 'completed', started_at: '2026-11-20T06:00:00Z' },
+  ];
+  const html = await ejs.renderFile('src/views/analysis/compare.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/governance/changes', breadcrumb: [], title: 'Since Last Scan',
+    availableRuns: [], globalRun: null, hideRunSelector: true,
+    runs, fromRun: runs[1], toRun: runs[0], metrics: [{ key: 'totalWorkspaces', label: 'Workspaces', from: 3, to: 4, delta: 1, pct: 33.3, changed: true }],
+    error: null, notice: null, tenantSettingsComparable: true, scopeTag, scopeTagTitle, describeScope, scopeFromRow,
+    compare: { basePath: '/governance/changes', detailsPath: '/governance/changes/details', title: 'Since Last Scan', subtitle: 'x', backHref: null },
+  });
+  assert.match(html, /<form method="get" action="\/governance\/changes"/);
+  assert.match(html, /"\/governance\/changes\/details" \+ '\?from='/);
+  assert.match(html, /\[WT\] SoftwareOne #3 —/);
+  assert.match(html, /<th class="text-end">SoftwareOne #1<\/th>/);
+  assert.doesNotMatch(html, /Run #50|Run #40/);
 });
