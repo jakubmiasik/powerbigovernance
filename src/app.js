@@ -10,6 +10,7 @@ const { parseEasyAuthUser, requireAuth } = require('./middleware/auth');
 const { securityHeaders, createRateLimiter } = require('./middleware/security');
 const { loadRuns } = require('./middleware/loadRuns');
 const { loadPermissions, requireSectionAccess } = require('./middleware/permissions');
+const { NAV_GROUPS } = require('./services/appSectionService');
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
@@ -65,7 +66,7 @@ app.use((req, res, next) => {
   const segments = req.path.split('/').filter(Boolean);
   const labelMap = {
     workspaces: 'Workspaces', governance: 'Governance', analysis: 'Run Analysis',
-    migrate: 'Migrate', capacities: 'Capacities', settings: 'Configuration',
+    migrate: 'Migrate Workspaces', capacities: 'Capacities', settings: 'Configuration',
     overview: 'Overview', users: 'Users', artifacts: 'Artifacts',
     reconciliation: 'Reconciliation', exceptions: 'Exceptions', rules: 'Rules', runs: 'Runs', sources: 'Sources',
     // Under /settings these two are pages of their own, not path noise.
@@ -79,6 +80,7 @@ app.use((req, res, next) => {
     breadcrumb.push({ label, href });
   });
   res.locals.breadcrumb = breadcrumb;
+  res.locals.navGroups = NAV_GROUPS;
   next();
 });
 

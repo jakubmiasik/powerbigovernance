@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
 const { buildUser360, summarizeTenantSettings } = require('../services/runMetricsService');
+const { computeWorkspaceInsights, FINDING_DEFS } = require('../services/workspaceInsightsService');
+const { loadNamingConvention } = require('../services/namingConventionStore');
 
 function normalizeArtifactType(type) {
   return (type || 'all').trim().toLowerCase();
@@ -55,6 +57,41 @@ async function loadGlobalResults(res) {
 }
 
 
+/**
+ * The findings Workspace Triage computes, for the overview to lead with.
+ *
+ * Same function, same thresholds and same scan date as the triage page, so the two
+ * screens can never disagree about how many workspaces need attention. Returns null
+ * (shown as "Not evaluated") rather than throwing: the inventory below the findings
+ * is still worth showing when the checks cannot run.
+ */
+async function overviewInsights(run, workspaces) {
+  try {
+    const namingConvention = await loadNamingConvention();
+    const insights = computeWorkspaceInsights({ workspaces }, {
+      namingConvention,
+      staleDays: Number.parseInt(process.env.WORKSPACE_STALE_DAYS, 10),
+      overSharedUsers: Number.parseInt(process.env.WORKSPACE_OVERSHARED_USERS, 10),
+      referenceDate: run.completed_at || run.started_at,
+    });
+
+    // Deletions recorded after the scan are overlaid, as on the triage page, so a
+    // workspace deleted since is not offered as something to go and fix.
+    let deletedIds = new Set();
+    try {
+      const states = await db.getWorkspaceStates();
+      deletedIds = new Set(states.filter(row => row.state === db.WORKSPACE_STATE_DELETED).map(row => row.workspace_id));
+    } catch (stateErr) {
+      console.warn('[Governance] Could not read workspace states:', stateErr.message);
+    }
+    insights.workspaces = insights.workspaces.map(ws => (deletedIds.has(ws.id) ? { ...ws, state: db.WORKSPACE_STATE_DELETED } : ws));
+    return insights;
+  } catch (err) {
+    console.warn('[Governance] Could not evaluate workspace findings:', err.message);
+    return null;
+  }
+}
+
 router.get('/', async (req, res) => {
   try {
     const { run, results } = await loadGlobalResults(res);
@@ -65,6 +102,7 @@ router.get('/', async (req, res) => {
         governance: null, workspaces: [], run: null,
         noData: true,
         creatorCount: 0, explorerCount: 0,
+        insights: null, findingDefs: FINDING_DEFS,
       });
     }
 
@@ -72,12 +110,14 @@ router.get('/', async (req, res) => {
     const users = buildUser360(allWorkspaces);
     const creatorCount = users.filter(u => (u.items || []).length > 0).length;
     const explorerCount = users.length - creatorCount;
+    const insights = await overviewInsights(run, allWorkspaces);
 
     res.render('governance/overview', {
       title: 'Governance Overview', user: req.user,
       governance: results.summary, workspaces: allWorkspaces, run,
       noData: false,
       creatorCount, explorerCount,
+      insights, findingDefs: FINDING_DEFS,
     });
   } catch (err) {
     res.render('error', { title: 'Error', user: req.user, message: err.message });

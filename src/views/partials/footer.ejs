@@ -1,17 +1,18 @@
-    </div><!-- /.page-content -->
+    </main><!-- /.page-content -->
 
     <footer class="app-footer">
-      Power BI Governance App &copy; <%= new Date().getFullYear() %> &nbsp;|&nbsp;
-      <span class="kbd-hint">?</span> Keyboard shortcuts
+      <span>Fabric Governance &copy; <%= new Date().getFullYear() %></span>
+      <span>Press <span class="kbd-hint">?</span> for keyboard shortcuts &middot; <span class="kbd-hint">Ctrl K</span> to search</span>
     </footer>
   </div><!-- /.main-content -->
 </div><!-- /.app-layout -->
 
-<!-- Toast container -->
-<div class="toast-container" id="toastContainer"></div>
+<!-- Toast container. A polite live region, so results are announced without
+     stealing focus from the work in progress. -->
+<div class="toast-container" id="toastContainer" role="status" aria-live="polite" aria-atomic="false"></div>
 
 <!-- Global reload overlay -->
-<div id="reloadOverlay" class="reload-overlay d-none">
+<div id="reloadOverlay" class="reload-overlay d-none" role="alert" aria-busy="true">
   <div class="reload-overlay-card">
     <div class="spinner-border text-primary me-2" role="status" aria-hidden="true"></div>
     <span id="reloadOverlayText">Reloading...</span>
@@ -19,7 +20,7 @@
 </div>
 
 <!-- Global confirmation modal -->
-<div class="modal fade" id="confirmActionModal" tabindex="-1" aria-hidden="true">
+<div class="modal fade" id="confirmActionModal" tabindex="-1" aria-hidden="true" aria-labelledby="confirmActionTitle">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-header">
@@ -36,22 +37,24 @@
 </div>
 
 <!-- Keyboard shortcuts modal -->
-<div class="modal fade" id="kbdModal" tabindex="-1">
+<div class="modal fade" id="kbdModal" tabindex="-1" aria-labelledby="kbdModalTitle" aria-hidden="true">
   <div class="modal-dialog modal-sm modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-header py-2">
-        <h6 class="modal-title">Keyboard Shortcuts</h6>
-        <button type="button" class="btn-close btn-close-sm" data-bs-dismiss="modal"></button>
+        <h2 class="modal-title" id="kbdModalTitle">Keyboard shortcuts</h2>
+        <button type="button" class="btn-close btn-close-sm" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
-      <div class="modal-body p-3" style="font-size:0.82rem;">
+      <div class="modal-body p-3 small">
         <table class="table table-sm mb-0">
           <tbody>
-            <tr><td><span class="kbd-hint">/</span></td><td>Focus search</td></tr>
+            <tr><td><span class="kbd-hint">Ctrl K</span></td><td>Search pages and workspaces</td></tr>
+            <tr><td><span class="kbd-hint">/</span></td><td>Focus the search on this page</td></tr>
             <tr><td><span class="kbd-hint">R</span></td><td>Refresh data</td></tr>
             <tr><td><span class="kbd-hint">G then H</span></td><td>Go to Home</td></tr>
             <tr><td><span class="kbd-hint">G then W</span></td><td>Go to Workspaces</td></tr>
             <tr><td><span class="kbd-hint">G then G</span></td><td>Go to Governance</td></tr>
             <tr><td><span class="kbd-hint">G then M</span></td><td>Go to Migrate</td></tr>
+            <tr><td><span class="kbd-hint">Esc</span></td><td>Close a details panel</td></tr>
             <tr><td><span class="kbd-hint">Ctrl+Shift+D</span></td><td>Toggle dark mode</td></tr>
             <tr><td><span class="kbd-hint">Ctrl+D</span></td><td>Toggle density</td></tr>
             <tr><td><span class="kbd-hint">?</span></td><td>Show this help</td></tr>
@@ -70,14 +73,25 @@ function showToast(message, type) {
   var toast = document.createElement('div');
   toast.className = 'toast-item toast-' + type;
   var iconMap = { success: 'bi-check-circle-fill text-success', error: 'bi-x-circle-fill text-danger', info: 'bi-info-circle-fill text-primary' };
-  toast.innerHTML = '<i class="bi ' + (iconMap[type] || iconMap.info) + '"></i><span>' + message + '</span>';
+  // Built as nodes rather than HTML: messages often carry text from the server or
+  // the Fabric API, and a toast must never be a way to inject markup.
+  var icon = document.createElement('i');
+  icon.className = 'bi ' + (iconMap[type] || iconMap.info);
+  icon.setAttribute('aria-hidden', 'true');
+  var text = document.createElement('span');
+  text.textContent = String(message === null || message === undefined ? '' : message);
+  toast.appendChild(icon);
+  toast.appendChild(text);
+  if (type === 'error') toast.setAttribute('role', 'alert');
   container.appendChild(toast);
+  // Errors stay long enough to be read; WCAG 2.2.1 asks for time to read.
+  var visibleFor = type === 'error' ? 8000 : 4000;
   setTimeout(function() {
     toast.style.opacity = '0';
     toast.style.transform = 'translateX(100%)';
     toast.style.transition = 'all .3s ease';
     setTimeout(function() { toast.remove(); }, 300);
-  }, 3500);
+  }, visibleFor);
 }
 
 // ──── Table filter (global helper) ────
@@ -187,28 +201,35 @@ if (confirmActionBtn) {
 }
 
 // ──── Sortable table headers ────
+// Every table sorts by clicking (or pressing Enter/Space on) a header. aria-sort
+// tells assistive technology which column is sorted and which way.
 document.addEventListener('DOMContentLoaded', function() {
   document.querySelectorAll('table').forEach(function(table) {
+    if (table.hasAttribute('data-no-sort')) return;
     var headers = table.querySelectorAll('thead th');
     headers.forEach(function(th, colIndex) {
-      if (th.textContent.trim() === '' || th.textContent.trim() === 'Actions' || th.textContent.trim() === 'Details') return;
-      th.style.cursor = 'pointer';
-      th.style.userSelect = 'none';
-      th.title = 'Click to sort';
+      var label = th.textContent.trim();
+      if (label === '' || label === 'Actions' || label === 'Details' || th.hasAttribute('data-no-sort')) return;
+      th.setAttribute('aria-sort', 'none');
+      th.setAttribute('tabindex', '0');
+      th.title = 'Sort by ' + label;
       var sortIcon = document.createElement('i');
       sortIcon.className = 'bi bi-chevron-expand ms-1 small text-muted';
+      sortIcon.setAttribute('aria-hidden', 'true');
       th.appendChild(sortIcon);
 
-      th.addEventListener('click', function() {
+      function sortBy() {
         var tbody = table.querySelector('tbody');
         if (!tbody) return;
-        var rows = Array.from(tbody.querySelectorAll('tr'));
-        var asc = th.getAttribute('data-sort-dir') !== 'asc';
+        var rows = Array.from(tbody.querySelectorAll('tr')).filter(function(r) { return !r.classList.contains('grid-empty'); });
+        var asc = th.getAttribute('aria-sort') !== 'ascending';
         headers.forEach(function(h) {
           var icon = h.querySelector('i.bi');
-          if (icon) icon.className = 'bi bi-chevron-expand ms-1 small text-muted';
+          if (icon && h.hasAttribute('aria-sort')) icon.className = 'bi bi-chevron-expand ms-1 small text-muted';
+          if (h.hasAttribute('aria-sort')) h.setAttribute('aria-sort', 'none');
           h.removeAttribute('data-sort-dir');
         });
+        th.setAttribute('aria-sort', asc ? 'ascending' : 'descending');
         th.setAttribute('data-sort-dir', asc ? 'asc' : 'desc');
         sortIcon.className = asc ? 'bi bi-chevron-up ms-1 small' : 'bi bi-chevron-down ms-1 small';
         rows.sort(function(a, b) {
@@ -222,6 +243,17 @@ document.addEventListener('DOMContentLoaded', function() {
           return asc ? cmp : -cmp;
         });
         rows.forEach(function(row) { tbody.appendChild(row); });
+        table.dispatchEvent(new CustomEvent('table:sorted', { bubbles: true }));
+      }
+
+      th.addEventListener('click', function(e) {
+        // Controls inside a header (a select-all checkbox) keep their own click.
+        if (e.target.closest('input, button, a, select')) return;
+        sortBy();
+      });
+      th.addEventListener('keydown', function(e) {
+        if (e.target !== th) return;
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sortBy(); }
       });
     });
   });
@@ -258,9 +290,10 @@ document.addEventListener('DOMContentLoaded', function() {
       return;
     }
 
-    // / — focus search
+    // / — focus this page's search (the global search has Ctrl+K)
     if (e.key === '/') {
-      var searchInput = document.querySelector('.table-search input, input[type="search"], input[placeholder*="earch"], input[placeholder*="ilter"]');
+      var searchInput = document.querySelector('.page-content [data-grid-search], .page-content .table-search input, .page-content input[type="search"], .page-content input[placeholder*="earch"], .page-content input[placeholder*="ilter"]')
+        || document.getElementById('globalSearch');
       if (searchInput) {
         e.preventDefault();
         searchInput.focus();
@@ -297,5 +330,6 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/js/app.js"></script>
+<script src="/js/ui.js"></script>
 </body>
 </html>
