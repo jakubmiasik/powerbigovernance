@@ -24,4 +24,13 @@ router.get('/', (req, res) => {
   });
 });
 
+// The onboarding that used to sit on Home, so Home is the governance outcome alone.
+router.get('/getting-started', (req, res) => {
+  res.render('getting-started', {
+    title: 'Getting started', user: req.user,
+    breadcrumb: [{ label: 'Home', href: '/' }, { label: 'Getting started', href: '/getting-started' }],
+    prerequisites: PREREQUISITES,
+  });
+});
+
 module.exports = router;

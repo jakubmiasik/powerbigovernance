@@ -1,15 +1,19 @@
 <%- include('../partials/header') %>
 <%
-  // Runs are grouped by tenant: a cross-tenant diff compares two different estates
-  // and reads as change when nothing actually changed.
-  var runsByTenant = {};
+  // Only one tenant's scans are ever listed: comparing two tenants would compare
+  // two different estates. Within the tenant, scans are grouped by principal.
+  var tenantList = typeof tenants !== 'undefined' && tenants ? tenants : [];
+  var currentTenant = typeof tenantId !== 'undefined' ? tenantId : null;
+  var runsByPrincipal = {};
   (runs || []).forEach(function(r) {
-    var key = r.tenant_id || 'Unknown tenant';
-    if (!runsByTenant[key]) runsByTenant[key] = [];
-    runsByTenant[key].push(r);
+    var key = r.sp_name || 'Managed identity';
+    if (!runsByPrincipal[key]) runsByPrincipal[key] = [];
+    runsByPrincipal[key].push(r);
   });
-  var tenantKeys = Object.keys(runsByTenant).sort();
-
+  var principalKeys = Object.keys(runsByPrincipal).sort();
+  var keyOf = typeof scopeKeyOf === 'function' ? scopeKeyOf : function(r) { return scopeTag(r) + ':' + describeScope(scopeFromRow(r)); };
+  var pd = '../../../packages/podavo-ui/ejs/';
+  var confirmState = typeof scopeConfirm !== 'undefined' && scopeConfirm ? scopeConfirm : null;
   // Shown both as Run Analysis → Compare Runs and as Overview → Since Last Scan.
   var cmp = typeof compare !== 'undefined' && compare ? compare : {
     basePath: '/analysis/compare', detailsPath: '/analysis/compare/details', title: 'Compare Runs',
@@ -49,41 +53,41 @@
 </div>
 
 <div class="card mb-4">
-  <div class="card-header"><i class="bi bi-sliders me-2"></i>Select Runs</div>
+  <div class="card-header"><i class="bi bi-sliders me-2"></i>Select scans</div>
   <div class="card-body">
-    <% if (!tenantKeys.length) { %>
+    <% if (!tenantList.length) { %>
       <p class="text-muted mb-0">No completed scans you can see yet. <a href="/analysis">Run an analysis</a> first.</p>
     <% } else { %>
-      <form method="get" action="<%= cmp.basePath %>" class="row g-2 align-items-end">
-        <div class="col-md-5">
-          <label class="form-label small" for="fromRunSelect">Baseline scan</label>
-          <select class="form-select form-select-sm" id="fromRunSelect" name="from" onchange="syncTenant('fromRunSelect')">
-            <% tenantKeys.forEach(function(tenant) { %>
-              <optgroup label="Tenant <%= tenant %>">
-                <% runsByTenant[tenant].forEach(function(r) { %>
-                  <option value="<%= r.id %>" data-tenant="<%= tenant %>" <%= fromRun && fromRun.id === r.id ? 'selected' : '' %>><%= optionLabel(r) %></option>
-                <% }) %>
-              </optgroup>
+      <form method="get" action="<%= cmp.basePath %>" class="row g-2 align-items-end" id="compareForm">
+        <div class="col-12">
+          <label class="form-label small" for="tenantSelect">Tenant</label>
+          <select class="form-select form-select-sm" id="tenantSelect" name="tenant"<%= tenantList.length === 1 ? ' disabled' : '' %>>
+            <% tenantList.forEach(function(t) { %>
+              <option value="<%= t.id %>" <%= t.id === currentTenant ? 'selected' : '' %>><%= t.label %> (<%= t.scans %> scan<%= t.scans === 1 ? '' : 's' %>)</option>
             <% }) %>
           </select>
+          <% if (tenantList.length === 1) { %><input type="hidden" name="tenant" value="<%= currentTenant %>"><% } %>
         </div>
-        <div class="col-md-5">
-          <label class="form-label small" for="toRunSelect">Compare with</label>
-          <select class="form-select form-select-sm" id="toRunSelect" name="to" onchange="syncTenant('toRunSelect')">
-            <% tenantKeys.forEach(function(tenant) { %>
-              <optgroup label="Tenant <%= tenant %>">
-                <% runsByTenant[tenant].forEach(function(r) { %>
-                  <option value="<%= r.id %>" data-tenant="<%= tenant %>" <%= toRun && toRun.id === r.id ? 'selected' : '' %>><%= optionLabel(r) %></option>
-                <% }) %>
-              </optgroup>
-            <% }) %>
-          </select>
-        </div>
+        <% ['from', 'to'].forEach(function(side) { var chosen = side === 'from' ? fromRun : toRun; %>
+          <div class="col-md-5">
+            <label class="form-label small" for="<%= side %>RunSelect"><%= side === 'from' ? 'Baseline scan' : 'Compare with' %></label>
+            <select class="form-select form-select-sm js-scan-select" id="<%= side %>RunSelect" name="<%= side %>">
+              <% principalKeys.forEach(function(principal) { %>
+                <optgroup label="<%= principal %>">
+                  <% runsByPrincipal[principal].forEach(function(r) { %>
+                    <option value="<%= r.id %>" data-scope-key="<%= keyOf(r) %>" data-scope-tag="<%= scopeTag(r) %>" data-scope="<%= typeof coverageText === 'function' ? coverageText(r) : describeScope(scopeFromRow(r)) %>" data-name="<%= scanName(r) %>" <%= chosen && chosen.id === r.id ? 'selected' : '' %>><%= optionLabel(r) %></option>
+                  <% }) %>
+                </optgroup>
+              <% }) %>
+            </select>
+          </div>
+        <% }) %>
         <div class="col-md-2">
-          <button type="submit" class="btn btn-primary btn-sm w-100"><i class="bi bi-arrow-left-right me-1"></i>Compare</button>
+          <button type="submit" class="btn btn-primary btn-sm w-100" id="compareBtn"><i class="bi bi-arrow-left-right me-1"></i>Compare</button>
         </div>
+        <input type="hidden" name="confirm" id="confirmField" value="" disabled>
       </form>
-      <div class="form-text mt-2"><i class="bi bi-info-circle me-1"></i>Scans are named by service principal and that principal's own scan number, and can only be compared within the same tenant.</div>
+      <div class="form-text mt-2" id="compareHint"><i class="bi bi-info-circle me-1"></i>Only scans of one tenant are listed, named by service principal and that principal's own scan number. Choose another tenant to compare its scans.</div>
     <% } %>
   </div>
 </div>
@@ -97,12 +101,17 @@
 
 <%
   // Two scans of different coverage produce differences that are about the scans,
-  // not about the estate. The page still shows them — refusing would be worse —
-  // but it must not let them be read as change.
-  var scopesDiffer = fromRun && toRun
-    && (scopeTag(fromRun) !== scopeTag(toRun)
-      || describeScope(scopeFromRow(fromRun)) !== describeScope(scopeFromRow(toRun)));
+  // not about the estate. Nothing is shown until the reader confirms in the dialog;
+  // once they have, this banner stays above the numbers.
+  var scopesDiffer = fromRun && toRun && metrics && metrics.length && keyOf(fromRun) !== keyOf(toRun);
 %>
+<% if (confirmState) { %>
+  <div class="alert alert-secondary d-flex flex-wrap align-items-center gap-2" id="confirmPending">
+    <i class="bi bi-shield-exclamation me-1"></i>
+    <span class="flex-grow-1">Not compared yet: <%= confirmState.from.label %> and <%= confirmState.to.label %> cover different workspaces.</span>
+    <button type="button" class="btn btn-sm btn-outline-primary" data-pd-dialog-open="scopeMismatchDialog">Review</button>
+  </div>
+<% } %>
 <% if (scopesDiffer) { %>
   <div class="alert alert-warning">
     <i class="bi bi-exclamation-triangle me-2"></i>
@@ -188,26 +197,83 @@
   </div>
 <% } %>
 
+<%
+  var dlgFrom = confirmState ? confirmState.from : { label: '', tag: '', scope: '' };
+  var dlgTo = confirmState ? confirmState.to : { label: '', tag: '', scope: '' };
+  function esc(v) { return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+  var dialogBody = '<p class="mb-2"><strong id="dlgFromName">' + esc(dlgFrom.label) + '</strong> <span class="pd-badge pd-badge--neutral" id="dlgFromTag">' + esc(dlgFrom.tag) + '</span> covered <strong id="dlgFromScope">' + esc(dlgFrom.scope) + '</strong>,'
+    + ' and <strong id="dlgToName">' + esc(dlgTo.label) + '</strong> <span class="pd-badge pd-badge--neutral" id="dlgToTag">' + esc(dlgTo.tag) + '</span> covered <strong id="dlgToScope">' + esc(dlgTo.scope) + '</strong>.</p>'
+    + '<p class="mb-0" style="color:var(--pd-text-muted)">Most of the difference between them will be what each scan looked at, not a change in the tenant: a scoped scan shows far fewer workspaces, items and users than a whole-tenant scan. For a like-for-like comparison, pick two scans with the same coverage.</p>';
+  var dialogFooter = '<button type="button" class="pd-btn" data-pd-dialog-close>Pick other scans</button>'
+    + '<button type="button" class="pd-btn pd-btn--primary" id="scopeConfirmBtn">Compare anyway</button>';
+%>
+<%- include(pd + 'dialog', { ui: { id: 'scopeMismatchDialog', title: confirmState ? confirmState.title : 'Compare scans with different coverage?', bodyHtml: dialogBody, footerHtml: dialogFooter } }) %>
+
 <script>
 var compareFrom = <%= fromRun ? fromRun.id : 'null' %>;
 var compareTo = <%= toRun ? toRun.id : 'null' %>;
 
-// Keep both pickers on one tenant: selecting a run switches the other side to the
-// most recent run of the same tenant when it currently points somewhere else.
-function syncTenant(changedId) {
-  var changed = document.getElementById(changedId);
-  var other = document.getElementById(changedId === 'fromRunSelect' ? 'toRunSelect' : 'fromRunSelect');
-  if (!changed || !other) return;
-  var tenant = changed.options[changed.selectedIndex].getAttribute('data-tenant');
-  var current = other.options[other.selectedIndex];
-  if (current && current.getAttribute('data-tenant') === tenant) return;
-  for (var i = 0; i < other.options.length; i++) {
-    if (other.options[i].getAttribute('data-tenant') === tenant && other.options[i].value !== changed.value) {
-      other.selectedIndex = i;
+var scopeConfirmed = <%= (typeof scopeConfirmed !== 'undefined' && scopeConfirmed) ? 'true' : 'false' %>;
+
+(function () {
+  var form = document.getElementById('compareForm');
+  if (!form) return;
+  var tenantSelect = document.getElementById('tenantSelect');
+  var fromSel = document.getElementById('fromRunSelect');
+  var toSel = document.getElementById('toRunSelect');
+  var confirmField = document.getElementById('confirmField');
+  var dialog = document.getElementById('scopeMismatchDialog');
+
+  // Another tenant: reload with that tenant's scans only; nothing of the previous
+  // tenant is carried over.
+  if (tenantSelect) tenantSelect.addEventListener('change', function () {
+    window.location.href = form.getAttribute('action') + '?tenant=' + encodeURIComponent(tenantSelect.value);
+  });
+
+  function chosen(sel) { return sel && sel.options[sel.selectedIndex]; }
+  function setText(id, value) { var el = document.getElementById(id); if (el) el.textContent = value; }
+
+  function openMismatch(a, b) {
+    var aTag = a.getAttribute('data-scope-tag'), bTag = b.getAttribute('data-scope-tag');
+    var title = dialog.querySelector('.pd-dialog-title');
+    if (title) title.textContent = (aTag === 'WT' || bTag === 'WT') ? 'Compare a whole-tenant scan with a scoped scan?' : 'Compare scans of different workspaces?';
+    setText('dlgFromName', a.getAttribute('data-name')); setText('dlgFromTag', aTag); setText('dlgFromScope', a.getAttribute('data-scope'));
+    setText('dlgToName', b.getAttribute('data-name')); setText('dlgToTag', bTag); setText('dlgToScope', b.getAttribute('data-scope'));
+    if (window.Podavo && Podavo.dialog) Podavo.dialog.open(dialog, document.getElementById('compareBtn'));
+    else if (dialog.showModal) dialog.showModal();
+  }
+
+  form.addEventListener('submit', function (e) {
+    var a = chosen(fromSel), b = chosen(toSel);
+    if (!a || !b) return;
+    if (a.value === b.value) {
+      e.preventDefault();
+      var hint = document.getElementById('compareHint');
+      if (hint) { hint.textContent = 'Pick two different scans of this tenant.'; hint.setAttribute('role', 'alert'); }
       return;
     }
-  }
-}
+    if (confirmField.disabled && a.getAttribute('data-scope-key') !== b.getAttribute('data-scope-key')) {
+      e.preventDefault();
+      openMismatch(a, b);
+    }
+  });
+
+  document.getElementById('scopeConfirmBtn').addEventListener('click', function () {
+    confirmField.disabled = false;
+    confirmField.value = '1';
+    if (window.Podavo && Podavo.dialog) Podavo.dialog.close(dialog); else dialog.close();
+    form.submit();
+  });
+
+  // Asked for by link (or by Since Last Scan) with different coverage: the server
+  // computed nothing and asks here first.
+  <% if (confirmState) { %>
+  window.addEventListener('load', function () {
+    if (window.Podavo && Podavo.dialog) Podavo.dialog.open(dialog, document.getElementById('compareBtn'));
+    else if (dialog.showModal) dialog.showModal();
+  });
+  <% } %>
+})();
 
 function escapeHtml(value) {
   return String(value == null ? '' : value)
@@ -353,7 +419,7 @@ async function loadDetails() {
   panel.innerHTML = '<div class="text-muted small d-flex align-items-center gap-2"><span class="spinner-border spinner-border-sm"></span> Comparing full run contents...</div>';
 
   try {
-    var resp = await fetch(<%- JSON.stringify(cmp.detailsPath) %> + '?from=' + compareFrom + '&to=' + compareTo);
+    var resp = await fetch(<%- JSON.stringify(cmp.detailsPath) %> + '?from=' + compareFrom + '&to=' + compareTo + (scopeConfirmed ? '&confirm=1' : ''));
     var data = await resp.json();
     if (!data.success) {
       panel.innerHTML = '<div class="alert alert-warning small mb-0"><i class="bi bi-exclamation-triangle me-1"></i>' + escapeHtml(data.message) + '</div>';

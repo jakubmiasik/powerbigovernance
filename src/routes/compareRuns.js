@@ -110,55 +110,125 @@ function defaultPair(runs, selectedRun) {
   return { to, from: previousOfPrincipal(to, runs) };
 }
 
+/** The tenants the reader has scans of, named by the principals that scanned them. */
+function tenantsOf(runs) {
+  const map = new Map();
+  for (const run of runs) {
+    const id = String(run.tenant_id || '');
+    if (!map.has(id)) map.set(id, { id, principals: new Set(), scans: 0 });
+    const entry = map.get(id);
+    entry.principals.add(run.sp_name || 'Managed identity');
+    entry.scans += 1;
+  }
+  return Array.from(map.values()).map(t => ({
+    id: t.id,
+    label: Array.from(t.principals).sort().join(', ') + (t.id ? ' · ' + t.id.slice(0, 8) + '…' : ''),
+    scans: t.scans,
+  })).sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/** "the whole tenant" or "2 workspaces: Finance, Sales Ops", to read inside a sentence. */
+function coverageText(run) {
+  const text = describeScope(scopeFromRow(run));
+  return /^whole tenant$/i.test(text) ? 'the whole tenant' : text;
+}
+
+/**
+ * Whether two scans looked at different things: a whole-tenant scan against a
+ * scoped one, or two scoped scans of different workspaces. Their difference is
+ * then mostly the difference in coverage, so it is only shown once confirmed.
+ */
+function scopeMismatch(fromRun, toRun) {
+  if (!fromRun || !toRun) return null;
+  const a = scopeKeyOf(fromRun);
+  const b = scopeKeyOf(toRun);
+  if (a === b) return null;
+  const kind = a === 'tenant' || b === 'tenant' ? 'tenant-vs-scoped' : 'different-workspaces';
+  return {
+    kind,
+    title: kind === 'tenant-vs-scoped' ? 'Compare a whole-tenant scan with a scoped scan?' : 'Compare scans of different workspaces?',
+    from: { label: runLabel(fromRun), tag: scopeTag(fromRun), scope: coverageText(fromRun) },
+    to: { label: runLabel(toRun), tag: scopeTag(toRun), scope: coverageText(toRun) },
+  };
+}
+
 // ── Handlers ──
 
 function comparePage({ basePath, detailsPath, section = null, title, subtitle, backHref = null, defaultToLatest = false }) {
   return async (req, res) => {
     try {
-      const runs = comparableRuns(req.permissions || res.locals.permissions, res.locals.availableRuns || [], section);
+      const all = comparableRuns(req.permissions || res.locals.permissions, res.locals.availableRuns || [], section);
       let fromId = Number.parseInt(req.query.from, 10);
       let toId = Number.parseInt(req.query.to, 10);
-      let notice = null;
+      const confirmed = req.query.confirm === '1';
+      const byId = id => all.find(run => run.id === id) || null;
 
-      if (defaultToLatest && !Number.isInteger(fromId) && !Number.isInteger(toId)) {
-        const pair = defaultPair(runs, res.locals.globalRun);
+      // One tenant at a time: the one asked for, else the one of the scan being
+      // compared, else the selected scan's, else the first the reader has.
+      const tenants = tenantsOf(all);
+      const wantedTenant = typeof req.query.tenant === 'string' ? req.query.tenant : null;
+      const anchorRun = byId(toId) || byId(fromId) || (res.locals.globalRun ? byId(res.locals.globalRun.id) : null);
+      const tenantId = (wantedTenant !== null && tenants.some(t => t.id === wantedTenant)) ? wantedTenant
+        : anchorRun ? String(anchorRun.tenant_id || '')
+          : (tenants[0] ? tenants[0].id : null);
+      const runs = all.filter(run => String(run.tenant_id || '') === tenantId);
+
+      let notice = null;
+      let error = null;
+      const explicit = Number.isInteger(fromId) || Number.isInteger(toId);
+      // Switching tenant drops the previous tenant's scans. A pair from two tenants
+      // in the address itself is refused below, with the reason.
+      if (wantedTenant !== null) {
+        if (Number.isInteger(fromId) && byId(fromId) && !runs.some(run => run.id === fromId)) fromId = NaN;
+        if (Number.isInteger(toId) && byId(toId) && !runs.some(run => run.id === toId)) toId = NaN;
+      }
+
+      // Preselect the latest scan and the same principal's previous one; Since Last
+      // Scan also compares them straight away.
+      const pair = defaultPair(runs, res.locals.globalRun && runs.some(run => run.id === res.locals.globalRun.id) ? res.locals.globalRun : null);
+      let compareNow = Number.isInteger(fromId) && Number.isInteger(toId);
+      if (!Number.isInteger(fromId) && !Number.isInteger(toId)) {
         if (pair.to) toId = pair.to.id;
         if (pair.from) fromId = pair.from.id;
-        else if (pair.to) notice = runLabel(pair.to) + ' is the first ' + (scopeKeyOf(pair.to) === 'tenant' ? 'whole-tenant' : 'scoped') + ' scan of this principal, so there is nothing earlier to compare it with yet.';
+        compareNow = defaultToLatest && !explicit && !!pair.from;
+        if (defaultToLatest && pair.to && !pair.from) {
+          notice = runLabel(pair.to) + ' is the first ' + (scopeKeyOf(pair.to) === 'tenant' ? 'whole-tenant' : 'scoped') + ' scan of this principal, so there is nothing earlier to compare it with yet.';
+        }
       }
 
       const base = {
-        title, user: req.user, runs,
-        scopeTag, scopeTagTitle, describeScope, scopeFromRow,
-        fromRun: null, toRun: null, metrics: [], error: null, notice,
+        title, user: req.user, runs, tenants, tenantId,
+        scopeTag, scopeTagTitle, describeScope, scopeFromRow, scopeKeyOf, coverageText,
+        fromRun: Number.isInteger(fromId) ? byId(fromId) : null,
+        toRun: Number.isInteger(toId) ? byId(toId) : null,
+        metrics: [], error, notice, scopeConfirm: null,
         tenantSettingsComparable: true,
         compare: { basePath, detailsPath, title, subtitle, backHref },
       };
 
-      if (!Number.isInteger(fromId) || !Number.isInteger(toId)) {
-        if (Number.isInteger(toId)) base.toRun = runs.find(run => run.id === toId) || null;
-        return res.render('analysis/compare', base);
-      }
-      if (fromId === toId) {
-        return res.render('analysis/compare', { ...base, error: 'Pick two different scans to compare.' });
-      }
+      if (!compareNow) return res.render('analysis/compare', base);
+      if (fromId === toId) return res.render('analysis/compare', { ...base, error: 'Pick two different scans to compare.' });
       // Only scans in the reader's list can be compared, whatever the URL says.
-      if (!runs.some(run => run.id === fromId) || !runs.some(run => run.id === toId)) {
+      if (!byId(fromId) || !byId(toId)) {
         return res.status(403).render('analysis/compare', { ...base, error: 'You do not have access to one of those scans.' });
+      }
+      if (!runs.some(run => run.id === fromId) || !runs.some(run => run.id === toId)) {
+        return res.render('analysis/compare', { ...base, error: 'Scans can only be compared within one tenant. Pick two scans of the same tenant.' });
       }
 
       const [fromRun, toRun] = await Promise.all([db.getAnalysisRunMeta(fromId), db.getAnalysisRunMeta(toId)]);
       if (!fromRun || !toRun) {
         return res.render('analysis/compare', { ...base, error: 'One of the selected scans no longer exists.' });
       }
-
-      // Comparing across tenants would produce numbers that look like change but are
-      // really two different estates, so it is refused rather than rendered.
+      // Checked again on the stored rows: never compare across tenants.
       if ((fromRun.tenant_id || '') !== (toRun.tenant_id || '')) {
-        return res.render('analysis/compare', {
-          ...base, fromRun, toRun,
-          error: 'These scans are from different tenants. Comparison is only available within a single tenant.',
-        });
+        return res.render('analysis/compare', { ...base, error: 'Scans can only be compared within one tenant. Pick two scans of the same tenant.' });
+      }
+
+      // Different coverage: nothing is computed until the reader confirms.
+      const mismatch = scopeMismatch(fromRun, toRun);
+      if (mismatch && !confirmed) {
+        return res.render('analysis/compare', { ...base, fromRun, toRun, scopeConfirm: mismatch });
       }
 
       const [fromTotals, toTotals] = await Promise.all([loadRunTotals(fromId), loadRunTotals(toId)]);
@@ -173,6 +243,7 @@ function comparePage({ basePath, detailsPath, section = null, title, subtitle, b
         ...base, fromRun, toRun,
         metrics: diffTotals(fromTotals.totals, toTotals.totals, { skipGroups: tenantSettingsComparable ? [] : ['tenantSettings'] }),
         tenantSettingsComparable,
+        scopeConfirmed: !!mismatch,
       });
     } catch (err) {
       res.render('error', { title: 'Error', user: req.user, message: err.message });
@@ -196,7 +267,10 @@ function compareDetails({ section = null } = {}) {
       const [fromRun, toRun] = await Promise.all([db.getAnalysisRunById(fromId), db.getAnalysisRunById(toId)]);
       if (!fromRun || !toRun) return res.json({ success: false, message: 'One of the selected scans no longer exists.' });
       if ((fromRun.tenant_id || '') !== (toRun.tenant_id || '')) {
-        return res.json({ success: false, message: 'Comparison is only available within a single tenant.' });
+        return res.json({ success: false, message: 'Scans can only be compared within one tenant.' });
+      }
+      if (scopeMismatch(fromRun, toRun) && req.query.confirm !== '1') {
+        return res.json({ success: false, message: 'These scans cover different workspaces; confirm the comparison first.' });
       }
 
       const fromResults = parseRunResults(fromRun);
@@ -216,6 +290,9 @@ module.exports = {
   comparableRuns,
   previousOfPrincipal,
   defaultPair,
+  tenantsOf,
+  scopeMismatch,
+  coverageText,
   comparePage,
   compareDetails,
 };

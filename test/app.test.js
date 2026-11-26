@@ -5012,12 +5012,15 @@ test('comparing two scans of different coverage says so before the numbers', asy
     runs: [scoped, wide], metrics: [], changedMetrics: [], error: null, tenantSettingsComparable: true,
   };
 
-  const mismatched = await ejs.renderFile('src/views/analysis/compare.ejs', { ...base, fromRun: wide, toRun: scoped });
+  const tenantLocals = { tenants: [{ id: 't', label: 'SP', scans: 2 }], tenantId: 't' };
+  const metrics = [{ key: 'totalWorkspaces', label: 'Workspaces', from: 48, to: 1, delta: -47, percent: -97.9, changed: true }];
+  // Once the reader has confirmed in the dialog, the warning stays above the numbers.
+  const mismatched = await ejs.renderFile('src/views/analysis/compare.ejs', { ...base, ...tenantLocals, fromRun: wide, toRun: scoped, metrics, scopeConfirmed: true });
   assert.match(mismatched, /did not cover the same thing/);
   assert.match(mismatched, /1 workspace: Finance/);
 
   // Two scans of the same coverage need no such warning.
-  const matched = await ejs.renderFile('src/views/analysis/compare.ejs', { ...base, fromRun: wide, toRun: { ...wide, id: 5 } });
+  const matched = await ejs.renderFile('src/views/analysis/compare.ejs', { ...base, ...tenantLocals, fromRun: wide, toRun: { ...wide, id: 5 }, metrics });
   assert.doesNotMatch(matched, /did not cover the same thing/);
 
   // And the picker leads with the coverage either way.
@@ -7990,7 +7993,8 @@ test('the compare view posts to the page it is shown on and names scans by princ
   const html = await ejs.renderFile('src/views/analysis/compare.ejs', {
     user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/governance/changes', breadcrumb: [], title: 'Since Last Scan',
     availableRuns: [], globalRun: null, hideRunSelector: true,
-    runs, fromRun: runs[1], toRun: runs[0], metrics: [{ key: 'totalWorkspaces', label: 'Workspaces', from: 3, to: 4, delta: 1, pct: 33.3, changed: true }],
+    runs, tenants: [{ id: SOFTWAREONE, label: 'SoftwareOne · 77f4d6ee…', scans: 2 }], tenantId: SOFTWAREONE,
+    fromRun: runs[1], toRun: runs[0], metrics: [{ key: 'totalWorkspaces', label: 'Workspaces', from: 3, to: 4, delta: 1, percent: 33.3, changed: true }],
     error: null, notice: null, tenantSettingsComparable: true, scopeTag, scopeTagTitle, describeScope, scopeFromRow,
     compare: { basePath: '/governance/changes', detailsPath: '/governance/changes/details', title: 'Since Last Scan', subtitle: 'x', backHref: null },
   });
@@ -7999,4 +8003,133 @@ test('the compare view posts to the page it is shown on and names scans by princ
   assert.match(html, /\[WT\] SoftwareOne #3 —/);
   assert.match(html, /<th class="text-end">SoftwareOne #1<\/th>/);
   assert.doesNotMatch(html, /Run #50|Run #40/);
+});
+
+
+// ── Compare: one tenant at a time, and a confirmation for different coverage ──
+
+function compareFixture() {
+  const A = SOFTWAREONE;
+  const B = OTHER_TENANT;
+  const wide = (id, n, day, tenant = A, sp = 1) => ({ id, sp_id: sp, sp_name: tenant === A ? 'SoftwareOne' : 'Other', sp_run_number: n, tenant_id: tenant, status: 'completed', started_at: '2026-11-' + day + 'T09:00:00Z', scope_kind: 'tenant' });
+  const scoped = { ...wide(52, 4, 27), scope_kind: 'workspaces', scope_workspaces: JSON.stringify([{ id: 'w1', name: 'Finance' }]) };
+  return { A, B, runs: [wide(50, 3, 26), wide(40, 2, 20), scoped, wide(60, 1, 25, B, 2)] };
+}
+
+function compareResponse(runs, globalRun = null) {
+  return {
+    locals: { availableRuns: runs, globalRun }, statusCode: 200, rendered: null, body: null,
+    status(code) { this.statusCode = code; return this; },
+    render(view, model) { this.rendered = { view, model }; return this; },
+    json(body) { this.body = body; return this; },
+  };
+}
+
+test('Compare lists one tenant\'s scans only and never compares two tenants', async () => {
+  const { comparePage, tenantsOf } = require('../src/routes/compareRuns');
+  const { A, B, runs } = compareFixture();
+  assert.deepEqual(tenantsOf(runs).map(t => t.id).sort(), [A, B].sort());
+  const page = comparePage({ basePath: '/analysis/compare', detailsPath: '/analysis/compare/details', title: 'Compare Runs' });
+
+  const res = compareResponse(runs, runs[0]);
+  await page({ query: {}, permissions: { isAdmin: true }, user: {} }, res);
+  assert.equal(res.rendered.model.tenantId, A, 'the selected scan\'s tenant');
+  assert.ok(res.rendered.model.runs.every(r => r.tenant_id === A), 'only that tenant\'s scans are offered');
+  assert.deepEqual([res.rendered.model.toRun.id, res.rendered.model.fromRun.id], [50, 40], 'preselected: the scan and the same principal\'s previous one');
+  assert.deepEqual(res.rendered.model.metrics, [], 'Compare Runs waits for the button');
+
+  const other = compareResponse(runs, runs[0]);
+  await page({ query: { tenant: B }, permissions: { isAdmin: true }, user: {} }, other);
+  assert.deepEqual(other.rendered.model.runs.map(r => r.id), [60]);
+  assert.equal(other.rendered.model.fromRun, null, 'nothing of the previous tenant is carried over');
+
+  const cross = compareResponse(runs);
+  await page({ query: { from: '60', to: '50' }, permissions: { isAdmin: true }, user: {} }, cross);
+  assert.match(cross.rendered.model.error, /only be compared within one tenant/);
+  assert.deepEqual(cross.rendered.model.metrics, []);
+});
+
+test('a whole-tenant scan against a scoped one is not compared until confirmed', async () => {
+  const { comparePage, compareDetails, scopeMismatch } = require('../src/routes/compareRuns');
+  const { runs } = compareFixture();
+  const mismatch = scopeMismatch(runs[0], runs[2]);
+  assert.equal(mismatch.kind, 'tenant-vs-scoped');
+  assert.equal(mismatch.title, 'Compare a whole-tenant scan with a scoped scan?');
+  assert.deepEqual([mismatch.from.label, mismatch.from.scope, mismatch.to.label, mismatch.to.scope], ['SoftwareOne #3', 'the whole tenant', 'SoftwareOne #4', '1 workspace: Finance']);
+  assert.equal(scopeMismatch(runs[0], runs[1]), null);
+
+  const original = { meta: dbService.getAnalysisRunMeta, byId: dbService.getAnalysisRunById, totals: dbService.getRunTotals };
+  const byId = new Map(runs.map(r => [r.id, r]));
+  let totalsRead = 0;
+  dbService.getAnalysisRunMeta = async id => byId.get(id) || null;
+  dbService.getAnalysisRunById = async id => ({ ...byId.get(id), results_json: '{"workspaces":[]}' });
+  dbService.getRunTotals = async () => { totalsRead += 1; return { total_workspaces: 1, tenant_settings_captured: 1 }; };
+  try {
+    const page = comparePage({ basePath: '/analysis/compare', detailsPath: '/analysis/compare/details', title: 'Compare Runs' });
+    const pending = compareResponse(runs);
+    await page({ query: { from: '50', to: '52' }, permissions: { isAdmin: true }, user: {} }, pending);
+    assert.equal(pending.rendered.model.scopeConfirm.kind, 'tenant-vs-scoped');
+    assert.deepEqual(pending.rendered.model.metrics, []);
+    assert.equal(totalsRead, 0, 'nothing is computed before the reader confirms');
+
+    const confirmed = compareResponse(runs);
+    await page({ query: { from: '50', to: '52', confirm: '1' }, permissions: { isAdmin: true }, user: {} }, confirmed);
+    assert.equal(confirmed.rendered.model.scopeConfirm, null);
+    assert.equal(confirmed.rendered.model.scopeConfirmed, true);
+    assert.ok(confirmed.rendered.model.metrics.length > 0);
+
+    const details = compareDetails();
+    const unconfirmed = compareResponse(runs);
+    await details({ query: { from: '50', to: '52' }, permissions: { isAdmin: true } }, unconfirmed);
+    assert.equal(unconfirmed.body.success, false);
+    const ok = compareResponse(runs);
+    await details({ query: { from: '50', to: '52', confirm: '1' }, permissions: { isAdmin: true } }, ok);
+    assert.equal(ok.body.success, true);
+  } finally {
+    dbService.getAnalysisRunMeta = original.meta;
+    dbService.getAnalysisRunById = original.byId;
+    dbService.getRunTotals = original.totals;
+  }
+});
+
+test('the compare page asks in a design-system dialog, and offers one tenant at a time', async () => {
+  const ejs = require('ejs');
+  const scope = require('../src/services/analysisScopeService');
+  const { scopeMismatch } = require('../src/routes/compareRuns');
+  const { runs } = compareFixture();
+  const tenantRuns = runs.filter(r => r.tenant_id === SOFTWAREONE);
+  const html = await ejs.renderFile('src/views/analysis/compare.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/analysis/compare', breadcrumb: [], title: 'Compare Runs',
+    availableRuns: [], globalRun: null, hideRunSelector: true,
+    runs: tenantRuns, tenants: [{ id: SOFTWAREONE, label: 'SoftwareOne', scans: 3 }, { id: OTHER_TENANT, label: 'Other', scans: 1 }], tenantId: SOFTWAREONE,
+    fromRun: runs[0], toRun: runs[2], metrics: [], error: null, notice: null, tenantSettingsComparable: true,
+    scopeConfirm: scopeMismatch(runs[0], runs[2]),
+    scopeTag: scope.scopeTag, scopeTagTitle: scope.scopeTagTitle, describeScope: scope.describeScope, scopeFromRow: scope.scopeFromRow,
+  });
+  assert.match(html, /<select class="form-select form-select-sm" id="tenantSelect" name="tenant">/);
+  assert.match(html, new RegExp('<option value="' + SOFTWAREONE + '" selected>'));
+  assert.doesNotMatch(html, /data-scope-key="[^"]*"[^>]*>\[WT\] Other #1/, 'the other tenant\'s scans are not offered');
+  assert.match(html, /<dialog class="pd-dialog" id="scopeMismatchDialog"/, 'the app\'s dialog, not a browser alert');
+  assert.match(html, /Compare a whole-tenant scan with a scoped scan\?/);
+  assert.match(html, /id="scopeConfirmBtn">Compare anyway</);
+  assert.match(html, /data-pd-dialog-close>Pick other scans</);
+  assert.match(html, /Not compared yet: SoftwareOne #3 and SoftwareOne #4 cover different workspaces/);
+  assert.doesNotMatch(html, /\balert\(|\bconfirm\(/, 'no native browser pop-ups');
+});
+
+test('Home is the governance outcome; onboarding has its own page', async () => {
+  const ejs = require('ejs');
+  const locals = {
+    title: 'Home', user: { name: 'T' }, currentUser: { name: 'T', email: 't@example.com' }, currentPath: '/', pagePath: '/', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, prerequisites: [], visibleSections: [],
+  };
+  const withOutcome = await ejs.renderFile('src/views/home.ejs', { ...locals, outcomeTenants: [{ id: SOFTWAREONE, name: 'SoftwareOne' }], outcomeTenantId: SOFTWAREONE });
+  assert.match(withOutcome, /id="governanceOutcome"/);
+  assert.doesNotMatch(withOutcome, /Before You Start/);
+  assert.match(withOutcome, /href="\/getting-started"/);
+  const fresh = await ejs.renderFile('src/views/home.ejs', { ...locals, outcomeTenants: [], outcomeTenantId: null });
+  assert.match(fresh, /Before You Start/, 'with nothing to show yet, Home still says how to start');
+  const page = await ejs.renderFile('src/views/getting-started.ejs', { ...locals, title: 'Getting started', currentPath: '/getting-started', pagePath: '/getting-started' });
+  assert.match(page, /Before You Start/);
+  assert.match(page, /id="prerequisitesModal"/);
 });

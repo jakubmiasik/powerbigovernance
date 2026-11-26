@@ -57,6 +57,7 @@
   if (canSeeGovernance) {
     addEntry('Overview', { href: '/governance/changes', label: 'Since Last Scan', icon: 'git-compare-arrows', fallbackClass: 'bi bi-clock-history', active: onChanges });
   }
+  addEntry('Overview', { href: '/getting-started', label: 'Getting Started', icon: 'clipboard-check', fallbackClass: 'bi bi-clipboard-check', active: pagePath === '/getting-started' });
   navSections.forEach(function(section) {
     if (section.adminOnly) return;
     addEntry(section.group, { href: section.href, label: section.label, icon: section.lucide || 'circle', fallbackClass: 'bi ' + section.icon, active: navActive(section) && !(section.key === 'governance' && onChanges) });
