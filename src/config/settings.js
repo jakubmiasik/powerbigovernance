@@ -46,6 +46,23 @@ function getConfig() {
     cache: {
       runCacheTtlMs: parseInt(process.env.RUN_CACHE_TTL_MS || '30000', 10),
     },
+    // Governance Outcome (the tenant summary on Home). Fixed queries and fixed
+    // rules only. Its own read-only database principal is optional; without one it
+    // reads through the application's connection and says so on the page.
+    governance: {
+      tenantId: (process.env.GOVERNANCE_TENANT_ID || '77f4d6ee-95d6-499c-bdfc-786d81583d02').trim().toLowerCase(),
+      rulesFile: process.env.GOVERNANCE_RULES_FILE || '',
+      cacheTtlMs: parseInt(process.env.GOVERNANCE_OUTCOME_CACHE_TTL_MS || '0', 10),
+      sql: {
+        server: process.env.GOVERNANCE_SQL_SERVER || '',
+        database: process.env.GOVERNANCE_SQL_DATABASE || '',
+        // A contained SQL user (password from App Service settings / a Key Vault reference)...
+        user: process.env.GOVERNANCE_SQL_USER || '',
+        password: process.env.GOVERNANCE_SQL_PASSWORD || '',
+        // ...or a user-assigned managed identity granted SELECT on the five tables.
+        clientId: process.env.GOVERNANCE_SQL_CLIENT_ID || '',
+      },
+    },
   };
 }
 

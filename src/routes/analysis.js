@@ -9,6 +9,7 @@ const { buildItemDetails } = require('../services/itemDetailsService');
 const { buildWorkspaceAssignments, lookupAssignment } = require('../services/deploymentPipelineService');
 const runProgress = require('../services/runProgressService');
 const analysisModel = require('../services/analysisModelRepository');
+const governanceOutcome = require('../services/governanceOutcomeService');
 const launcher = require('../services/analysisLauncher');
 const analysisSchedules = require('../services/analysisScheduleService');
 const {
@@ -1165,6 +1166,21 @@ async function runAnalysis(runId, sp, authOptions = {}, scopeInput = null) {
     }
 
     completePhase(progress, 'save');
+
+    // Last step: the Governance Outcome for this tenant, so Home shows this scan's
+    // findings straight away. Only a whole-tenant scan is what the outcome reads.
+    // A failure here is reported, never turned into a failed scan.
+    if (sp.tenant_id && scope.kind === SCOPE_KIND.TENANT) {
+      setProgress(progress, { message: 'Generating the governance outcome...' });
+      const generated = await governanceOutcome.generateAfterScan(sp.tenant_id, { scopeKind: 'tenant' });
+      if (generated.generated) {
+        const s = generated.summary;
+        addProgressEvent(progress, 'info', 'Governance outcome generated: ' + s.potentialRisk + ' potential risk, ' + s.fail + ' fail, ' + s.unknown + ' unknown, ' + s.pass + ' pass');
+      } else {
+        addProgressEvent(progress, 'warning', 'Governance outcome not generated: ' + generated.reason + '. It will be generated when Home is opened.');
+      }
+    }
+
     setProgress(progress, {
       status: 'completed',
       phase: 'Complete',

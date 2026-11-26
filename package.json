@@ -10,7 +10,8 @@
     "check": "npm run check:js && npm test",
     "check:js": "node scripts/check-js.js",
     "test:visual": "node visual/render-fixtures.js && playwright test -c visual/playwright.config.js",
-    "test:visual:update": "node visual/render-fixtures.js && playwright test -c visual/playwright.config.js --update-snapshots"
+    "test:visual:update": "node visual/render-fixtures.js && playwright test -c visual/playwright.config.js --update-snapshots",
+    "governance:check": "node scripts/check-governance-outcome.js"
   },
   "dependencies": {
     "@azure/identity": "^4.13.1",

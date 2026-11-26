@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "thresholds": {
+    "adminSharePct": 50,
+    "topWorkspacesItemSharePct": 40,
+    "topWorkspacesCount": 3,
+    "trendChangePct": 25
+  },
+  "rules": [
+    { "id": "F1", "title": "Workspaces without a description", "category": "Documentation", "severity": "Low", "statusIfHit": "Fail", "check": "noDescription" },
+    { "id": "F2", "title": "Workspaces not in a deployment pipeline", "category": "Deployment", "severity": "Medium", "statusIfHit": "Potential risk", "check": "noPipeline" },
+    { "id": "F3", "title": "Admin-heavy access or no group-based access", "category": "Security", "severity": "High", "statusIfHit": "Potential risk", "check": "adminShareOrNoGroups" },
+    { "id": "F4", "title": "Workspaces with a single principal", "category": "Security", "severity": "Medium", "statusIfHit": "Potential risk", "check": "singlePrincipal" },
+    { "id": "F5", "title": "Empty workspaces", "category": "Lifecycle", "severity": "Low", "statusIfHit": "Potential risk", "check": "empty" },
+    { "id": "F6", "title": "More than one Capacity Metrics workspace", "category": "Lifecycle", "severity": "Low", "statusIfHit": "Potential risk", "check": "duplicateCapacityMetrics" },
+    { "id": "F7", "title": "Items concentrated in a few workspaces", "category": "Capacity", "severity": "Medium", "statusIfHit": "Potential risk", "check": "topWorkspacesConcentration" },
+    { "id": "F8", "title": "Capacity SKU missing while no workspace is on shared capacity", "category": "Data quality", "severity": "Medium", "statusIfHit": "Unknown", "check": "skuMissingNoShared" },
+    { "id": "T1", "title": "Large change since the previous scan", "category": "Trend", "severity": "Medium", "statusIfHit": "Potential risk", "check": "trendChange" }
+  ]
+}
