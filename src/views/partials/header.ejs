@@ -50,9 +50,16 @@
     (navByGroup[group] = navByGroup[group] || []).push(entry);
   }
   addEntry('Overview', { href: '/', label: 'Home', icon: 'house', fallbackClass: 'bi bi-house', active: pagePath === '/' || pagePath === '/home' });
+  // Since the Last Scan lives under the Governance Overview grant (/governance/changes),
+  // so it shows exactly when that section does and needs no grant of its own.
+  var canSeeGovernance = navSections.some(function(s) { return s.key === 'governance' && !s.adminOnly; });
+  var onChanges = pagePath === '/governance/changes' || pagePath.indexOf('/governance/changes/') === 0;
+  if (canSeeGovernance) {
+    addEntry('Overview', { href: '/governance/changes', label: 'Since Last Scan', icon: 'git-compare-arrows', fallbackClass: 'bi bi-clock-history', active: onChanges });
+  }
   navSections.forEach(function(section) {
     if (section.adminOnly) return;
-    addEntry(section.group, { href: section.href, label: section.label, icon: section.lucide || 'circle', fallbackClass: 'bi ' + section.icon, active: navActive(section) });
+    addEntry(section.group, { href: section.href, label: section.label, icon: section.lucide || 'circle', fallbackClass: 'bi ' + section.icon, active: navActive(section) && !(section.key === 'governance' && onChanges) });
   });
   // Admin-only pages are not grantable sections; they show to administrators only,
   // and the routes behind them check the same thing.

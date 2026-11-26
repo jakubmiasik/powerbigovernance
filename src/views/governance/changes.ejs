@@ -1,0 +1,395 @@
+<%- include('../partials/header') %>
+<%
+  var pd = '../../../packages/podavo-ui/ejs/';
+  var sectionKeys = (typeof visibleSections !== 'undefined' && visibleSections ? visibleSections : []).map(function(s) { return s.key; });
+  function canOpen(key) { return sectionKeys.indexOf(key) !== -1; }
+  function bytes(n) {
+    var v = Math.abs(Number(n) || 0);
+    if (!v) return '0 B';
+    var units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    var i = Math.min(units.length - 1, Math.floor(Math.log(v) / Math.log(1024)));
+    return (v / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+  }
+  function num(n) { return Number(n || 0).toLocaleString('en-US'); }
+  function signed(n, asBytes) {
+    if (n === null || n === undefined) return '';
+    if (n === 0) return 'no change';
+    return (n > 0 ? '+' : '−') + (asBytes ? bytes(n) : num(Math.abs(n)));
+  }
+  function when(value) {
+    if (!value) return '—';
+    var d = new Date(value);
+    if (isNaN(d.getTime())) return String(value);
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }) + ', ' + d.toISOString().slice(11, 16) + ' UTC';
+  }
+  function pct(share) { return share === null || share === undefined ? '—' : (share * 100).toFixed(share < 0.01 && share > 0 ? 1 : 0) + '%'; }
+  var SEV_TONE = { high: 'danger', medium: 'orange', low: 'neutral' };
+  var NEXT_STEP = { ownerless: 'Assign an admin', orphanedAdmin: 'Assign a person as admin', singleAdmin: 'Add a second admin',
+    staleContent: 'Review for archiving', orphanedContent: 'Reassign items', capacityRisk: 'Check capacity', personalAccess: 'Move access to a group',
+    overShared: 'Review access', namingConvention: 'Rename', emptyWorkspace: 'Review for removal' };
+  var runQuery = typeof run !== 'undefined' && run ? 'runId=' + run.id : '';
+  function wsHref(id) { return '/workspaces/' + encodeURIComponent(id) + (runQuery ? '?' + runQuery : ''); }
+%>
+
+<%- include(pd + 'page-header', { ui: {
+  title: 'Since the Last Scan', icon: 'git-compare-arrows',
+  subtitle: 'What changed between two completed scans of this tenant, and what needs someone\'s attention.'
+} }) %>
+
+<% if (noData) { %>
+  <div class="pd-card">
+    <%- include(pd + 'state', { ui: {
+      kind: 'empty', icon: 'git-compare-arrows', title: 'No completed scan selected',
+      message: 'Changes are worked out from completed analysis scans. Select a scan in the bar above, or run an analysis first.',
+      actions: canOpen('analysis') ? [{ href: '/analysis', label: 'Run an analysis', icon: 'circle-play', primary: true }] : []
+    } }) %>
+  </div>
+<% } else {
+  var c = changes;
+  var sum = c.summary;
+  var hasBase = c.hasBaseline;
+%>
+
+<section class="pd-card chg-compare" aria-label="Scans being compared">
+  <div class="chg-compare-body">
+    <span class="chg-compare-label">Comparing</span>
+    <span class="pd-badge pd-badge--brand">Scan #<%= run.id %> · <%= when(run.completed_at || run.started_at) %></span>
+    <% if (hasBase) { %>
+      <span class="chg-compare-label">with</span>
+      <% if (candidates.length > 1) { %>
+        <form method="GET" action="/governance/changes" class="chg-compare-form">
+          <input type="hidden" name="runId" value="<%= run.id %>">
+          <label for="fromRun" class="visually-hidden">Earlier scan to compare with</label>
+          <select id="fromRun" name="from" class="form-select form-select-sm" onchange="this.form.submit()">
+            <% candidates.forEach(function(r) { %>
+              <option value="<%= r.id %>"<%= fromRun && r.id === fromRun.id ? ' selected' : '' %>>Scan #<%= r.id %> · <%= when(r.completed_at || r.started_at) %></option>
+            <% }) %>
+          </select>
+          <noscript><button type="submit" class="pd-btn pd-btn--sm">Compare</button></noscript>
+        </form>
+      <% } else { %>
+        <span class="pd-badge pd-badge--outline">Scan #<%= fromRun.id %> · <%= when(fromRun.completed_at || fromRun.started_at) %></span>
+      <% } %>
+    <% } %>
+    <span class="chg-compare-meta"><%= run.sp_name || run.tenant_id || '' %><% if (run.scopeTag) { %> · <span title="<%= run.scopeTagTitle %>"><%= run.scopeTag === 'WT' ? 'whole tenant' : 'scoped scan' %></span><% } %></span>
+  </div>
+  <% if (!hasBase) { %>
+    <div class="pd-card-footer">
+      <% if (baselineError) { %><strong><%= baselineError %></strong><% } else { %>
+        <strong>No earlier scan to compare with.</strong> This is the first completed scan of this tenant<% if (run.scopeTag === 'SC') { %> with this scope<% } %> that you can see, so the page shows the current state; changes appear after the next scan.
+      <% } %>
+    </div>
+  <% } %>
+</section>
+
+<div class="chg-summary">
+  <%- include(pd + 'metric-card', { ui: { label: 'Workspaces needing attention', value: num(sum.needAttention.now), hint: hasBase ? signed(sum.needAttention.change) : 'of ' + num(sum.needAttention.total), icon: 'triangle-alert', tone: 'warning', href: '#findings' } }) %>
+  <%- include(pd + 'metric-card', { ui: { label: 'New findings', value: hasBase ? num(sum.newFindings) : null, unavailableText: 'First scan', hint: hasBase ? num(sum.resolvedFindings) + ' resolved' : null, icon: 'list-plus', tone: hasBase && sum.newFindings ? 'orange' : 'neutral', href: '#findings' } }) %>
+  <%- include(pd + 'metric-card', { ui: { label: 'Items', value: num(sum.items.now), hint: hasBase ? '+' + num(sum.items.added) + ' / −' + num(sum.items.removed) + ' · ' + num(sum.items.updated) + ' updated' : null, icon: 'boxes', tone: 'neutral', href: '#inventory' } }) %>
+  <%- include(pd + 'metric-card', { ui: { label: 'People with access', value: sum.people ? num(sum.people.now) : null, unavailableText: 'Not collected', hint: sum.people && hasBase ? signed(sum.people.change) : null, icon: 'users', tone: 'neutral', href: '#people' } }) %>
+  <%- include(pd + 'metric-card', { ui: { label: 'Guest accounts with access', value: sum.guests ? num(sum.guests.now) : null, unavailableText: 'Not collected', hint: sum.guests && hasBase ? signed(sum.guests.change) : null, icon: 'user-round-plus', tone: sum.guests && sum.guests.change > 0 ? 'orange' : 'neutral', href: '#access' } }) %>
+  <%- include(pd + 'metric-card', { ui: { label: 'OneLake storage', value: sum.storage ? bytes(sum.storage.now) : null, unavailableText: 'Not collected', hint: sum.storage && sum.storage.change !== null ? signed(sum.storage.change, true) : null, icon: 'hard-drive', tone: 'neutral', href: '#storage' } }) %>
+</div>
+
+<div class="gov-overview-grid">
+  <div class="pd-min-w-0 gov-stack">
+
+    <section class="pd-card" id="findings" aria-labelledby="findingsHeading">
+      <div class="pd-card-header">
+        <h2 class="pd-card-title" id="findingsHeading"><i data-lucide="list-checks" aria-hidden="true"></i>Needs attention</h2>
+        <div class="chg-filters">
+          <div class="chg-seg" role="group" aria-label="Status">
+            <% if (hasBase) { %><button type="button" class="chg-seg-btn js-status" data-status="new" aria-pressed="true">New <span><%= c.findings.tally.new %></span></button><% } %>
+            <button type="button" class="chg-seg-btn js-status" data-status="open" aria-pressed="<%= hasBase ? 'false' : 'true' %>">All open <span><%= c.findings.tally.new + c.findings.tally.open %></span></button>
+            <% if (hasBase) { %><button type="button" class="chg-seg-btn js-status" data-status="resolved" aria-pressed="false">Resolved <span><%= c.findings.tally.resolved %></span></button><% } %>
+          </div>
+          <div class="chg-seg" role="group" aria-label="Severity">
+            <button type="button" class="chg-seg-btn js-sev" data-sev="all" aria-pressed="true">All</button>
+            <button type="button" class="chg-seg-btn js-sev" data-sev="high" aria-pressed="false">High</button>
+            <button type="button" class="chg-seg-btn js-sev" data-sev="medium" aria-pressed="false">Medium</button>
+            <button type="button" class="chg-seg-btn js-sev" data-sev="low" aria-pressed="false">Low</button>
+          </div>
+        </div>
+      </div>
+      <% if (!c.findings.rows.length) { %>
+        <%- include(pd + 'state', { ui: { kind: 'empty', icon: 'circle-check-big', compact: true, title: 'No findings', message: 'None of the governance checks raised anything in this scan.' } }) %>
+      <% } else { %>
+        <ul class="chg-findings" id="findingList">
+          <% c.findings.rows.forEach(function(f) { %>
+            <li class="chg-finding" data-status="<%= f.status %>" data-sev="<%= f.severity %>">
+              <span class="pd-badge pd-badge--<%= SEV_TONE[f.severity] || 'neutral' %> chg-sev"><%= f.severity %></span>
+              <div class="pd-min-w-0">
+                <div class="chg-finding-title"><%= f.label %> <span class="chg-finding-ws">· <%= f.workspaceName %></span>
+                  <% if (f.status === 'new') { %><span class="pd-badge pd-badge--info">New</span><% } else if (f.status === 'resolved') { %><span class="pd-badge pd-badge--success">Resolved</span><% } %>
+                </div>
+                <div class="chg-finding-sub">Rule: <%= f.description %></div>
+                <div class="chg-finding-sub"><% if (f.detail) { %><%= f.detail %> · <% } %>Admins: <%= f.owners.length ? f.owners.slice(0, 3).join(', ') + (f.owners.length > 3 ? ' +' + (f.owners.length - 3) : '') : 'none' %></div>
+              </div>
+              <% if (f.status !== 'resolved' && canOpen('workspaces')) { %>
+                <a class="pd-btn pd-btn--sm" href="<%= wsHref(f.workspaceId) %>" aria-label="<%= NEXT_STEP[f.key] || 'Open workspace' %>: <%= f.workspaceName %>"><span><%= NEXT_STEP[f.key] || 'Open workspace' %></span><i data-lucide="arrow-right" aria-hidden="true"></i></a>
+              <% } %>
+            </li>
+          <% }) %>
+        </ul>
+        <p class="chg-empty-filter" id="findingEmpty" hidden>Nothing matches these filters.</p>
+      <% } %>
+      <div class="pd-card-footer">
+        Findings come from the same checks as Workspace Triage, run on both scans with the same thresholds (stale after <%= c.checks.thresholds.staleDays %> days, broadly shared above <%= c.checks.thresholds.overSharedUsers %> principals).
+        Each one names its rule; there is no combined score.<% if (!c.checks.namingConventionEnabled) { %> Naming is not checked because no convention is set.<% } %>
+      </div>
+    </section>
+
+    <section class="pd-card" id="people" aria-labelledby="peopleHeading">
+      <div class="pd-card-header">
+        <h2 class="pd-card-title" id="peopleHeading"><i data-lucide="activity" aria-hidden="true"></i>Activity by person</h2>
+        <span class="pd-card-meta"><%= num(c.people.creatorCount) %> people have created items · <%= num(c.people.peopleWithAccess) %> hold access</span>
+      </div>
+      <% if (!hasBase) { %>
+        <%- include(pd + 'state', { ui: { kind: 'unavailable', compact: true, title: 'Shown from the next scan', message: 'Activity is what changed between two scans. The items each person has created are listed below.' } }) %>
+      <% } else if (!c.people.active.length) { %>
+        <%- include(pd + 'state', { ui: { kind: 'empty', compact: true, icon: 'activity', title: 'No item activity', message: 'No item was created or updated between these two scans.' } }) %>
+      <% } else { %>
+        <div class="pd-grid-scroll" style="max-height:none;">
+          <table class="pd-table" data-no-sort>
+            <caption class="visually-hidden">People whose items were created or updated between the two scans</caption>
+            <thead><tr><th scope="col">Person</th><th scope="col" class="is-num">New items</th><th scope="col" class="is-num">Their items updated</th><th scope="col" class="is-num">Items in total</th><th scope="col" class="is-num">Workspaces</th><th scope="col" class="is-num">Admin of</th></tr></thead>
+            <tbody>
+              <% c.people.active.forEach(function(p) { %>
+                <tr>
+                  <td class="pd-cell-truncate"><strong><%= p.name %></strong><% if (p.guest) { %> <span class="pd-badge pd-badge--orange">Guest</span><% } %><div class="pd-cell-sub"><%= p.upn || '—' %></div></td>
+                  <td class="is-num"><%= num(p.newItems) %></td>
+                  <td class="is-num"><%= num(p.updatedItems) %></td>
+                  <td class="is-num"><%= num(p.items) %></td>
+                  <td class="is-num"><%= num(p.workspaces) %></td>
+                  <td class="is-num"><%= num(p.adminOf) %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+        <% if (c.people.activeCount > c.people.active.length) { %><div class="pd-card-footer">Showing the <%= c.people.active.length %> most active of <%= num(c.people.activeCount) %> people.</div><% } %>
+      <% } %>
+      <div class="pd-card-footer">A scan records who created each item and when it last changed, not who changed it, so an update is credited to the item's creator. Sign-ins and report views are not part of a scan.</div>
+    </section>
+
+    <section class="pd-card" aria-labelledby="creatorsHeading">
+      <div class="pd-card-header">
+        <h2 class="pd-card-title" id="creatorsHeading"><i data-lucide="user-round-check" aria-hidden="true"></i>Items per person</h2>
+        <% if (c.people.topTenShare !== null) { %><span class="pd-card-meta">The top 10 creators made <%= pct(c.people.topTenShare) %> of all items</span><% } %>
+      </div>
+      <% if (!c.people.topCreators.length) { %>
+        <%- include(pd + 'state', { ui: { kind: 'unavailable', compact: true, title: 'No creators recorded', message: 'This scan recorded no item creators.' } }) %>
+      <% } else { %>
+        <div class="chg-buckets" role="img" aria-label="People by number of items created: <%= c.people.buckets.map(function(b) { return b.label + ' items: ' + b.people + ' people'; }).join('; ') %>">
+          <% c.people.buckets.forEach(function(b) { %>
+            <div class="chg-bucket"><span class="chg-bucket-n"><%= num(b.people) %></span><span class="chg-bucket-l">people with <%= b.label %> item<%= b.label === '1' ? '' : 's' %></span></div>
+          <% }) %>
+        </div>
+        <div class="pd-grid-scroll" style="max-height:none;">
+          <table class="pd-table" data-no-sort>
+            <caption class="visually-hidden">People who created the most items</caption>
+            <thead><tr><th scope="col">Person</th><th scope="col" class="is-num">Items</th><th scope="col">Mostly</th><th scope="col" class="is-num">Workspaces</th><th scope="col">Access</th></tr></thead>
+            <tbody>
+              <% c.people.topCreators.forEach(function(p) { %>
+                <tr>
+                  <td class="pd-cell-truncate"><strong><%= p.name %></strong><% if (p.guest) { %> <span class="pd-badge pd-badge--orange">Guest</span><% } %><div class="pd-cell-sub"><%= p.upn || '—' %></div></td>
+                  <td class="is-num"><%= num(p.items) %></td>
+                  <td><%= p.topTypes.map(function(t) { return t.type + ' ' + t.n; }).join(', ') %></td>
+                  <td class="is-num"><%= num(p.workspaces) %></td>
+                  <td><% if (!p.workspaces) { %><span class="pd-badge pd-badge--warning" title="Created items but holds no workspace access in this scan">No access</span><% } else if (p.adminOf) { %>Admin of <%= p.adminOf %><% } else { %>Member<% } %></td>
+                </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      <% } %>
+    </section>
+
+    <section class="pd-card" id="access" aria-labelledby="accessHeading">
+      <div class="pd-card-header">
+        <h2 class="pd-card-title" id="accessHeading"><i data-lucide="key-round" aria-hidden="true"></i>Access changes</h2>
+        <% if (hasBase) { %><span class="pd-card-meta">+<%= num(c.people.access.grantedCount) %> granted · −<%= num(c.people.access.removedCount) %> removed · <%= num(c.people.access.roleChangedCount) %> role changes<% if (c.people.access.guestsGranted) { %> · <%= c.people.access.guestsGranted %> to guests<% } %></span><% } %>
+      </div>
+      <% if (!hasBase) { %>
+        <%- include(pd + 'state', { ui: { kind: 'unavailable', compact: true, title: 'Shown from the next scan', message: 'Access changes compare the access lists of two scans.' } }) %>
+      <% } else if (!c.people.access.grantedCount && !c.people.access.removedCount && !c.people.access.roleChangedCount) { %>
+        <%- include(pd + 'state', { ui: { kind: 'empty', compact: true, icon: 'key-round', title: 'No access changes', message: 'Nobody gained, lost or changed a workspace role between these scans.' } }) %>
+      <% } else { %>
+        <div class="pd-grid-scroll" style="max-height:420px;">
+          <table class="pd-table" data-no-sort>
+            <caption class="visually-hidden">Workspace access granted, removed or changed between the scans</caption>
+            <thead><tr><th scope="col">Change</th><th scope="col">Principal</th><th scope="col">Workspace</th><th scope="col">Role</th></tr></thead>
+            <tbody>
+              <% [['granted', 'Granted', 'info'], ['roleChanged', 'Role changed', 'warning'], ['removed', 'Removed', 'neutral']].forEach(function(kind) {
+                   c.people.access[kind[0]].forEach(function(a) { %>
+                <tr>
+                  <td><span class="pd-badge pd-badge--<%= kind[2] %>"><%= kind[1] %></span></td>
+                  <td class="pd-cell-truncate"><%= a.name %><% if (a.guest) { %> <span class="pd-badge pd-badge--orange">Guest</span><% } %><div class="pd-cell-sub"><%= a.type %><% if (a.email) { %> · <%= a.email %><% } %></div></td>
+                  <td class="pd-cell-truncate"><% if (canOpen('workspaces')) { %><a href="<%= wsHref(a.workspaceId) %>"><%= a.workspaceName %></a><% } else { %><%= a.workspaceName %><% } %></td>
+                  <td><%= a.fromRole ? a.fromRole + ' → ' : '' %><%= a.role %></td>
+                </tr>
+              <% }) }) %>
+            </tbody>
+          </table>
+        </div>
+      <% } %>
+    </section>
+
+    <section class="pd-card" id="storage" aria-labelledby="storageHeading">
+      <div class="pd-card-header">
+        <h2 class="pd-card-title" id="storageHeading"><i data-lucide="hard-drive" aria-hidden="true"></i>OneLake storage</h2>
+        <% if (c.storage.collected) { %><span class="pd-card-meta"><%= bytes(c.storage.total) %> in <%= num(c.storage.files) %> files<% if (c.storage.change !== null) { %> · <%= signed(c.storage.change, true) %> since the earlier scan<% } %></span><% } %>
+      </div>
+      <% if (!c.storage.collected) { %>
+        <%- include(pd + 'state', { ui: { kind: 'unavailable', compact: true, title: 'Not collected in this scan', message: 'Storage is measured only when a scan includes OneLake storage. Turn it on in Run Analysis to see it here.', actions: canOpen('analysis') ? [{ href: '/analysis', label: 'Run Analysis', icon: 'circle-play' }] : [] } }) %>
+      <% } else { %>
+        <div class="chg-storage">
+          <div class="pd-min-w-0">
+            <h3 class="chg-sub-title">Largest workspaces</h3>
+            <ul class="chg-bars">
+              <% c.storage.largest.forEach(function(w) { %>
+                <li>
+                  <div class="chg-bar-label"><span class="pd-text-truncate"><% if (canOpen('workspaces')) { %><a href="<%= wsHref(w.id) %>"><%= w.name %></a><% } else { %><%= w.name %><% } %></span><span class="chg-bar-value"><%= bytes(w.size) %><% if (w.change) { %> <span class="chg-bar-change"><%= signed(w.change, true) %></span><% } %></span></div>
+                  <div class="chg-bar" aria-hidden="true"><span style="width:<%= Math.max(1, Math.round(w.share * 100)) %>%"></span></div>
+                </li>
+              <% }) %>
+            </ul>
+          </div>
+          <div class="pd-min-w-0">
+            <h3 class="chg-sub-title">By item type</h3>
+            <ul class="chg-bars">
+              <% c.storage.byType.slice(0, 8).forEach(function(t) { %>
+                <li>
+                  <div class="chg-bar-label"><span><%= t.type %> <span class="pd-cell-sub">· <%= num(t.items) %></span></span><span class="chg-bar-value"><%= bytes(t.size) %> · <%= pct(t.share) %></span></div>
+                  <div class="chg-bar chg-bar--alt" aria-hidden="true"><span style="width:<%= Math.max(1, Math.round(t.share * 100)) %>%"></span></div>
+                </li>
+              <% }) %>
+            </ul>
+            <% if (!c.storage.byType.length) { %><p class="chg-note">This scan recorded workspace totals only, not sizes per item.</p><% } %>
+          </div>
+        </div>
+        <% if (c.storage.growing.length || c.storage.largestItems.length) { %>
+          <div class="pd-grid-scroll" style="max-height:none;">
+            <table class="pd-table" data-no-sort>
+              <caption class="visually-hidden">Largest items by OneLake storage</caption>
+              <thead><tr><th scope="col">Largest items</th><th scope="col">Type</th><th scope="col">Workspace</th><th scope="col" class="is-num">Size</th></tr></thead>
+              <tbody>
+                <% c.storage.largestItems.forEach(function(i) { %>
+                  <tr><td class="pd-cell-truncate"><%= i.name %></td><td><%= i.type %></td><td class="pd-cell-truncate"><%= i.workspaceName %></td><td class="is-num"><%= bytes(i.size) %></td></tr>
+                <% }) %>
+              </tbody>
+            </table>
+          </div>
+        <% } %>
+        <% if (c.storage.collected && !c.storage.baselineCollected && hasBase) { %><div class="pd-card-footer">The earlier scan did not measure storage, so no change is shown.</div><% } %>
+      <% } %>
+    </section>
+  </div>
+
+  <aside class="gov-aside" aria-label="Trends and inventory">
+    <section class="pd-card" aria-labelledby="trendHeading">
+      <div class="pd-card-header">
+        <h2 class="pd-card-title" id="trendHeading"><i data-lucide="chart-line" aria-hidden="true"></i>Across recent scans</h2>
+        <% if (trends.available) { %><span class="pd-card-meta"><%= trends.scans %> scans · <%= when(trends.from).split(',')[0] %> – <%= when(trends.to).split(',')[0] %></span><% } %>
+      </div>
+      <% if (!trends.available) { %>
+        <%- include(pd + 'state', { ui: { kind: 'unavailable', compact: true, title: 'Needs two scans', message: 'A trend appears once two comparable scans have stored totals.' } }) %>
+      <% } else { %>
+        <ul class="chg-trends">
+          <% trends.metrics.forEach(function(m) { var asBytes = m.format === 'bytes'; %>
+            <li>
+              <div class="pd-min-w-0">
+                <div class="chg-trend-label"><%= m.label %></div>
+                <div class="chg-trend-value"><%= asBytes ? bytes(m.last) : num(m.last) %> <span class="chg-trend-change"><%= signed(m.change, asBytes) %></span></div>
+              </div>
+              <svg class="chg-spark" width="120" height="36" viewBox="0 0 120 36" role="img" aria-label="<%= m.label %> per scan, oldest first: <%= m.values.map(function(v) { return asBytes ? bytes(v) : num(v); }).join(', ') %>"><polyline points="<%= m.points %>" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></polyline></svg>
+            </li>
+          <% }) %>
+        </ul>
+        <div class="pd-card-footer">One point per completed scan; the change is against the scan before the latest.</div>
+      <% } %>
+    </section>
+
+    <section class="pd-card" id="inventory" aria-labelledby="inventoryHeading">
+      <div class="pd-card-header">
+        <h2 class="pd-card-title" id="inventoryHeading"><i data-lucide="boxes" aria-hidden="true"></i>Inventory changes</h2>
+      </div>
+      <div class="pd-grid-scroll" style="max-height:none;border-top:0;">
+      <table class="pd-table chg-compact" data-no-sort>
+        <caption class="visually-hidden">Items added, removed and updated by type</caption>
+        <thead><tr><th scope="col">Type</th><th scope="col" class="is-num">Now</th><% if (hasBase) { %><th scope="col" class="is-num">+</th><th scope="col" class="is-num">−</th><th scope="col" class="is-num" title="Present in both scans and changed in between">Upd.</th><% } %></tr></thead>
+        <tbody>
+          <tr><th scope="row">Workspaces</th><td class="is-num"><%= num(c.inventory.workspaces.now) %></td><% if (hasBase) { %><td class="is-num"><%= num(c.inventory.workspaces.added) %></td><td class="is-num"><%= num(c.inventory.workspaces.removed) %></td><td class="is-num">—</td><% } %></tr>
+          <% c.inventory.types.slice(0, 12).forEach(function(t) { %>
+            <tr><th scope="row" class="fw-normal"><%= t.type %></th><td class="is-num"><%= num(t.now) %></td><% if (hasBase) { %><td class="is-num"><%= num(t.added) %></td><td class="is-num"><%= num(t.removed) %></td><td class="is-num"><%= num(t.updated) %></td><% } %></tr>
+          <% }) %>
+        </tbody>
+      </table>
+      </div>
+      <% if (c.inventory.types.length > 12) { %><div class="pd-card-footer"><%= c.inventory.types.length - 12 %> more types with fewer changes.</div><% } %>
+    </section>
+  </aside>
+</div>
+
+<% if (tenants.length) { %>
+  <section class="pd-card chg-tenants" aria-labelledby="tenantsHeading">
+    <div class="pd-card-header">
+      <h2 class="pd-card-title" id="tenantsHeading"><i data-lucide="building-2" aria-hidden="true"></i>Your tenants side by side</h2>
+      <span class="pd-card-meta">Latest whole-tenant scan of each; change against that tenant's previous scan</span>
+    </div>
+    <div class="pd-grid-scroll" style="max-height:none;">
+      <table class="pd-table" data-no-sort>
+        <thead><tr><th scope="col">Tenant</th><th scope="col" class="is-num">Workspaces</th><th scope="col" class="is-num">Items</th><th scope="col" class="is-num">People with access</th><th scope="col" class="is-num">Creators</th><th scope="col" class="is-num">OneLake storage</th><th scope="col">Last scan</th></tr></thead>
+        <tbody>
+          <% tenants.forEach(function(t) {
+               function cell(v, d, asBytes) { if (v === null) return '<span class="pd-not-evaluated">Not collected</span>'; var s = asBytes ? bytes(v) : num(v); if (d) s += ' <span class="pd-cell-sub">' + signed(d, asBytes) + '</span>'; return s; } %>
+            <tr>
+              <th scope="row"><a href="/governance/changes?runId=<%= t.runId %>"><%= t.name %></a><% if (t.runId === run.id) { %> <span class="pd-badge pd-badge--brand">Selected</span><% } %></th>
+              <td class="is-num"><%- cell(t.workspaces, t.workspacesChange) %></td>
+              <td class="is-num"><%- cell(t.items, t.itemsChange) %></td>
+              <td class="is-num"><%- cell(t.people, t.peopleChange) %></td>
+              <td class="is-num"><%- cell(t.creators, t.creatorsChange) %></td>
+              <td class="is-num"><%- cell(t.storage, t.storageChange, true) %></td>
+              <td><%= when(t.scannedAt) %></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </section>
+<% } %>
+
+<script>
+(function () {
+  var list = document.getElementById('findingList');
+  if (!list) return;
+  var status = '<%= hasBase ? 'new' : 'open' %>', sev = 'all';
+  var empty = document.getElementById('findingEmpty');
+  function apply() {
+    var shown = 0;
+    list.querySelectorAll('.chg-finding').forEach(function (row) {
+      var s = row.getAttribute('data-status');
+      var okStatus = status === 'open' ? s !== 'resolved' : s === status;
+      var ok = okStatus && (sev === 'all' || row.getAttribute('data-sev') === sev);
+      row.hidden = !ok;
+      if (ok) shown++;
+    });
+    if (empty) empty.hidden = shown > 0;
+  }
+  function wire(selector, attr, set) {
+    document.querySelectorAll(selector).forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        document.querySelectorAll(selector).forEach(function (b) { b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'); });
+        set(btn.getAttribute(attr));
+        apply();
+      });
+    });
+  }
+  wire('.js-status', 'data-status', function (v) { status = v; });
+  wire('.js-sev', 'data-sev', function (v) { sev = v; });
+  apply();
+})();
+</script>
+<% } %>
+
+<%- include('../partials/footer') %>
