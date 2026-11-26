@@ -7779,3 +7779,246 @@ test('the Since Last Scan page renders a comparison and a first scan', async () 
   assert.match(first, /No earlier scan to compare with/);
   assert.doesNotMatch(first, /data-status="new"/);
 });
+
+// ── Governance Outcome (fixed rules, no generated text) ──
+
+const SOFTWAREONE = '77f4d6ee-95d6-499c-bdfc-786d81583d02';
+const OTHER_TENANT = '86b46898-3da5-42e8-93ba-28477cf0e5ef';
+
+// Rows shaped like the spec's queries, reproducing its acceptance figures.
+function outcomeFixture() {
+  const ws = (name, items, users, extra = {}) => ({
+    workspace_id: 'id-' + name, name, capacity_sku: 'sku' in extra ? extra.sku : 'F8', item_count: items, user_count: users,
+    no_description: 1, no_pipeline: 1, is_empty: items === 0 ? 1 : 0, single_principal: users === 1 ? 1 : 0,
+    no_sku: extra.sku === null ? 1 : 0, is_capacity_metrics: name.startsWith('Microsoft Fabric Capacity Metrics') ? 1 : 0,
+  });
+  const workspaces = [ws('DemoFabric', 100, 4), ws('Test', 93, 3), ws('ws_demo_dev', 72, 2)];
+  const filler = [40, 30, 25, 20, 18, 15, 12, 10, 9, 8, 7, 6, 5, 5, 4, 4, 3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1];
+  filler.forEach((items, i) => workspaces.push(ws('ws_' + i, items, 2, { sku: i < 9 ? null : (i < 25 ? 'F2' : 'F8') })));
+  workspaces.push(ws('Microsoft Fabric Capacity Metrics', 0 + 1, 2), ws('Microsoft Fabric Capacity Metrics 2', 1, 2));
+  workspaces.push(ws('ws_poc_adventureworks', 0, 2), ws('test_gn', 0, 1));
+  const run = { run_id: 37, tenant_id: SOFTWAREONE, sp_name: 'SoftwareOne', status: 'completed', started_at: new Date('2026-11-26T09:20:00Z'), completed_at: new Date('2026-11-26T09:52:30Z'), run_by: 'scheduler', scope_kind: 'tenant' };
+  const totals = {
+    total_workspaces: '63', total_items: '578', total_reports: '45', total_datasets: '94', total_dashboards: '0', total_dataflows: '6',
+    total_lakehouses: '48', total_notebooks: '104', total_pipelines: '76', total_warehouses: '67', total_users: '27', creator_count: '17',
+    explorer_count: '10', capacity_count: '11', workspaces_on_capacity: '28', workspaces_on_shared_capacity: '0', total_storage_size: '0',
+    total_storage_files: '0', storage_scanned_count: '0', tenant_settings_total: '189', tenant_settings_enabled: '120', tenant_settings_disabled: '69',
+    tenant_settings_group_scoped: '3', tenant_settings_delegated: '21', captured_at: new Date('2026-11-26T09:52:31Z'),
+  };
+  const trendRow = (id, at, w, items, wh, nb, pl, st) => ({ run_id: id, completed_at: new Date(at), total_workspaces: w, total_items: items, total_warehouses: wh, total_notebooks: nb, total_pipelines: pl, tenant_settings_total: st });
+  return {
+    run,
+    data: {
+      totals,
+      workspacesByType: [{ type: 'Workspace', workspaces: 37 }, { type: 'AdminWorkspace', workspaces: 1 }, { type: 'Personal', workspaces: 25 }],
+      skus: [{ sku: 'F8', workspaces: 12, items: 407, pct_items: 70.4 }, { sku: 'F2', workspaces: 16, items: 120, pct_items: 20.8 }, { sku: '(not recorded)', workspaces: 9, items: 51, pct_items: 8.8 }],
+      workspaces,
+      accessRun: { access_run_id: 36, access_completed_at: new Date('2026-11-25T18:10:00Z') },
+      access: [
+        { principal_type: 'User', access_right: 'Admin', assignments: 55, distinct_principals: 12 },
+        { principal_type: 'User', access_right: 'Member', assignments: 10, distinct_principals: 6 },
+        { principal_type: 'App', access_right: 'Admin', assignments: 41, distinct_principals: 3 },
+        { principal_type: 'App', access_right: 'Contributor', assignments: 2, distinct_principals: 1 },
+      ],
+      trend: [
+        trendRow(24, '2026-11-02T10:00:00Z', 55, 470, 30, 90, 70, 189),
+        trendRow(28, '2026-11-10T10:00:00Z', 58, 500, 33, 95, 72, 189),
+        trendRow(29, '2026-11-12T10:00:00Z', 60, 520, 35, 98, 74, 189),
+        trendRow(36, '2026-11-25T18:10:00Z', 62, 560, 36, 102, 75, 189),
+        trendRow(37, '2026-11-26T09:52:30Z', 63, 578, 67, 104, 76, 189),
+      ],
+      deletions: Array.from({ length: 28 }, (_, i) => ({ workspace_name: 'old_' + i, state: 'Deleted', deleted_at: new Date(Date.UTC(2026, 10, 1 + (i % 25))), run_id: 29 })),
+    },
+  };
+}
+
+function buildFixtureOutcome(mutate) {
+  const { buildOutcome, loadRules } = require('../src/services/governanceRulesService');
+  const fx = outcomeFixture();
+  if (mutate) mutate(fx);
+  return buildOutcome({ run: fx.run, data: fx.data, rules: loadRules(), connectionMode: 'sql-login', generatedAt: new Date('2026-11-26T10:00:00Z'), trigger: 'after-scan' });
+}
+
+test('governance outcome: KPIs, types and SKUs are the stored values, read as numbers', () => {
+  const o = buildFixtureOutcome();
+  assert.equal(o.run.id, 37);
+  assert.equal(o.dataAsOf, '2026-11-26T09:52:30.000Z');
+  assert.deepEqual([o.kpis.workspaces, o.kpis.items, o.kpis.users, o.kpis.creators, o.kpis.explorers, o.kpis.capacities], [63, 578, 27, 17, 10, 11]);
+  assert.deepEqual(o.kpis.settings, { total: 189, enabled: 120, disabled: 69, groupScoped: 3, delegated: 21 });
+  assert.deepEqual(o.itemTypes.map(t => t.value), [45, 94, 0, 6, 48, 104, 76, 67]);
+  assert.deepEqual(o.workspacesByType.map(t => t.type + ' ' + t.workspaces), ['Workspace 37', 'Personal 25', 'AdminWorkspace 1']);
+  assert.deepEqual(o.skus.find(s => s.sku === 'F8'), { sku: 'F8', workspaces: 12, items: 407, pctItems: 70.4 });
+  assert.equal(o.kpis.storage.status, 'Not collected');
+  assert.equal(o.kpis.storage.raw, null, 'zero storage from an unscanned run is not a value');
+});
+
+test('governance outcome: the fixed rules reproduce the acceptance findings', () => {
+  const o = buildFixtureOutcome();
+  const f = id => o.findings.find(x => x.id === id);
+  assert.deepEqual([f('F1').status, f('F1').count, f('F1').denominator], ['Fail', 37, 37]);
+  assert.deepEqual([f('F2').status, f('F2').count, f('F2').denominator], ['Potential risk', 37, 37]);
+  assert.deepEqual([f('F3').status, f('F3').count, f('F3').denominator, f('F3').value], ['Potential risk', 96, 108, 88.9]);
+  assert.deepEqual(f('F3').affected, [], 'no person is named on the main page');
+  assert.deepEqual([f('F4').count, f('F4').affected.map(a => a.name)], [1, ['test_gn']]);
+  assert.deepEqual(f('F5').affected.map(a => a.name).sort(), ['test_gn', 'ws_poc_adventureworks']);
+  assert.deepEqual([f('F6').status, f('F6').count], ['Potential risk', 2]);
+  assert.deepEqual([f('F7').status, f('F7').value, f('F7').affected.map(a => a.name)], ['Potential risk', 45.8, ['DemoFabric', 'Test', 'ws_demo_dev']]);
+  assert.equal(f('F8').status, 'Unknown', 'nine workspaces have no SKU while none is on shared capacity');
+  assert.equal(f('T1').status, 'Potential risk');
+  assert.deepEqual(f('T1').affected.map(a => a.name + ' ' + a.detail), ['Warehouses 36 → 67 (+86.1%)']);
+  assert.deepEqual(o.findings.map(x => x.severity), o.findings.map(x => x.severity).slice().sort((a, b) => ({ High: 0, Medium: 1, Low: 2 })[a] - ({ High: 0, Medium: 1, Low: 2 })[b]), 'High before Medium before Low');
+  assert.ok(o.findings.every(x => ['Pass', 'Fail', 'Potential risk', 'Unknown'].includes(x.status)));
+  assert.doesNotMatch(JSON.stringify(o), /compliant|compliance score/i);
+});
+
+test('governance outcome: access, trend, deletions and data gaps follow the spec', () => {
+  const o = buildFixtureOutcome();
+  assert.equal(o.access.runId, 36);
+  assert.equal(o.access.isLatestRun, false);
+  assert.deepEqual([o.access.totalAssignments, o.access.adminAssignments, o.access.adminSharePct, o.access.groupAssignments], [108, 96, 88.9, 0]);
+  assert.deepEqual(o.trend.runs.map(r => r.runId), [24, 28, 29, 36, 37]);
+  assert.deepEqual(o.trend.runs[4].changes.total_warehouses, { abs: 31, pct: 86.1, hit: true });
+  assert.equal(o.deletions.length, 28);
+  const gapIds = o.gaps.map(g => g.id);
+  assert.ok(gapIds.includes('storage-not-collected'));
+  assert.ok(gapIds.includes('access-older-run'));
+  assert.match(o.gaps.find(g => g.id === 'access-older-run').message, /^Access data from run 36 \(2026-11-25 18:10:00 UTC\); latest run has no access data\.$/);
+  assert.ok(gapIds.includes('sku-not-recorded'));
+});
+
+test('governance outcome: missing data is Unknown, never 0 or Pass', () => {
+  const o = buildFixtureOutcome(fx => {
+    fx.data.totals = null;
+    fx.data.accessRun = null;
+    fx.data.access = [];
+    fx.data.trend = fx.data.trend.slice(-1);
+    fx.data.workspaces = [];
+  });
+  assert.equal(o.kpis.workspaces, null);
+  assert.equal(o.kpis.storage.status, 'Unknown');
+  assert.ok(o.itemTypes.every(t => t.value === null));
+  assert.ok(o.findings.every(f => f.status === 'Unknown' && f.count === null), JSON.stringify(o.findings.map(f => f.id + ':' + f.status)));
+  assert.ok(o.gaps.some(g => g.id === 'totals-missing'));
+  assert.ok(o.gaps.some(g => g.id === 'access-missing'));
+});
+
+test('governance outcome: thresholds come from the rules file and a change from 0 has no percentage', () => {
+  const { buildOutcome, loadRules, validateRules, pctChange } = require('../src/services/governanceRulesService');
+  const rules = loadRules();
+  const strict = { ...rules, thresholds: { ...rules.thresholds, topWorkspacesItemSharePct: 50, adminSharePct: 95 } };
+  const fx = outcomeFixture();
+  fx.data.access.push({ principal_type: 'Group', access_right: 'Viewer', assignments: 5, distinct_principals: 2 });
+  const o = buildOutcome({ run: fx.run, data: fx.data, rules: strict, generatedAt: new Date() });
+  assert.equal(o.findings.find(f => f.id === 'F7').status, 'Pass', '45.8% is under a 50% threshold');
+  assert.equal(o.findings.find(f => f.id === 'F3').status, 'Pass', 'under 95% with a group present');
+  assert.equal(pctChange(5, 0), null);
+  assert.throws(() => validateRules({ ...rules, rules: [{ id: 'X', check: 'empty', severity: 'Low', statusIfHit: 'Compliant' }] }), /Fail, Potential risk or Unknown/);
+});
+
+test('governance outcome: only tenants the reader may see, and never another tenant', () => {
+  const { allowedTenants, pickTenant } = require('../src/services/governanceOutcomeService');
+  const runs = [
+    { id: 37, tenant_id: SOFTWAREONE.toUpperCase(), sp_id: 1, sp_name: 'SoftwareOne', completed_at: '2026-11-26' },
+    { id: 50, tenant_id: OTHER_TENANT, sp_id: 2, sp_name: 'Other', completed_at: '2026-11-26' },
+  ];
+  const reader = resolveFor({ role: 'user', is_active: true, tenantIds: [1], sectionKeys: [], tenantSections: { 1: ['governance'] } });
+  const allowed = allowedTenants(reader, runs);
+  assert.deepEqual(allowed.map(t => t.id), [SOFTWAREONE]);
+  assert.deepEqual(pickTenant(OTHER_TENANT, allowed, { defaultTenantId: SOFTWAREONE }), { error: 403, message: 'You do not have access to that tenant.' });
+  assert.deepEqual(pickTenant(undefined, allowed, { defaultTenantId: SOFTWAREONE }), { tenantId: SOFTWAREONE });
+  assert.equal(pickTenant('not-a-guid', allowed).error, 400);
+  const noGovernance = resolveFor({ role: 'user', is_active: true, tenantIds: [1], sectionKeys: [], tenantSections: { 1: ['workspaces'] } });
+  assert.deepEqual(allowedTenants(noGovernance, runs), []);
+  assert.equal(pickTenant(undefined, [], { defaultTenantId: SOFTWAREONE }).error, 403);
+});
+
+test('governance outcome: cached per tenant and run, regenerated by a new scan or on demand', async () => {
+  const service = require('../src/services/governanceOutcomeService');
+  service.clearCache();
+  const fx = outcomeFixture();
+  let latest = fx.run;
+  let reads = 0;
+  const repo = {
+    latestRun: async tenantId => (tenantId === SOFTWAREONE ? latest : null),
+    readOutcomeData: async (tenantId, runId) => { reads += 1; assert.equal(tenantId, SOFTWAREONE); assert.equal(runId, latest.run_id); return fx.data; },
+  };
+  assert.equal((await service.getOutcome(OTHER_TENANT, { repo })).status, 404, 'No completed tenant scan');
+  const first = await service.getOutcome(SOFTWAREONE, { repo });
+  const second = await service.getOutcome(SOFTWAREONE, { repo });
+  assert.equal(reads, 1);
+  assert.equal(second.cached, true);
+  assert.equal(first.outcome.tenant.id, SOFTWAREONE);
+  await service.getOutcome(SOFTWAREONE, { repo, force: true });
+  assert.equal(reads, 2, 'Regenerate reads again');
+  latest = { ...fx.run, run_id: 38 };
+  const after = await service.getOutcome(SOFTWAREONE, { repo });
+  assert.equal(reads, 3, 'a new scan makes the cached outcome stale');
+  assert.equal(after.outcome.run.id, 38);
+  const generated = await service.generateAfterScan(SOFTWAREONE, { repo });
+  assert.equal(generated.generated, true);
+  assert.deepEqual(await service.generateAfterScan(SOFTWAREONE, { scopeKind: 'workspaces', repo }), { generated: false, reason: 'scoped scan' });
+  latest = { ...fx.run, tenant_id: OTHER_TENANT };
+  await assert.rejects(service.getOutcome(SOFTWAREONE, { repo, force: true }), /does not belong/);
+  service.clearCache();
+});
+
+test('governance outcome: the endpoint answers 403 for a tenant the reader cannot see', async () => {
+  const express = require('express');
+  const { createRouter } = require('../src/routes/governanceOutcome');
+  const real = require('../src/services/governanceOutcomeService');
+  const calls = [];
+  const fake = { ...real, getOutcome: async (tenantId, options) => { calls.push([tenantId, options.force === true]); return { status: 200, outcome: { tenant: { id: tenantId }, meta: {} }, cached: false }; } };
+  const reader = resolveFor({ role: 'user', is_active: true, tenantIds: [1], sectionKeys: [], tenantSections: { 1: ['governance'] } });
+  const app = express();
+  app.use(express.json());
+  app.use((req, res, next) => { req.permissions = reader; res.locals.availableRuns = [{ id: 37, tenant_id: SOFTWAREONE, sp_id: 1, sp_name: 'SoftwareOne' }]; next(); });
+  app.use('/api/governance', createRouter({ service: fake }));
+  const server = app.listen(0);
+  const base = 'http://127.0.0.1:' + server.address().port + '/api/governance/summary';
+  try {
+    const denied = await fetch(base + '?tenantId=' + OTHER_TENANT);
+    assert.equal(denied.status, 403);
+    const ok = await fetch(base + '?tenantId=' + SOFTWAREONE);
+    assert.equal(ok.status, 200);
+    assert.equal((await ok.json()).tenant.id, SOFTWAREONE);
+    assert.equal((await fetch(base + '/regenerate?tenantId=' + SOFTWAREONE, { method: 'POST' })).status, 415, 'a plain form post cannot trigger it');
+    assert.equal((await fetch(base + '/regenerate?tenantId=' + SOFTWAREONE, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 200);
+    assert.deepEqual(calls, [[SOFTWAREONE, false], [SOFTWAREONE, true]], 'the other tenant never reached the service');
+  } finally {
+    server.close();
+  }
+});
+
+test('governance outcome: the data access layer only reads, only the five tables, always by tenant', () => {
+  const fs = require('fs');
+  const { SQL } = require('../src/services/governanceOutcomeRepository');
+  const allowedTables = ['analysis_runs', 'analysis_run_totals', 'analysis_workspaces', 'analysis_workspace_users', 'workspace_states'];
+  for (const [name, sql] of Object.entries(SQL)) {
+    assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|MERGE|ALTER|CREATE|DROP|TRUNCATE|EXEC|EXECUTE|GRANT)\b/i, name + ' must only read');
+    assert.doesNotMatch(sql, /SELECT\s+\*/i, name + ' must name its columns');
+    assert.doesNotMatch(sql, /service_principals|client_secret/i, name);
+    assert.doesNotMatch(sql, /display_name|email/i, name + ' must not read people\'s names or addresses');
+    assert.match(sql, /@TenantId/, name + ' must be tied to the tenant');
+    for (const table of sql.match(/dbo\.(\w+)/g) || []) assert.ok(allowedTables.includes(table.slice(4)), name + ' reads ' + table);
+  }
+  const sources = ['src/services/governanceOutcomeRepository.js', 'src/services/governanceRulesService.js', 'src/services/governanceOutcomeService.js', 'src/routes/governanceOutcome.js', 'src/public/js/governance-outcome.js']
+    .map(file => fs.readFileSync(file, 'utf8')).join('\n');
+  assert.doesNotMatch(sources, /openai|anthropic|azure-openai|\bllm\b|chat\/completions|generative/i, 'no model or AI service is called');
+  assert.doesNotMatch(sources, /innerHTML/, 'the page builds its markup with textContent only');
+  assert.doesNotMatch(sources, /password\s*[:=]\s*['"][^'"]+['"]/i, 'no credentials in code');
+});
+
+test('Home shows the governance outcome for a tenant the reader may see, and nothing otherwise', async () => {
+  const ejs = require('ejs');
+  const locals = {
+    title: 'Home', user: { name: 'T' }, currentUser: { name: 'T', email: 't@example.com' }, currentPath: '/', pagePath: '/', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, prerequisites: [], visibleSections: [],
+  };
+  const shown = await ejs.renderFile('src/views/home.ejs', { ...locals, outcomeTenants: [{ id: SOFTWAREONE, name: 'SoftwareOne' }, { id: '11111111-1111-4111-8111-111111111111', name: 'Contoso' }], outcomeTenantId: SOFTWAREONE });
+  assert.match(shown, new RegExp('id="governanceOutcome" data-tenant-id="' + SOFTWAREONE + '"'));
+  assert.match(shown, /src="\/js\/governance-outcome\.js"/);
+  assert.match(shown, /aria-busy="true"/, 'a loading state is shown until the data arrives');
+  assert.match(shown, /id="goTenant"/);
+  const hidden = await ejs.renderFile('src/views/home.ejs', { ...locals, outcomeTenants: [], outcomeTenantId: null });
+  assert.doesNotMatch(hidden, /governanceOutcome/);
+});

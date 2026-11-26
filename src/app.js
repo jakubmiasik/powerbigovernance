@@ -167,7 +167,9 @@ const qualityRoutes = require('./routes/quality');
 const pipelineRoutes = require('./routes/pipelines');
 const tenantSettingsRoutes = require('./routes/tenantSettings');
 const permissionRoutes = require('./routes/permissions');
+const governanceOutcomeRoutes = require('./routes/governanceOutcome');
 
+app.use('/api/governance', governanceOutcomeRoutes);
 app.use('/', indexRoutes);
 app.use('/settings/permissions', permissionRoutes);
 app.use('/settings/access', accessRoutes);

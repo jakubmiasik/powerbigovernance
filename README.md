@@ -313,6 +313,87 @@ A score is only ever about what the scan could see. **A workspace whose access l
 
 Access held only by named people works today and falls apart quietly: nothing tells anyone to remove a leaver, and nothing grants a joiner. The check fires when at least one individual account holds a role and **no security group holds any** — a single group anywhere in the list clears it, because that is the thing whose membership is maintained somewhere else. The [role granting page](#granting-a-user-or-a-group-a-role) is where a group is given one.
 
+## Governance Outcome
+
+The first thing on **Home**: a summary of one tenant's latest completed whole-tenant scan, built only from fixed SQL queries, arithmetic and fixed rules. No model, AI service or generated text is involved; every sentence on it is a template in `src/services/governanceRulesService.js`.
+
+It shows: the run (tenant, tenant ID, run, scan start and end, run by, *Data as of*), KPIs, items by type, workspaces by type, capacity SKUs, the findings table, access by principal type and role, the trend across whole-tenant scans, recorded workspace deletions, and a **Data gaps and limitations** box. Times are UTC. A value that was not collected shows as *Unknown* or *Not collected*, never 0.
+
+**When it is generated**
+- As the **last step of every completed whole-tenant scan** (the scan log records the result; a failure here never fails the scan).
+- **On demand**, with *Regenerate* on Home.
+- On first view when nothing is cached (after a restart, for example).
+
+The same data always gives the same outcome.
+
+**Cache.** The outcome is cached in memory per *(tenant ID, run ID)*. Every request first runs Q1 (the tenant's latest completed tenant scan), so a new scan changes the run ID and the cached outcome is no longer used. Workspace deletions recorded *between* scans appear after *Regenerate* or the next scan. `GOVERNANCE_OUTCOME_CACHE_TTL_MS` can also expire entries by age (0 = only a new scan or *Regenerate* refreshes).
+
+**API**
+- `GET /api/governance/summary?tenantId={id}` returns the outcome as one JSON object.
+  - `403` for a tenant the signed-in user may not see.
+  - `404` *No completed tenant scan*.
+- `POST /api/governance/summary/regenerate?tenantId={id}` generates it again now. It must be sent as `application/json`.
+
+A user may see a tenant when they may use **Governance Overview** for a service principal that scanned it (administrators: every tenant with a scan). Without `tenantId`, the configured tenant is used if the user may see it, otherwise the tenant of the selected scan.
+
+**Rules.** `src/config/governance-rules.json` holds rules F1–F8 and T1: id, title, category, severity, the status when hit (*Fail*, *Potential risk* or *Unknown*) and the thresholds:
+- `adminSharePct` (50)
+- `topWorkspacesItemSharePct` (40) with `topWorkspacesCount` (3)
+- `trendChangePct` (25)
+
+A rule that finds nothing is *Pass*. A rule that cannot be evaluated is *Unknown*. The page never claims compliance. Edit the file, or point `GOVERNANCE_RULES_FILE` at your own copy, then press *Regenerate*.
+
+**Data access.** `src/services/governanceOutcomeRepository.js` holds the queries (Q1–Q8):
+- parameterised and SELECT only;
+- they read only `analysis_runs`, `analysis_run_totals`, `analysis_workspaces`, `analysis_workspace_users` and `workspace_states`;
+- they never read the credentials table, people's names or e-mail addresses;
+- every query is tied to `@TenantId`.
+
+A test checks these rules against the SQL itself.
+
+### Configuration
+
+| Setting | Purpose | Default |
+|---|---|---|
+| `GOVERNANCE_TENANT_ID` | Tenant shown by default | `77f4d6ee-95d6-499c-bdfc-786d81583d02` |
+| `GOVERNANCE_RULES_FILE` | Path to a rules file | `src/config/governance-rules.json` |
+| `GOVERNANCE_OUTCOME_CACHE_TTL_MS` | Optional age limit for cached outcomes | `0` (until the next scan) |
+| `GOVERNANCE_SQL_CLIENT_ID` | Client ID of a user-assigned managed identity that only reads (preferred) | — |
+| `GOVERNANCE_SQL_USER` / `GOVERNANCE_SQL_PASSWORD` | Or a contained SQL user that only reads; keep the password in App Service settings as a Key Vault reference | — |
+| `GOVERNANCE_SQL_SERVER` / `GOVERNANCE_SQL_DATABASE` | Only if the outcome reads a different server or database | `SQL_SERVER` / `SQL_DATABASE` |
+
+Nothing secret is in code or in the repository. If no reader is configured, the outcome reads through the application's own connection. The *Data gaps* box then says so.
+
+Create the read-only principal once, as a database administrator:
+
+```sql
+-- A user-assigned managed identity (preferred), or a contained SQL user:
+CREATE USER [governance-reader] FROM EXTERNAL PROVIDER;
+-- CREATE USER [governance-reader] WITH PASSWORD = '<from your secret store>';
+GRANT SELECT ON dbo.analysis_runs            TO [governance-reader];
+GRANT SELECT ON dbo.analysis_run_totals      TO [governance-reader];
+GRANT SELECT ON dbo.analysis_workspaces      TO [governance-reader];
+GRANT SELECT ON dbo.analysis_workspace_users TO [governance-reader];
+GRANT SELECT ON dbo.workspace_states         TO [governance-reader];
+```
+
+### Checking it against the database
+
+```bash
+npm run governance:check                          # the configured tenant
+npm run governance:check -- <tenantId> --json     # the full JSON
+npm run governance:check -- --acceptance          # compare with the agreed SoftwareOne figures
+```
+
+`--acceptance` checks:
+- run 37 and its completion time
+- the KPIs, item types, workspace types and SKUs
+- F1/F2/F4/F5 counts, with F3, F6, F7 and T1 hit
+- access from run 36 (108 / 96 / 0 groups) and its banner
+- the trend runs, 28 deletions and storage "Not collected"
+
+It exits 1 on any mismatch.
+
 ## Workspace Access
 
 **Settings → Grant Access** (`/settings/access`) answers who can reach which workspace, and adds the service principal where it is missing. The two belong on one page: granting a principal access without seeing the access model is how a service account ends up Admin on every workspace in the tenant, and reviewing access without being able to act on it is a report nobody comes back to.

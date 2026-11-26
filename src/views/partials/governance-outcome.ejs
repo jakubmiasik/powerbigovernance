@@ -1,0 +1,29 @@
+<%
+  // Governance Outcome shell. The data comes from /api/governance/summary and is
+  // drawn by /js/governance-outcome.js: fixed queries and fixed rules, no generated text.
+  var oTenants = typeof outcomeTenants !== 'undefined' && outcomeTenants ? outcomeTenants : [];
+  var oTenant = typeof outcomeTenantId !== 'undefined' ? outcomeTenantId : null;
+%>
+<% if (oTenant) { %>
+<section class="go" id="governanceOutcome" data-tenant-id="<%= oTenant %>" aria-labelledby="goTitle">
+  <div class="go-head">
+    <div class="pd-min-w-0">
+      <h2 class="go-title" id="goTitle"><i data-lucide="clipboard-check" aria-hidden="true"></i>Governance outcome</h2>
+      <p class="go-sub" id="goSub">Fixed rules over the latest completed whole-tenant scan.</p>
+    </div>
+    <div class="go-actions">
+      <% if (oTenants.length > 1) { %>
+        <label for="goTenant" class="visually-hidden">Tenant</label>
+        <select id="goTenant" class="form-select form-select-sm">
+          <% oTenants.forEach(function(t) { %><option value="<%= t.id %>"<%= t.id === oTenant ? ' selected' : '' %>><%= t.name %></option><% }) %>
+        </select>
+      <% } %>
+      <button type="button" class="pd-btn pd-btn--sm" id="goRegenerate"><i data-lucide="refresh-cw" aria-hidden="true"></i><span>Regenerate</span></button>
+    </div>
+  </div>
+  <div id="goBody" aria-live="polite">
+    <div class="pd-card go-state" role="status" aria-busy="true"><span class="pd-spinner" aria-hidden="true"></span> Loading the governance outcome…</div>
+  </div>
+</section>
+<script src="/js/governance-outcome.js" defer></script>
+<% } %>

@@ -9,6 +9,8 @@
   </button>
 </div>
 
+<%- include('./partials/governance-outcome') %>
+
 <% var homeSections = (typeof visibleSections !== 'undefined' && visibleSections ? visibleSections : []).map(function(s) { return s.key; });
    var homeRun = typeof globalRun !== 'undefined' ? globalRun : null;
    if (homeRun && homeSections.indexOf('governance') !== -1) { %>
