@@ -10,56 +10,60 @@
  * be its own section while /quality remains another.
  */
 
+// Listed in menu order. `group` is the sidebar heading a section sits under, and the
+// same heading groups the sections in the access panel, so both read the same way.
+const NAV_GROUPS = ['Overview', 'Governance', 'Security & Access', 'Operations', 'Configuration'];
+
 const APP_SECTIONS = [
   {
+    key: 'governance', label: 'Governance Overview', icon: 'bi-shield-check', href: '/governance',
+    group: 'Overview', prefixes: ['/governance'],
+  },
+  {
     key: 'workspaces', label: 'Workspaces', icon: 'bi-collection', href: '/workspaces',
-    group: 'Main', prefixes: ['/workspaces'],
-  },
-  {
-    key: 'governance', label: 'Governance', icon: 'bi-shield-check', href: '/governance',
-    group: 'Main', prefixes: ['/governance'],
-  },
-  {
-    key: 'pipelines', label: 'Deployment Pipelines', icon: 'bi-diagram-3', href: '/pipelines',
-    group: 'Main', prefixes: ['/pipelines'],
+    group: 'Governance', prefixes: ['/workspaces'],
   },
   {
     key: 'tenant-settings', label: 'Tenant Settings', icon: 'bi-sliders', href: '/tenant-settings',
-    group: 'Main', prefixes: ['/tenant-settings'],
+    group: 'Governance', prefixes: ['/tenant-settings'],
   },
   {
-    key: 'analysis', label: 'Run Analysis', icon: 'bi-play-circle', href: '/analysis',
-    group: 'Operations', prefixes: ['/analysis'],
+    key: 'quality', label: 'Quality Configuration', icon: 'bi-patch-check', href: '/quality',
+    group: 'Governance', prefixes: ['/quality'],
   },
   {
-    key: 'migrate', label: 'Migrate', icon: 'bi-arrow-left-right', href: '/migrate',
-    group: 'Operations', prefixes: ['/migrate'],
+    key: 'reconciliation', label: 'Reconciliation', icon: 'bi-clipboard2-check', href: '/reconciliation',
+    group: 'Governance', prefixes: ['/reconciliation'],
+  },
+  {
+    key: 'security-groups', label: 'Security Groups', icon: 'bi-people', href: '/quality/security-groups',
+    group: 'Security & Access', prefixes: ['/quality/security-groups'],
   },
   {
     key: 'capacities', label: 'Capacities', icon: 'bi-lightning', href: '/capacities',
     group: 'Operations', prefixes: ['/capacities'],
   },
   {
-    key: 'security-groups', label: 'Security Groups', icon: 'bi-people', href: '/quality/security-groups',
-    group: 'Quality', prefixes: ['/quality/security-groups'],
+    key: 'pipelines', label: 'Deployment Pipelines', icon: 'bi-diagram-3', href: '/pipelines',
+    group: 'Operations', prefixes: ['/pipelines'],
   },
   {
-    key: 'quality', label: 'Quality Configuration', icon: 'bi-patch-check', href: '/quality',
-    group: 'Quality', prefixes: ['/quality'],
+    key: 'migrate', label: 'Migrate Workspaces', icon: 'bi-arrow-left-right', href: '/migrate',
+    group: 'Operations', prefixes: ['/migrate'],
   },
   {
-    key: 'reconciliation', label: 'Reconciliation', icon: 'bi-clipboard2-check', href: '/reconciliation',
-    group: 'Quality', prefixes: ['/reconciliation'],
+    key: 'analysis', label: 'Run Analysis', icon: 'bi-play-circle', href: '/analysis',
+    group: 'Operations', prefixes: ['/analysis'],
   },
   {
     key: 'mdm', label: 'Master Data', icon: 'bi-fingerprint', href: '/mdm',
-    group: 'Quality', prefixes: ['/mdm'],
+    group: 'Configuration', prefixes: ['/mdm'],
   },
   {
     // Configuration holds the credentials and this very permission panel, so it is
     // reserved for administrators and cannot be granted to an ordinary user.
     key: 'settings', label: 'Configuration', icon: 'bi-gear', href: '/settings',
-    group: 'Settings', prefixes: ['/settings'], adminOnly: true,
+    group: 'Configuration', prefixes: ['/settings'], adminOnly: true,
   },
 ];
 
@@ -100,6 +104,7 @@ function sectionLabel(key) {
 }
 
 module.exports = {
+  NAV_GROUPS,
   APP_SECTIONS,
   SECTION_KEYS,
   GRANTABLE_SECTIONS,

@@ -52,7 +52,11 @@ async function loadRuns(req, res, next) {
 
     res.locals.globalRun = selectedRun;
     res.locals.selectedRunId = selectedRun ? selectedRun.id : null;
+    res.locals.runsLoadError = false;
   } catch {
+    // Said out loud in the shell rather than shown as "no scans": an unreachable
+    // store and an empty one need different fixes.
+    res.locals.runsLoadError = true;
     res.locals.availableRuns = [];
     res.locals.globalRun = null;
     res.locals.selectedRunId = null;

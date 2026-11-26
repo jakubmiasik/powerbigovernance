@@ -3,13 +3,29 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title><%= title %> | Power BI Governance</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <title><%= title %> | Fabric Governance</title>
+  <script>
+    // Applied before first paint, so a saved theme, density or collapsed sidebar
+    // does not flash the default first. Storage can be unavailable (private
+    // windows, locked-down browsers); the defaults are then simply kept.
+    (function () {
+      var root = document.documentElement;
+      try {
+        var theme = localStorage.getItem('pbi-gov-theme');
+        if (theme === 'dark' || theme === 'light') { root.setAttribute('data-theme', theme); root.setAttribute('data-bs-theme', theme); }
+        var density = localStorage.getItem('pbi-gov-density');
+        if (density === 'compact' || density === 'comfortable') root.setAttribute('data-density', density);
+        if (localStorage.getItem('pbi-gov-sidebar') === 'collapsed') root.setAttribute('data-sidebar', 'collapsed');
+      } catch (e) { /* keep defaults */ }
+    })();
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
   <link href="/css/style.css" rel="stylesheet">
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to main content</a>
 <%
   var pagePath = typeof currentPath !== 'undefined' ? currentPath : '';
   var breadcrumbItems = typeof breadcrumb !== 'undefined' ? breadcrumb : [];
@@ -20,19 +36,19 @@
   <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="toggleSidebar()"></div>
 
   <!-- Sidebar -->
-  <aside class="sidebar" id="appSidebar">
+  <aside class="sidebar" id="appSidebar" aria-label="Application">
     <div class="sidebar-brand">
-      <a href="/" class="brand-link">
-        <span class="brand-logo">G</span>
-        <span class="brand-text">Power BI Governance<small>Admin Portal</small></span>
+      <a href="/" class="brand-link" aria-label="Fabric Governance home">
+        <span class="brand-logo" aria-hidden="true">FG</span>
+        <span class="brand-text">Fabric Governance<small>Admin portal</small></span>
       </a>
       <button type="button" class="brand-collapse" onclick="collapseSidebar(event)"
-              title="Collapse sidebar" aria-label="Collapse sidebar" id="collapseLink">
-        <i class="bi bi-chevron-double-left" id="collapseIcon"></i>
+              title="Collapse sidebar" aria-label="Collapse sidebar" aria-expanded="true" id="collapseLink">
+        <i class="bi bi-layout-sidebar-inset" id="collapseIcon" aria-hidden="true"></i>
       </button>
     </div>
 
-    <nav class="sidebar-nav">
+    <nav class="sidebar-nav" aria-label="Main navigation">
       <%
         // The menu is built from the sections this user may actually reach. A link
         // that leads to a refusal is worse than no link at all.
@@ -42,69 +58,63 @@
         // everything, so a missing local can never advertise more than it should.
         var navSections = typeof visibleSections !== 'undefined' && visibleSections ? visibleSections : [];
         var isAdminUser = Boolean(typeof permissions !== 'undefined' && permissions && permissions.isAdmin);
-        var navByGroup = {};
-        navSections.forEach(function(section) {
-          (navByGroup[section.group] = navByGroup[section.group] || []).push(section);
-        });
+        var groupOrder = (typeof navGroups !== 'undefined' && navGroups && navGroups.length)
+          ? navGroups.slice()
+          : ['Overview', 'Governance', 'Security & Access', 'Operations', 'Configuration'];
+
         function navActive(section) {
           return section.prefixes.some(function(prefix) {
             return pagePath === prefix || pagePath.indexOf(prefix + '/') === 0;
           });
         }
-      %>
-      <p class="nav-section-title">Main</p>
-      <a href="/" class="sidebar-link <%= pagePath === '/' || pagePath === '/home' ? 'active' : '' %>" title="Home">
-        <i class="bi bi-house"></i> <span>Home</span>
-      </a>
-      <% (navByGroup['Main'] || []).forEach(function(section) { %>
-        <a href="<%= section.href %>" class="sidebar-link <%= navActive(section) ? 'active' : '' %>" title="<%= section.label %>">
-          <i class="bi <%= section.icon %>"></i> <span><%= section.label %></span>
-        </a>
-      <% }) %>
 
-      <% ['Operations', 'Quality'].forEach(function(group) { %>
-        <% if ((navByGroup[group] || []).length) { %>
-          <p class="nav-section-title"><%= group %></p>
-          <% navByGroup[group].forEach(function(section) { %>
-            <a href="<%= section.href %>" class="sidebar-link <%= navActive(section) ? 'active' : '' %>" title="<%= section.label %>">
-              <i class="bi <%= section.icon %>"></i> <span><%= section.label %></span>
+        // Every entry, in menu order. Admin-only pages are not sections a user can be
+        // granted, so they are listed here and shown to administrators only — the
+        // routes behind them check the same thing.
+        var navByGroup = {};
+        function addEntry(group, entry) {
+          if (groupOrder.indexOf(group) === -1) groupOrder.push(group);
+          (navByGroup[group] = navByGroup[group] || []).push(entry);
+        }
+        addEntry('Overview', { href: '/', label: 'Home', icon: 'bi-house', active: pagePath === '/' || pagePath === '/home' });
+        navSections.forEach(function(section) {
+          if (section.adminOnly) return;
+          addEntry(section.group, { href: section.href, label: section.label, icon: section.icon, active: navActive(section) });
+        });
+        if (isAdminUser) {
+          addEntry('Security & Access', { href: '/settings/access', label: 'Grant Access', icon: 'bi-key', active: pagePath.indexOf('/settings/access') === 0 });
+          addEntry('Security & Access', { href: '/settings/permissions', label: 'Users & Access', icon: 'bi-person-badge', active: pagePath.indexOf('/settings/permissions') === 0 });
+          addEntry('Configuration', { href: '/settings/governance', label: 'Governance Configuration', icon: 'bi-rulers', active: pagePath.indexOf('/settings/governance') === 0 });
+          addEntry('Configuration', { href: '/settings', label: 'Configuration', icon: 'bi-gear', active: pagePath === '/settings' });
+        }
+      %>
+      <% groupOrder.forEach(function(group) { var entries = navByGroup[group] || []; if (!entries.length) return; %>
+        <div class="nav-group" role="group" aria-labelledby="nav-group-<%= group.replace(/[^a-z0-9]+/gi, '-').toLowerCase() %>">
+          <p class="nav-section-title" id="nav-group-<%= group.replace(/[^a-z0-9]+/gi, '-').toLowerCase() %>"><%= group %></p>
+          <% entries.forEach(function(entry) { %>
+            <a href="<%= entry.href %>" class="sidebar-link <%= entry.active ? 'active' : '' %>"<% if (entry.active) { %> aria-current="page"<% } %> title="<%= entry.label %>" data-nav-group="<%= group %>">
+              <i class="bi <%= entry.icon %>"></i> <span><%= entry.label %></span>
             </a>
           <% }) %>
-        <% } %>
+        </div>
       <% }) %>
-
-      <% if (isAdminUser) { %>
-        <p class="nav-section-title">Settings</p>
-        <a href="/settings" class="sidebar-link <%= pagePath === '/settings' ? 'active' : '' %>" title="Configuration">
-          <i class="bi bi-gear"></i> <span>Configuration</span>
-        </a>
-        <a href="/settings/permissions" class="sidebar-link <%= pagePath.startsWith('/settings/permissions') ? 'active' : '' %>" title="Users & Access">
-          <i class="bi bi-person-badge"></i> <span>Users &amp; Access</span>
-        </a>
-        <a href="/settings/governance" class="sidebar-link <%= pagePath.startsWith('/settings/governance') ? 'active' : '' %>" title="Governance Configuration">
-          <i class="bi bi-rulers"></i> <span>Governance Configuration</span>
-        </a>
-        <a href="/settings/access" class="sidebar-link <%= pagePath.startsWith('/settings/access') ? 'active' : '' %>" title="Grant Access">
-          <i class="bi bi-key"></i> <span>Grant Access</span>
-        </a>
-      <% } %>
     </nav>
 
     <!-- Sidebar footer: user info -->
     <div class="sidebar-footer">
-      <% if (currentUser) { %>
+      <% if (typeof currentUser !== 'undefined' && currentUser) { %>
         <div class="sidebar-user">
-          <div class="sidebar-user-avatar"><%= (currentUser.name || 'U').charAt(0).toUpperCase() %></div>
+          <div class="sidebar-user-avatar" aria-hidden="true"><%= (currentUser.name || 'U').charAt(0).toUpperCase() %></div>
           <div class="sidebar-user-info">
             <div class="sidebar-user-name"><%= currentUser.name %></div>
             <div class="sidebar-user-email"><%= currentUser.email || '' %></div>
           </div>
         </div>
-        <a href="/.auth/logout?post_logout_redirect_uri=/" class="sidebar-link mt-1" style="font-size:0.8rem;">
+        <a href="/.auth/logout?post_logout_redirect_uri=/" class="sidebar-link" title="Sign out">
           <i class="bi bi-box-arrow-right"></i> <span>Sign Out</span>
         </a>
       <% } else { %>
-        <a href="/.auth/login/aad?post_login_redirect_uri=<%= encodeURIComponent('/') %>" class="sidebar-link">
+        <a href="/.auth/login/aad?post_login_redirect_uri=<%= encodeURIComponent('/') %>" class="sidebar-link" title="Sign in">
           <i class="bi bi-box-arrow-in-right"></i> <span>Sign In</span>
         </a>
       <% } %>
@@ -115,38 +125,56 @@
   <div class="main-content">
     <!-- Top bar -->
     <header class="topbar">
-      <button class="btn btn-sm mobile-toggle" onclick="toggleSidebar()" style="border:1px solid var(--color-border);width:34px;height:34px;display:none;">
-        <i class="bi bi-list"></i>
+      <button type="button" class="icon-btn mobile-toggle" onclick="toggleSidebar()"
+              aria-label="Open navigation" aria-controls="appSidebar" aria-expanded="false" id="mobileNavToggle">
+        <i class="bi bi-list" aria-hidden="true"></i>
       </button>
 
       <!-- Breadcrumb -->
-      <nav class="topbar-breadcrumb">
-        <a href="/"><i class="bi bi-house-fill"></i></a>
-        <% if (breadcrumbItems.length) { %>
+      <nav class="topbar-breadcrumb" aria-label="Breadcrumb">
+        <ol>
+          <li><a href="/" aria-label="Home"><i class="bi bi-house" aria-hidden="true"></i></a></li>
           <% breadcrumbItems.forEach(function(item, idx) { %>
-            <span class="separator">/</span>
-            <% if (idx === breadcrumbItems.length - 1) { %>
-              <span class="current"><%= item.label %></span>
-            <% } else { %>
-              <a href="<%= item.href %>"><%= item.label %></a>
-            <% } %>
+            <li>
+              <span class="separator" aria-hidden="true">/</span>
+              <% if (idx === breadcrumbItems.length - 1) { %>
+                <span class="current" aria-current="page"><%= item.label %></span>
+              <% } else { %>
+                <a href="<%= item.href %>"><%= item.label %></a>
+              <% } %>
+            </li>
           <% }) %>
-        <% } %>
+        </ol>
       </nav>
+
+      <!-- Global search: pages this user can open, and workspaces when they can see them -->
+      <div class="topbar-search" role="search">
+        <label for="globalSearch" class="visually-hidden">Search pages and workspaces</label>
+        <i class="bi bi-search search-glyph" aria-hidden="true"></i>
+        <input type="search" id="globalSearch" class="form-control" placeholder="Search pages and workspaces"
+               autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false"
+               aria-controls="globalSearchResults" aria-autocomplete="list">
+        <span class="kbd-hint search-kbd" aria-hidden="true">Ctrl K</span>
+        <ul id="globalSearchResults" class="search-results" role="listbox" aria-label="Search results" hidden></ul>
+      </div>
 
       <!-- Top bar actions -->
       <div class="topbar-actions">
-        <span class="topbar-timestamp" id="lastRefreshed"></span>
-        <button class="btn-density-toggle" onclick="toggleDensity()" title="Toggle compact/comfortable view (Ctrl+D)">
-          <i class="bi bi-distribute-vertical" id="densityIcon"></i>
+        <button type="button" class="btn-density-toggle" onclick="toggleDensity()"
+                title="Switch to compact rows (Ctrl+D)" aria-label="Switch to compact rows" aria-pressed="false" id="densityToggle">
+          <i class="bi bi-distribute-vertical" id="densityIcon" aria-hidden="true"></i>
         </button>
-        <button class="btn-theme-toggle" onclick="toggleTheme()" title="Toggle dark/light mode (Ctrl+Shift+D)">
-          <i class="bi bi-moon" id="themeIcon"></i>
+        <button type="button" class="btn-theme-toggle" onclick="toggleTheme()"
+                title="Switch to dark theme (Ctrl+Shift+D)" aria-label="Switch to dark theme" id="themeToggle">
+          <i class="bi bi-moon" id="themeIcon" aria-hidden="true"></i>
+        </button>
+        <button type="button" class="icon-btn" data-bs-toggle="modal" data-bs-target="#kbdModal"
+                title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+          <i class="bi bi-keyboard" aria-hidden="true"></i>
         </button>
       </div>
     </header>
 
-    <!-- Run selector -->
     <%
       // Pages that show one specific run (analysis results and anything reached from
       // them) lock the selector: switching scans there would silently contradict the
@@ -154,59 +182,108 @@
       var runSelectorLocked = typeof lockRunSelector !== 'undefined' && lockRunSelector;
       var lockedRunId = typeof lockedRun !== 'undefined' && lockedRun ? lockedRun.id : null;
       var runSelectorValue = runSelectorLocked && lockedRunId ? lockedRunId : (typeof selectedRunId !== 'undefined' ? selectedRunId : null);
-    %>
-    <%
       // Pages that have nothing to do with an analysis scan hide the selector
       // entirely, rather than showing a control that does not affect them.
       var suppressRunSelector = typeof hideRunSelector !== 'undefined' && hideRunSelector;
+      var runList = typeof availableRuns !== 'undefined' && availableRuns ? availableRuns : [];
+      var activeRun = typeof globalRun !== 'undefined' && globalRun ? globalRun : null;
+      var storeDown = typeof runsLoadError !== 'undefined' && runsLoadError;
+      var scanTime = activeRun ? (activeRun.completed_at || activeRun.started_at) : null;
+      var scanIso = null;
+      if (scanTime) { var parsedScan = new Date(scanTime); scanIso = isNaN(parsedScan.getTime()) ? null : parsedScan.toISOString(); }
+
+      // What the data on screen rests on, in one word. Each state is a fact the
+      // server already knows; nothing here is inferred or estimated.
+      var dataStatus;
+      if (storeDown) {
+        dataStatus = { tone: 'danger', label: 'Data store unavailable', title: 'The application database could not be read. Scans cannot be listed until it is reachable.' };
+      } else if (!runList.length) {
+        dataStatus = { tone: 'warning', label: 'No completed scan', title: 'No completed analysis scan is available to you yet.' };
+      } else if (runSelectorLocked) {
+        dataStatus = { tone: 'info', label: 'Viewing a fixed scan', title: 'This page shows one specific run; scan switching is disabled here.' };
+      } else {
+        dataStatus = { tone: 'success', label: 'Scan data loaded', title: 'Pages show data from the selected completed scan.' };
+      }
     %>
-    <% if (!suppressRunSelector && typeof availableRuns !== 'undefined' && availableRuns && availableRuns.length > 0) { %>
-      <div class="run-selector-bar">
-        <span class="fw-bold small text-nowrap" style="color: var(--color-primary);"><i class="bi bi-building me-1"></i>Service Principal / Scan:</span>
-        <select class="form-select form-select-sm" style="max-width: 440px;" id="globalRunSelector" onchange="switchGlobalRun(this.value)" <%= runSelectorLocked ? 'disabled' : '' %>>
-          <%
-            var runsBySp = {};
-            availableRuns.forEach(function(r) {
-              var spName = r.sp_name || 'Unknown Service Principal';
-              if (!runsBySp[spName]) runsBySp[spName] = [];
-              runsBySp[spName].push(r);
-            });
-            Object.keys(runsBySp).sort(function(a, b) { return a.localeCompare(b); }).forEach(function(spName) {
-              var spRuns = runsBySp[spName].slice().sort(function(a, b) {
-                var aTs = a.started_at ? new Date(a.started_at).getTime() : 0;
-                var bTs = b.started_at ? new Date(b.started_at).getTime() : 0;
-                return bTs - aTs;
+    <!-- Context bar: tenant, data status and scan. Present on every page so it is
+         always clear which tenant and which point in time the screen describes. -->
+    <div class="context-bar" aria-label="Tenant and scan context" role="region">
+      <span class="context-item" title="Tenant scanned by the selected service principal">
+        <i class="bi bi-building" aria-hidden="true"></i>
+        <span class="context-label">Tenant</span>
+        <% if (activeRun) { %>
+          <strong><%= activeRun.sp_name || 'Unnamed service principal' %></strong>
+          <% if (activeRun.tenant_id) { %><span class="text-truncate context-id" style="max-width: 180px;" title="Tenant ID <%= activeRun.tenant_id %>"><%= activeRun.tenant_id %></span><% } %>
+        <% } else { %>
+          <span class="not-evaluated">Not selected</span>
+        <% } %>
+      </span>
+      <span class="context-sep" aria-hidden="true"></span>
+      <span class="context-item" title="<%= dataStatus.title %>">
+        <span class="status-dot is-<%= dataStatus.tone %>" aria-hidden="true"></span>
+        <span><%= dataStatus.label %></span>
+      </span>
+      <% if (scanIso) { %>
+        <span class="context-sep" aria-hidden="true"></span>
+        <span class="context-item">
+          <i class="bi bi-clock-history" aria-hidden="true"></i>
+          <span class="context-label">Scanned</span>
+          <time datetime="<%= scanIso %>" data-local-time><%= scanIso.replace('T', ' ').slice(0, 16) %> UTC</time>
+        </span>
+      <% } %>
+      <% if (!storeDown && !runList.length && !suppressRunSelector) { %>
+        <span class="context-end"><a href="/analysis" class="btn btn-sm btn-outline-primary"><i class="bi bi-play-circle me-1" aria-hidden="true"></i>Run an analysis</a></span>
+      <% } %>
+
+      <% if (!suppressRunSelector && runList.length > 0) { %>
+        <div class="context-end run-selector-bar">
+          <label for="globalRunSelector" class="context-label mb-0">Scan</label>
+          <select class="form-select form-select-sm" id="globalRunSelector" onchange="switchGlobalRun(this.value)" <%= runSelectorLocked ? 'disabled' : '' %>>
+            <%
+              var runsBySp = {};
+              runList.forEach(function(r) {
+                var spName = r.sp_name || 'Unknown Service Principal';
+                if (!runsBySp[spName]) runsBySp[spName] = [];
+                runsBySp[spName].push(r);
               });
-          %>
-            <optgroup label="<%= spName %>">
-              <% spRuns.forEach(function(r) { %>
-                <option value="<%= r.id %>" <%= (runSelectorValue === r.id) ? 'selected' : '' %>
-                        title="<%= r.scopeTagTitle || '' %>">
-                  [<%= r.scopeTag || 'WT' %>] <%= spName %>: Run#<%= r.id %> &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
-                </option>
-              <% }) %>
-            </optgroup>
-          <% }) %>
-        </select>
-        <% if (typeof globalRun !== 'undefined' && globalRun && globalRun.scopeTag) { %>
-          <span class="badge bg-<%= globalRun.scopeTag === 'WT' ? 'secondary' : 'info text-dark' %>"
-                title="<%= globalRun.scopeTagTitle %>"><%= globalRun.scopeTag %></span>
-        <% } %>
-        <% if (runSelectorLocked) { %>
-          <% var lockedInfo = (typeof lockedRun !== 'undefined' && lockedRun) ? lockedRun : null; %>
-          <span class="badge bg-primary"><i class="bi bi-eye me-1"></i>Viewing Run #<%= lockedInfo ? lockedInfo.id : '-' %></span>
-          <span class="small" style="color: var(--color-text-muted);">
-            <i class="bi bi-lock me-1"></i>Scan switching is disabled while exploring this run.
-          </span>
-        <% } else if (typeof globalRun !== 'undefined' && globalRun) { %>
-          <span class="badge bg-primary"><i class="bi bi-check-circle me-1"></i>Run #<%= globalRun.id %></span>
-          <span class="small" style="color: var(--color-text-muted);">Workspaces: <%= globalRun.total_workspaces || '-' %> | Reports: <%= globalRun.total_reports || '-' %></span>
-        <% } %>
-      </div>
-    <% } %>
+              Object.keys(runsBySp).sort(function(a, b) { return a.localeCompare(b); }).forEach(function(spName) {
+                var spRuns = runsBySp[spName].slice().sort(function(a, b) {
+                  var aTs = a.started_at ? new Date(a.started_at).getTime() : 0;
+                  var bTs = b.started_at ? new Date(b.started_at).getTime() : 0;
+                  return bTs - aTs;
+                });
+            %>
+              <optgroup label="<%= spName %>">
+                <% spRuns.forEach(function(r) { %>
+                  <option value="<%= r.id %>" <%= (runSelectorValue === r.id) ? 'selected' : '' %>
+                          title="<%= r.scopeTagTitle || '' %>">
+                    [<%= r.scopeTag || 'WT' %>] <%= spName %>: Run#<%= r.id %> &mdash; <%= r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A' %>
+                  </option>
+                <% }) %>
+              </optgroup>
+            <% }) %>
+          </select>
+          <% if (activeRun && activeRun.scopeTag) { %>
+            <span class="badge bg-<%= activeRun.scopeTag === 'WT' ? 'secondary' : 'info' %>"
+                  title="<%= activeRun.scopeTagTitle %>"><%= activeRun.scopeTag %></span>
+          <% } %>
+          <% if (runSelectorLocked) { %>
+            <% var lockedInfo = (typeof lockedRun !== 'undefined' && lockedRun) ? lockedRun : null; %>
+            <span class="badge bg-primary"><i class="bi bi-eye me-1" aria-hidden="true"></i>Viewing Run #<%= lockedInfo ? lockedInfo.id : '-' %></span>
+            <span class="small text-muted">
+              <i class="bi bi-lock me-1" aria-hidden="true"></i>Scan switching is disabled while exploring this run.
+            </span>
+          <% } else if (activeRun) { %>
+            <span class="small text-muted hide-below-1440">
+              <%= activeRun.total_workspaces || '-' %> workspaces &middot; <%= activeRun.total_reports || '-' %> reports
+            </span>
+          <% } %>
+        </div>
+      <% } %>
+    </div>
 
     <!-- Page content -->
-    <div class="page-content">
+    <main class="page-content" id="main" tabindex="-1">
 
 <script>
 function switchGlobalRun(runId) {
@@ -232,93 +309,89 @@ function goBackOr(fallbackUrl) {
   window.location.href = fallbackUrl || '/';
 }
 
+function savePreference(key, value) {
+  try { localStorage.setItem(key, value); } catch (e) { /* preference not kept */ }
+}
+
 function toggleSidebar() {
-  document.getElementById('appSidebar').classList.toggle('show');
-  document.getElementById('sidebarBackdrop').classList.toggle('show');
+  var sidebar = document.getElementById('appSidebar');
+  var open = sidebar.classList.toggle('show');
+  document.getElementById('sidebarBackdrop').classList.toggle('show', open);
+  var toggle = document.getElementById('mobileNavToggle');
+  if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) {
+    var first = sidebar.querySelector('.sidebar-link');
+    if (first) first.focus();
+  } else if (toggle) {
+    toggle.focus();
+  }
+}
+
+function syncSidebarButton() {
+  var collapsed = document.documentElement.getAttribute('data-sidebar') === 'collapsed';
+  var button = document.getElementById('collapseLink');
+  if (!button) return;
+  button.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  button.setAttribute('aria-label', button.title);
+  button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
 }
 
 function collapseSidebar(e) {
   if (e) e.preventDefault();
-  var sidebar = document.getElementById('appSidebar');
-  var isCollapsed = sidebar.classList.toggle('collapsed');
-  document.body.classList.toggle('sidebar-collapsed', isCollapsed);
-  localStorage.setItem('pbi-gov-sidebar', isCollapsed ? 'collapsed' : 'expanded');
-  var icon = document.getElementById('collapseIcon');
-  // The arrow points the way it will move the sidebar, so its meaning does not
-  // depend on remembering the current state.
-  icon.className = isCollapsed ? 'bi bi-chevron-double-right' : 'bi bi-chevron-double-left';
-  var button = document.getElementById('collapseLink');
-  button.title = isCollapsed ? 'Expand sidebar' : 'Collapse sidebar';
-  button.setAttribute('aria-label', button.title);
+  var root = document.documentElement;
+  var collapsed = root.getAttribute('data-sidebar') !== 'collapsed';
+  if (collapsed) root.setAttribute('data-sidebar', 'collapsed'); else root.removeAttribute('data-sidebar');
+  savePreference('pbi-gov-sidebar', collapsed ? 'collapsed' : 'expanded');
+  syncSidebarButton();
 }
 
 // Theme
 function toggleTheme() {
   var html = document.documentElement;
-  var current = html.getAttribute('data-theme');
-  var next = current === 'dark' ? 'light' : 'dark';
+  var next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
   html.setAttribute('data-theme', next);
   // Bootstrap components (list groups, tables, dropdowns, bg-body-*) read
   // data-bs-theme. Without it they stay light and their text becomes unreadable.
   html.setAttribute('data-bs-theme', next);
-  localStorage.setItem('pbi-gov-theme', next);
+  savePreference('pbi-gov-theme', next);
   updateThemeIcon(next);
-  showToast('Theme switched to ' + next + ' mode', 'info');
 }
 function updateThemeIcon(theme) {
   var icon = document.getElementById('themeIcon');
-  icon.className = theme === 'dark' ? 'bi bi-sun' : 'bi bi-moon';
+  var button = document.getElementById('themeToggle');
+  if (icon) icon.className = theme === 'dark' ? 'bi bi-sun' : 'bi bi-moon';
+  if (button) {
+    var label = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+    button.setAttribute('aria-label', label);
+    button.title = label + ' (Ctrl+Shift+D)';
+  }
 }
 
-// Density
+// Density: comfortable rows by default, compact for dense review work
 function toggleDensity() {
-  var body = document.body;
-  var current = body.getAttribute('data-density');
-  var next = current === 'compact' ? 'comfortable' : 'compact';
-  body.setAttribute('data-density', next);
-  localStorage.setItem('pbi-gov-density', next);
+  var root = document.documentElement;
+  var next = root.getAttribute('data-density') === 'compact' ? 'comfortable' : 'compact';
+  root.setAttribute('data-density', next);
+  savePreference('pbi-gov-density', next);
+  updateDensityIcon(next);
+  if (typeof showToast === 'function') showToast(next === 'compact' ? 'Compact rows' : 'Comfortable rows', 'info');
+}
+function updateDensityIcon(density) {
   var icon = document.getElementById('densityIcon');
-  icon.className = next === 'compact' ? 'bi bi-distribute-horizontal' : 'bi bi-distribute-vertical';
-  showToast('View: ' + next, 'info');
+  var button = document.getElementById('densityToggle');
+  var compact = density === 'compact';
+  if (icon) icon.className = compact ? 'bi bi-distribute-horizontal' : 'bi bi-distribute-vertical';
+  if (button) {
+    var label = compact ? 'Switch to comfortable rows' : 'Switch to compact rows';
+    button.setAttribute('aria-label', label);
+    button.setAttribute('aria-pressed', compact ? 'true' : 'false');
+    button.title = label + ' (Ctrl+D)';
+  }
 }
 
-// Apply saved preferences
 (function() {
-  var savedTheme = localStorage.getItem('pbi-gov-theme');
-  if (savedTheme) {
-    document.documentElement.setAttribute('data-theme', savedTheme);
-    document.documentElement.setAttribute('data-bs-theme', savedTheme);
-    updateThemeIcon(savedTheme);
-  } else {
-    updateThemeIcon('light');
-  }
-  var savedDensity = localStorage.getItem('pbi-gov-density');
-  if (savedDensity) {
-    document.body.setAttribute('data-density', savedDensity);
-    if (savedDensity === 'compact') {
-      var icon = document.getElementById('densityIcon');
-      if (icon) icon.className = 'bi bi-distribute-horizontal';
-    }
-  }
-  // Sidebar: collapsed by default
-  var savedSidebar = localStorage.getItem('pbi-gov-sidebar');
-  if (savedSidebar === 'expanded') {
-    // user explicitly expanded — keep it open
-  } else {
-    // default or saved as collapsed
-    var sidebar = document.getElementById('appSidebar');
-    if (sidebar) { sidebar.classList.add('collapsed'); document.body.classList.add('sidebar-collapsed'); }
-    var ci = document.getElementById('collapseIcon');
-    if (ci) ci.className = 'bi bi-chevron-double-right';
-    var cl = document.getElementById('collapseLink');
-    if (cl) { cl.title = 'Expand sidebar'; cl.setAttribute('aria-label', 'Expand sidebar'); }
-  }
-  // Last refreshed timestamp
-  var ts = document.getElementById('lastRefreshed');
-  if (ts) {
-    var updateTopClock = function() { ts.textContent = new Date().toLocaleTimeString(); };
-    updateTopClock();
-    setInterval(updateTopClock, 1000);
-  }
+  updateThemeIcon(document.documentElement.getAttribute('data-theme'));
+  updateDensityIcon(document.documentElement.getAttribute('data-density'));
+  syncSidebarButton();
 })();
 </script>

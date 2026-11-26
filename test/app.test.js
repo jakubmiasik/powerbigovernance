@@ -7284,3 +7284,107 @@ test('group membership for a guest is resolved by object id, not by their addres
   // is not their principal name in this tenant, and the lookup is a 404.
   assert.equal(askedFor, 'guest-oid');
 });
+
+// ── UI modernization: shell, components and the findings-first overview ──
+
+test('the sidebar groups sections as Overview, Governance, Security & Access, Operations, Configuration', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/governance', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'x',
+    visibleSections: sections.APP_SECTIONS, permissions: { isAdmin: true }, navGroups: sections.NAV_GROUPS,
+  });
+  const titles = [...html.matchAll(/class="nav-section-title"[^>]*>([^<]+)</g)].map(m => m[1]);
+  assert.deepEqual(titles, ['Overview', 'Governance', 'Security &amp; Access', 'Operations', 'Configuration']);
+  // The active page is announced, not only coloured.
+  assert.match(html, /href="\/governance" class="sidebar-link active" aria-current="page"/);
+  // Every section the guard knows about sits in one of the menu's groups.
+  for (const section of sections.APP_SECTIONS) assert.ok(sections.NAV_GROUPS.includes(section.group), section.key);
+});
+
+test('the shell says which tenant and scan the page describes, and when the data store is down', async () => {
+  const ejs = require('ejs');
+  const run = { id: 9, sp_name: 'Contoso SP', tenant_id: 'tenant-guid', started_at: '2026-11-25T02:00:00Z', completed_at: '2026-11-25T02:40:00Z' };
+  const loaded = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [], title: 'x',
+    availableRuns: [run], globalRun: run, selectedRunId: 9,
+  });
+  assert.match(loaded, /Contoso SP/);
+  assert.match(loaded, /tenant-guid/);
+  assert.match(loaded, /Scan data loaded/);
+  assert.match(loaded, /<time datetime="2026-11-25T02:40:00.000Z" data-local-time>/);
+
+  const down = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [], title: 'x',
+    availableRuns: [], globalRun: null, runsLoadError: true,
+  });
+  // An unreachable store is not the same as "no scans yet", and must not read as it.
+  assert.match(down, /Data store unavailable/);
+  assert.doesNotMatch(down, /No completed scan/);
+});
+
+test('the state component renders each kind with the right live-region role', async () => {
+  const ejs = require('ejs');
+  const error = await ejs.renderFile('src/views/partials/ui/state.ejs', { ui: { kind: 'error', title: 'Failed', message: '<b>x</b>' } });
+  assert.match(error, /class="state is-error"/);
+  assert.match(error, /role="alert"/);
+  assert.doesNotMatch(error, /<b>x<\/b>/, 'messages are escaped');
+  const empty = await ejs.renderFile('src/views/partials/ui/state.ejs', { ui: { kind: 'empty', title: 'Nothing' } });
+  assert.match(empty, /role="status"/);
+  // A KPI with no value says so rather than showing a made-up number.
+  const kpi = await ejs.renderFile('src/views/partials/ui/kpi.ejs', { ui: { label: 'Compliance', value: null } });
+  assert.match(kpi, /Not evaluated/);
+});
+
+test('the governance overview leads with findings and marks unrun checks as not evaluated', async () => {
+  const ejs = require('ejs');
+  const insights = require('../src/services/workspaceInsightsService');
+  const workspaces = [
+    { id: 'a', name: 'Nobody', state: 'Active', items: [{ id: '1', name: 'R', type: 'Report', lastUpdated: '2026-07-29T00:00:00Z' }], users: [{ name: 'Bot', role: 'Viewer', type: 'User' }] },
+    { id: 'b', name: 'Fine', state: 'Active', items: [{ id: '2', name: 'R', type: 'Report', lastUpdated: '2026-07-29T00:00:00Z' }], users: [{ name: 'Ann', email: 'a@x.com', role: 'Admin', type: 'User' }, { name: 'Ben', email: 'b@x.com', role: 'Admin', type: 'User' }, { name: 'Readers', role: 'Viewer', type: 'Group', principalType: 'Group' }] },
+  ];
+  const computed = insights.computeWorkspaceInsights({ workspaces }, { referenceDate: '2026-07-30T00:00:00Z' });
+  const html = await ejs.renderFile('src/views/governance/overview.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/governance', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Governance Overview',
+    governance: { totalWorkspaces: 2, workspacesByState: { Active: 2 } }, workspaces,
+    run: { id: 3, started_at: '2026-07-30T00:00:00Z' }, noData: false, creatorCount: 0, explorerCount: 0,
+    insights: computed, findingDefs: insights.FINDING_DEFS,
+    visibleSections: sections.APP_SECTIONS,
+  });
+  const findingsAt = html.indexOf('Prioritized findings');
+  const inventoryAt = html.indexOf('id="inventoryHeading"');
+  assert.ok(findingsAt > 0 && findingsAt < inventoryAt, 'findings come before the inventory');
+  assert.match(html, /No admin/);
+  assert.match(html, /href="\/workspaces\?runId=3&amp;finding=ownerless"/);
+  // No convention configured: the naming check was not run, and must not read as clean.
+  assert.match(html, /Off-convention names:<\/strong> <span class="not-evaluated">Not evaluated/);
+  // Nothing on the page invents a compliance score or a trend.
+  assert.doesNotMatch(html, /[Cc]ompliance (score|trend)/);
+});
+
+test('the triage page renders its table as a data grid with a details drawer', async () => {
+  const ejs = require('ejs');
+  const insights = require('../src/services/workspaceInsightsService');
+  const computed = insights.computeWorkspaceInsights({ workspaces: [{ id: 'a', name: 'x</script><b>', state: 'Active', items: [], users: [] }] }, {});
+  const html = await ejs.renderFile('src/views/workspaces/list.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T' }, currentPath: '/workspaces', breadcrumb: [],
+    availableRuns: [], globalRun: null, title: 'Workspaces', fromSavedData: true, run: null,
+    insights: computed, findingDefs: insights.FINDING_DEFS, namingPattern: null,
+  });
+  assert.match(html, /id="triage-table"[\s\S]*?data-grid/);
+  assert.match(html, /id="workspaceDrawer" role="dialog" aria-modal="true"/);
+  // Workspace names are data: they cannot close the script block they are embedded in.
+  const script = html.slice(html.indexOf('var triageRows'));
+  assert.ok(!script.slice(0, script.indexOf('var findingLabels')).includes('</script'));
+});
+
+test('the stylesheet carries the brand colour and keeps controls focus-visible', () => {
+  const fs = require('fs');
+  const css = fs.readFileSync('src/public/css/style.css', 'utf8');
+  assert.match(css, /--color-primary: #0f766e;/);
+  assert.match(css, /--bs-primary-rgb: 15, 118, 110;/);
+  assert.match(css, /:focus-visible \{ outline: 2px solid var\(--color-primary\)/);
+  assert.match(css, /prefers-reduced-motion: reduce/);
+  for (const width of ['1280px', '1440px', '1920px', '2560px']) assert.match(css, new RegExp('min-width: ' + width));
+});
