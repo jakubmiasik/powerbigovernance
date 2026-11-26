@@ -1,19 +1,30 @@
 <%- include('../partials/header') %>
 <%
-  var sectionsByGroup = {};
-  sections.forEach(function(section) {
-    (sectionsByGroup[section.group] = sectionsByGroup[section.group] || []).push(section);
-  });
   var tenantName = {};
   tenants.forEach(function(tenant) { tenantName[tenant.id] = tenant.name; });
+  // Split by the section's own flag when the route did not pass the split, so the
+  // page can never offer a tenant-bound section as application-wide or the reverse.
+  var tenantDefs = typeof tenantSectionDefs !== 'undefined' && tenantSectionDefs ? tenantSectionDefs : sections.filter(function(section) { return section.tenantScoped; });
+  var appDefs = typeof appSectionDefs !== 'undefined' && appSectionDefs ? appSectionDefs : sections.filter(function(section) { return !section.tenantScoped; });
+  var tenantKeys = tenantDefs.map(function(section) { return section.key; });
+  var sectionLabel = {};
+  sections.forEach(function(section) { sectionLabel[section.key] = section.label; });
+  // What a row grants in one tenant: its per-tenant sections plus any tenant-bound
+  // section stored the older way (one list for every tenant), which still applies.
+  function sectionsInTenant(row, spId) {
+    var own = (row.tenantSections && (row.tenantSections[spId] || row.tenantSections[String(spId)])) || [];
+    var legacy = (row.sectionKeys || []).filter(function(key) { return tenantKeys.indexOf(key) !== -1; });
+    return own.concat(legacy).filter(function(key, i, all) { return all.indexOf(key) === i; });
+  }
 %>
 <div class="row">
   <div class="col-xxl-10 mx-auto">
     <h2><i class="bi bi-person-badge me-2"></i>Users &amp; Access</h2>
     <p class="text-muted">
-      Who may use this application, which tenants they may see and run scans for, and which
-      sections are available to them. People and security groups are chosen from Entra ID —
-      granting a group gives its access to everyone in it, including nested groups.
+      Who may use this application, which tenants they may see, and what they may do in each
+      tenant. Each tenant has its own sections, so the same person can, for example, run analysis
+      in one tenant and only review workspaces in another. People and security groups are chosen
+      from Entra ID — granting a group gives its access to everyone in it, including nested groups.
     </p>
 
     <div id="flash-messages">
@@ -69,8 +80,8 @@
               <tr>
                 <th>User</th>
                 <th>Role</th>
-                <th>Tenants</th>
-                <th>Sections</th>
+                <th>Tenants and their sections</th>
+                <th>Application-wide</th>
                 <th class="text-end">Actions</th>
               </tr>
             </thead>
@@ -109,30 +120,48 @@
                     <% } else if (!row.tenantIds.length) { %>
                       <span class="text-danger">None</span>
                     <% } else { %>
-                      <% row.tenantIds.forEach(function(spId) { %>
-                        <span class="badge bg-secondary me-1"><%= tenantName[spId] || ('Tenant #' + spId) %></span>
+                      <% row.tenantIds.forEach(function(spId) { var keys = sectionsInTenant(row, spId); %>
+                        <div class="mb-1">
+                          <strong><%= tenantName[spId] || ('Tenant #' + spId) %>:</strong>
+                          <% if (!keys.length) { %>
+                            <span class="text-muted">scans only, no sections</span>
+                          <% } else { %>
+                            <% keys.forEach(function(key) { %><span class="badge bg-info me-1"><%= sectionLabel[key] || key %></span><% }) %>
+                          <% } %>
+                        </div>
                       <% }) %>
                     <% } %>
                   </td>
                   <td class="small">
+                    <% var appKeys = (row.sectionKeys || []).filter(function(key) { return tenantKeys.indexOf(key) === -1; }); %>
                     <% if (row.role === 'admin') { %>
                       <span class="text-muted">All sections</span>
-                    <% } else if (!row.sectionKeys.length) { %>
-                      <span class="text-danger">None</span>
+                    <% } else if (!appKeys.length) { %>
+                      <span class="text-muted">None</span>
                     <% } else { %>
-                      <% row.sectionKeys.forEach(function(key) { %>
-                        <span class="badge bg-info text-dark me-1"><%= key %></span>
+                      <% appKeys.forEach(function(key) { %>
+                        <span class="badge bg-info me-1"><%= sectionLabel[key] || key %></span>
                       <% }) %>
                     <% } %>
                   </td>
                   <td class="text-end text-nowrap">
-                    <button class="btn btn-sm btn-outline-primary js-edit-user"
-                            data-user="<%= JSON.stringify(row).replace(/"/g, '&quot;') %>">
-                      <i class="bi bi-pencil"></i>
+                    <%# <%= escapes the JSON once, which is exactly what an attribute needs:
+                        the browser decodes it back to the JSON the script parses. Escaping
+                        it by hand as well left &quot; in the value and broke every Edit. %>
+                    <button type="button" class="btn btn-sm btn-outline-primary js-edit-user"
+                            data-user="<%= JSON.stringify(row) %>"
+                            aria-label="Edit access for <%= row.display_name || row.email %>" title="Edit">
+                      <i class="bi bi-pencil" aria-hidden="true"></i>
                     </button>
-                    <form method="POST" action="/settings/permissions/delete/<%= row.id %>" class="d-inline"
-                          onsubmit="return confirm('Remove access for <%= row.display_name || row.email %>?');">
-                      <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                    <%# The name travels as data and is read with textContent semantics:
+                        inlined into onsubmit, an apostrophe (O'Neil) broke the script and the
+                        form was submitted without asking. %>
+                    <form method="POST" action="/settings/permissions/delete/<%= row.id %>" class="d-inline js-remove-user"
+                          data-name="<%= row.display_name || row.email || 'this entry' %>">
+                      <button type="submit" class="btn btn-sm btn-outline-danger"
+                              aria-label="Remove access for <%= row.display_name || row.email %>" title="Remove">
+                        <i class="bi bi-trash" aria-hidden="true"></i>
+                      </button>
                     </form>
                   </td>
                 </tr>
@@ -208,66 +237,89 @@
             // screen and everything below the fold read as missing rather than
             // merely further down.
           %>
-          <div id="grantFields" class="row g-3">
-            <div class="col-lg-4">
-              <h6 class="d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-building me-1"></i>Tenants</span>
-                <% if (tenants.length) { %>
-                  <button type="button" class="btn btn-link btn-sm p-0 js-toggle-tenants">Select all</button>
-                <% } %>
-              </h6>
-              <p class="text-muted small mb-2">
-                Which tenants they may see and scan. Other tenants' scans are hidden everywhere,
-                including the scan selector.
-              </p>
-              <% if (!tenants.length) { %>
-                <p class="text-muted small fst-italic">No tenants configured.</p>
-              <% } else { %>
-                <div class="border rounded p-2" style="max-height:260px;overflow-y:auto;">
-                  <% tenants.forEach(function(tenant) { %>
-                    <div class="form-check">
-                      <input class="form-check-input js-tenant" type="checkbox" name="tenantIds"
-                             value="<%= tenant.id %>" id="tenant-<%= tenant.id %>">
-                      <label class="form-check-label" for="tenant-<%= tenant.id %>">
-                        <%= tenant.name %>
-                        <span class="d-block small text-muted"><%= tenant.tenant_id %></span>
-                      </label>
-                    </div>
-                  <% }) %>
-                </div>
+          <div id="grantFields">
+            <div class="d-flex justify-content-between align-items-end flex-wrap gap-2 mb-1">
+              <h6 class="mb-0"><i class="bi bi-building me-1"></i>Tenant access</h6>
+              <% if (tenants.length) { %>
+                <button type="button" class="btn btn-link btn-sm p-0 js-all-tenants">Grant every tenant</button>
               <% } %>
             </div>
-
-            <div class="col-lg-8">
-              <h6><i class="bi bi-grid me-1"></i>Sections</h6>
-              <p class="text-muted small mb-2">
-                Which parts of the application appear for them. Anything not ticked is hidden from
-                the menu and refused if its address is opened directly.
-              </p>
-              <div class="row g-2 row-cols-1 row-cols-md-2">
-                <% Object.keys(sectionsByGroup).forEach(function(group) { %>
-                  <div class="col">
-                    <div class="border rounded h-100 p-2">
-                      <div class="d-flex justify-content-between align-items-center mb-1">
-                        <span class="small fw-bold text-muted text-uppercase"><%= group %></span>
-                        <button type="button" class="btn btn-link btn-sm p-0 js-toggle-group"
-                                data-group="<%= group %>">Select all</button>
-                      </div>
-                      <% sectionsByGroup[group].forEach(function(section) { %>
-                        <div class="form-check">
-                          <input class="form-check-input js-section" type="checkbox" name="sectionKeys"
-                                 data-group="<%= group %>"
-                                 value="<%= section.key %>" id="section-<%= section.key %>">
-                          <label class="form-check-label" for="section-<%= section.key %>">
-                            <i class="bi <%= section.icon %> me-1"></i><%= section.label %>
-                          </label>
-                        </div>
+            <p class="text-muted small mb-2">
+              Tick a tenant to show its scans, then tick what they may do there. Sections are granted
+              per tenant; a section ticked in one tenant does not apply in another. Use a column header to
+              tick that section in every granted tenant.
+            </p>
+            <% if (!tenants.length) { %>
+              <p class="text-muted small fst-italic">No tenants configured.</p>
+            <% } else { %>
+              <style>
+                /* The tenant column stays in view while the section columns scroll sideways. */
+                .grant-matrix th[scope="row"], .grant-matrix thead th:first-child { position: sticky; left: 0; z-index: 1; background: var(--bs-body-bg); box-shadow: inset -1px 0 0 var(--bs-border-color); }
+              </style>
+              <div class="table-responsive border rounded mb-3">
+                <table class="table table-sm align-middle mb-0 grant-matrix" data-no-sort>
+                  <caption class="visually-hidden">Sections granted in each tenant</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col" style="min-width:190px;">Tenant</th>
+                      <% tenantDefs.forEach(function(section) { %>
+                        <th scope="col" class="text-center" style="min-width:92px;">
+                          <button type="button" class="btn btn-link btn-sm p-0 js-col text-decoration-none" data-section="<%= section.key %>"
+                                  title="Tick <%= section.label %> in every granted tenant">
+                            <i class="bi <%= section.icon %> d-block mx-auto mb-1" aria-hidden="true"></i><span class="small"><%= section.label %></span>
+                          </button>
+                        </th>
                       <% }) %>
-                    </div>
-                  </div>
-                <% }) %>
+                      <th scope="col"><span class="visually-hidden">Row actions</span></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <% tenants.forEach(function(tenant) { %>
+                      <tr data-tenant="<%= tenant.id %>">
+                        <th scope="row" class="fw-normal">
+                          <div class="form-check mb-0">
+                            <input class="form-check-input js-tenant" type="checkbox" name="tenantIds"
+                                   value="<%= tenant.id %>" id="tenant-<%= tenant.id %>">
+                            <label class="form-check-label" for="tenant-<%= tenant.id %>">
+                              <strong><%= tenant.name %></strong>
+                              <span class="d-block small text-muted text-truncate font-monospace" style="max-width:160px;" title="<%= tenant.tenant_id %>"><%= tenant.tenant_id %></span>
+                            </label>
+                          </div>
+                        </th>
+                        <% tenantDefs.forEach(function(section) { %>
+                          <td class="text-center">
+                            <input class="form-check-input js-cell" type="checkbox" name="ts_<%= tenant.id %>"
+                                   value="<%= section.key %>" id="ts-<%= tenant.id %>-<%= section.key %>"
+                                   data-section="<%= section.key %>" disabled
+                                   aria-label="<%= section.label %> in <%= tenant.name %>">
+                          </td>
+                        <% }) %>
+                        <td class="text-end text-nowrap">
+                          <button type="button" class="btn btn-link btn-sm p-0 js-row">All</button>
+                        </td>
+                      </tr>
+                    <% }) %>
+                  </tbody>
+                </table>
               </div>
+            <% } %>
+
+            <h6 class="mb-1"><i class="bi bi-grid me-1"></i>Application-wide sections</h6>
+            <p class="text-muted small mb-2">
+              These configure the application itself rather than a tenant, so they are granted once.
+            </p>
+            <div class="d-flex flex-wrap gap-3">
+              <% appDefs.forEach(function(section) { %>
+                <div class="form-check">
+                  <input class="form-check-input js-section" type="checkbox" name="sectionKeys"
+                         value="<%= section.key %>" id="section-<%= section.key %>">
+                  <label class="form-check-label" for="section-<%= section.key %>">
+                    <i class="bi <%= section.icon %> me-1" aria-hidden="true"></i><%= section.label %>
+                  </label>
+                </div>
+              <% }) %>
             </div>
+            <div class="small text-muted mt-3" id="grantSummary" aria-live="polite"></div>
           </div>
 
           <div id="adminNotice" class="alert alert-info d-none mt-3">
@@ -300,10 +352,45 @@ function syncRoleState() {
   document.getElementById('adminNotice').classList.toggle('d-none', !isAdmin);
 }
 
+var TENANT_SECTION_KEYS = <%- JSON.stringify(tenantKeys) %>;
+
 function clearGrantBoxes() {
-  document.querySelectorAll('.js-tenant, .js-section').forEach(function(box) { box.checked = false; });
-  resetToggleLabels();
+  document.querySelectorAll('.js-tenant, .js-section, .js-cell').forEach(function(box) { box.checked = false; });
+  syncTenantRows();
 }
+
+// A section can only be ticked in a tenant that is granted: its row stays disabled
+// (and is not submitted) until the tenant itself is ticked.
+function syncTenantRows() {
+  document.querySelectorAll('.grant-matrix tr[data-tenant]').forEach(function(row) {
+    var granted = row.querySelector('.js-tenant').checked;
+    row.querySelectorAll('.js-cell').forEach(function(cell) {
+      cell.disabled = !granted;
+      if (!granted) cell.checked = false;
+    });
+    row.classList.toggle('table-active', granted);
+  });
+  summariseGrant();
+}
+
+function summariseGrant() {
+  var summary = document.getElementById('grantSummary');
+  if (!summary) return;
+  var rows = Array.prototype.filter.call(document.querySelectorAll('.grant-matrix tr[data-tenant]'), function(row) {
+    return row.querySelector('.js-tenant').checked;
+  });
+  if (!rows.length) { summary.textContent = 'No tenant granted: this entry will see no scans.'; return; }
+  summary.textContent = rows.map(function(row) {
+    var name = row.querySelector('label strong').textContent;
+    var count = row.querySelectorAll('.js-cell:checked').length;
+    return name + ': ' + (count ? count + ' section' + (count === 1 ? '' : 's') : 'scans only');
+  }).join(' · ');
+}
+
+document.addEventListener('change', function(event) {
+  if (event.target.classList.contains('js-tenant')) syncTenantRows();
+  if (event.target.classList.contains('js-cell')) summariseGrant();
+});
 
 // ── Choosing who from Entra ID ──
 
@@ -415,28 +502,53 @@ document.getElementById('principalSearch').addEventListener('input', function() 
   searchTimer = setTimeout(searchDirectory, 300);
 });
 
-// Ticking a whole group at once, because the common case is "everything under
-// Quality" rather than three of its four entries.
+// Bulk ticking in the grid: a whole row (one tenant, every section), a whole column
+// (one section, every granted tenant), or every tenant at once. Each toggles: if
+// anything in its reach is unticked it ticks everything, otherwise it clears.
 document.addEventListener('click', function(event) {
-  var toggle = event.target.closest('.js-toggle-group, .js-toggle-tenants');
-  if (!toggle) return;
+  var rowBtn = event.target.closest('.js-row');
+  var colBtn = event.target.closest('.js-col');
+  var allBtn = event.target.closest('.js-all-tenants');
+  if (!rowBtn && !colBtn && !allBtn) return;
   event.preventDefault();
-  var selector = toggle.classList.contains('js-toggle-tenants')
-    ? '.js-tenant'
-    : '.js-section[data-group="' + toggle.dataset.group + '"]';
-  var boxes = document.querySelectorAll(selector);
-  var turnOn = Array.prototype.some.call(boxes, function(box) { return !box.checked; });
-  boxes.forEach(function(box) { box.checked = turnOn; });
-  toggle.textContent = turnOn ? 'Clear all' : 'Select all';
+
+  if (allBtn) {
+    var tenantsBoxes = document.querySelectorAll('.js-tenant');
+    var grantAll = Array.prototype.some.call(tenantsBoxes, function(box) { return !box.checked; });
+    tenantsBoxes.forEach(function(box) { box.checked = grantAll; });
+    syncTenantRows();
+    return;
+  }
+  if (rowBtn) {
+    var row = rowBtn.closest('tr');
+    row.querySelector('.js-tenant').checked = true;
+    syncTenantRows();
+    var cells = row.querySelectorAll('.js-cell');
+    var tickRow = Array.prototype.some.call(cells, function(cell) { return !cell.checked; });
+    cells.forEach(function(cell) { cell.checked = tickRow; });
+    summariseGrant();
+    return;
+  }
+  var colCells = Array.prototype.filter.call(
+    document.querySelectorAll('.js-cell[data-section="' + colBtn.dataset.section + '"]'),
+    function(cell) { return !cell.disabled; }
+  );
+  if (!colCells.length) {
+    if (typeof showToast === 'function') showToast('Tick at least one tenant first.', 'info');
+    return;
+  }
+  var tickCol = colCells.some(function(cell) { return !cell.checked; });
+  colCells.forEach(function(cell) { cell.checked = tickCol; });
+  summariseGrant();
 });
 
-function resetToggleLabels() {
-  // The boxes have just been cleared, so a button still reading "Clear all" from
-  // the previous time the dialog was open would be describing the wrong state.
-  document.querySelectorAll('.js-toggle-group, .js-toggle-tenants').forEach(function(toggle) {
-    toggle.textContent = 'Select all';
-  });
-}
+// Removing access asks first, naming the entry as text: built into an onsubmit
+// attribute, a name with an apostrophe broke the script and skipped the question.
+document.addEventListener('submit', function(event) {
+  var form = event.target.closest('.js-remove-user');
+  if (!form) return;
+  if (!window.confirm('Remove access for ' + form.getAttribute('data-name') + '?')) event.preventDefault();
+});
 
 function openUserForm() {
   document.getElementById('userModalTitle').textContent = 'Add User or Group';
@@ -470,10 +582,23 @@ function openUserFormWith(row) {
     var box = document.getElementById('tenant-' + spId);
     if (box) box.checked = true;
   });
+  syncTenantRows();
+  // Tenant-bound sections stored the older way (one list for every tenant) are
+  // shown ticked in every granted tenant, which is how they apply today. Saving
+  // records them per tenant from then on.
+  var legacyTenantKeys = (row.sectionKeys || []).filter(function(key) { return TENANT_SECTION_KEYS.indexOf(key) !== -1; });
+  (row.tenantIds || []).forEach(function(spId) {
+    var own = (row.tenantSections && (row.tenantSections[spId] || row.tenantSections[String(spId)])) || [];
+    own.concat(legacyTenantKeys).forEach(function(key) {
+      var cell = document.getElementById('ts-' + spId + '-' + key);
+      if (cell) cell.checked = true;
+    });
+  });
   (row.sectionKeys || []).forEach(function(key) {
     var box = document.getElementById('section-' + key);
     if (box) box.checked = true;
   });
+  summariseGrant();
   syncRoleState();
   userModal().show();
 }

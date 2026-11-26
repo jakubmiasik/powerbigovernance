@@ -7039,9 +7039,10 @@ test('the access panel lets an administrator pick a person or a security group',
   // A granted group is shown as one, so an administrator is not left wondering
   // why an entry has no address.
   assert.match(html, /Security group/);
-  // Every group of sections can be ticked at once; Quality was the one people
-  // could not find at the bottom of a long list.
-  assert.match(html, /js-toggle-group/);
+  // Sections can be ticked in bulk: a whole tenant row, or one section across
+  // every granted tenant.
+  assert.match(html, /js-row/);
+  assert.match(html, /js-col/);
 });
 
 test('the directory search route reports a failure instead of looking like no results', async () => {
@@ -7077,13 +7078,13 @@ test('the access dialog fits its content instead of hiding it below the fold', a
     permissions: { isAdmin: true }, visibleSections: sections.APP_SECTIONS,
   });
 
-  // Wide enough to put the two grant lists beside each other rather than stacking
-  // them into a dialog taller than the screen.
+  // Wide enough for the tenant × section grid, so each tenant's sections sit on its
+  // own row rather than in a list stacked below the tenants.
   assert.match(html, /modal-dialog modal-xl/);
-  assert.match(html, /id="grantFields" class="row/);
-  // A long tenant list scrolls within its own box, so it cannot push Sections off
-  // the bottom of the dialog.
-  assert.match(html, /js-toggle-tenants/);
+  assert.match(html, /id="grantFields"/);
+  assert.match(html, /class="table table-sm align-middle mb-0 grant-matrix"/);
+  // Granting every tenant at once is one click.
+  assert.match(html, /js-all-tenants/);
 });
 
 test('a scrollable modal whose body is wrapped in a form can still scroll', async () => {
@@ -7424,4 +7425,177 @@ test('the shared package is versioned and only its assets are served', () => {
   const appSource = require('fs').readFileSync('src/app.js', 'utf8');
   assert.match(appSource, /'\/podavo-ui\/css'/);
   assert.match(appSource, /'\/podavo-ui\/js'/);
+});
+
+// ── Sections per tenant ──
+
+test('a user can hold different sections in different tenants', () => {
+  const p = require('../src/services/permissionService');
+  const resolved = p.resolvePermissions({
+    user: { email: 'ann@x.com' }, anyAdminConfigured: true, tenants: [{ id: 1 }, { id: 2 }, { id: 3 }],
+    record: {
+      is_active: true, tenantIds: [1, 2], sectionKeys: ['mdm'],
+      tenantSections: { 1: ['workspaces', 'analysis'], 2: ['workspaces', 'settings'], 3: ['capacities'] },
+    },
+  });
+  assert.deepEqual(resolved.tenantIds, [1, 2]);
+  assert.deepEqual(resolved.tenantSections[1], ['workspaces', 'analysis']);
+  // An admin-only section is never granted, and a section in a tenant the entry
+  // cannot see (3) grants nothing.
+  assert.deepEqual(resolved.tenantSections[2], ['workspaces']);
+  assert.equal(resolved.tenantSections[3], undefined);
+  assert.equal(p.canUseSectionInTenant(resolved, 'analysis', 1), true);
+  assert.equal(p.canUseSectionInTenant(resolved, 'analysis', 2), false);
+  assert.equal(p.canUseSectionInTenant(resolved, 'capacities', 3), false);
+  // Application-wide sections do not depend on a tenant.
+  assert.equal(p.canUseSectionInTenant(resolved, 'mdm', 2), true);
+  // The menu shows a section when it is held in at least one tenant.
+  assert.ok(resolved.sectionKeys.includes('analysis'));
+  assert.ok(!resolved.sectionKeys.includes('capacities'));
+});
+
+test('grants stored before per-tenant sections keep applying to every granted tenant', () => {
+  const p = require('../src/services/permissionService');
+  const resolved = p.resolvePermissions({
+    user: { email: 'ann@x.com' }, anyAdminConfigured: true, tenants: [{ id: 1 }, { id: 2 }],
+    record: { is_active: true, tenantIds: [1, 2], sectionKeys: ['workspaces', 'reconciliation'] },
+  });
+  assert.equal(p.canUseSectionInTenant(resolved, 'workspaces', 1), true);
+  assert.equal(p.canUseSectionInTenant(resolved, 'workspaces', 2), true);
+  assert.equal(p.canSeeSection(resolved, 'reconciliation'), true);
+});
+
+test('a person and their groups combine per tenant', () => {
+  const p = require('../src/services/permissionService');
+  const resolved = p.resolvePermissions({
+    user: { email: 'ann@x.com' }, anyAdminConfigured: true, tenants: [{ id: 1 }, { id: 2 }],
+    record: { is_active: true, tenantIds: [1], sectionKeys: [], tenantSections: { 1: ['workspaces'] } },
+    groupRecords: [{ is_active: true, principal_type: 'group', display_name: 'Ops', tenantIds: [1, 2], sectionKeys: [], tenantSections: { 1: ['capacities'], 2: ['pipelines'] } }],
+  });
+  assert.deepEqual(resolved.tenantSections[1].sort(), ['capacities', 'workspaces']);
+  assert.deepEqual(resolved.tenantSections[2], ['pipelines']);
+});
+
+test('a page with no scan falls back to a tenant where the section is held', () => {
+  const p = require('../src/services/permissionService');
+  const resolved = p.resolvePermissions({
+    user: { email: 'ann@x.com' }, anyAdminConfigured: true, tenants: [{ id: 1 }, { id: 2 }],
+    record: { is_active: true, tenantIds: [1, 2], sectionKeys: [], tenantSections: { 2: ['capacities'] } },
+  });
+  const sps = [{ id: 1, name: 'Contoso' }, { id: 2, name: 'Fabrikam' }];
+  // Not simply the first configured tenant: Ann has no Capacities in Contoso.
+  assert.equal(p.fallbackTenant(resolved, 'capacities', sps).name, 'Fabrikam');
+  assert.equal(p.fallbackTenant(resolved, 'pipelines', sps), null);
+  assert.deepEqual(p.tenantsForSection({ isAdmin: true }, 'pipelines', sps), sps);
+});
+
+test('the grant grid is read per tenant, and only for tenants that are ticked', () => {
+  const { _readGrant } = require('../src/routes/permissions');
+  const grant = _readGrant({
+    tenantIds: ['1', '2', '99'],
+    ts_1: ['workspaces', 'analysis', 'mdm'],
+    ts_2: 'capacities',
+    ts_3: ['workspaces'],
+    sectionKeys: ['reconciliation', 'workspaces'],
+  }, [1, 2, 3]);
+  // 99 is not a configured tenant, 3 was not ticked.
+  assert.deepEqual(grant.tenantIds, [1, 2]);
+  // An application-wide section posted inside a tenant row is not a tenant grant.
+  assert.deepEqual(grant.tenantSections, { 1: ['workspaces', 'analysis'], 2: ['capacities'] });
+  // A tenant-bound section posted as application-wide is ignored: it can only be
+  // granted in a named tenant.
+  assert.deepEqual(grant.sectionKeys, ['reconciliation']);
+});
+
+test('saving stores each tenant\'s sections, and only for granted tenants', async () => {
+  const repo = require('../src/services/permissionRepository');
+  const { executed } = await withFakeSql(sql => (/OUTPUT INSERTED.id/.test(sql) ? [{ id: 7 }] : []), () =>
+    repo.saveUser({
+      email: 'ann@x.com', role: 'user', tenantIds: [1, 2], sectionKeys: ['mdm'],
+      tenantSections: { 1: ['workspaces', 'analysis'], 2: ['capacities'], 3: ['workspaces'] },
+    })
+  );
+  const sqls = executed.map(e => e.sql);
+  assert.ok(sqls.some(s => /DELETE FROM app_user_tenant_sections/.test(s)), 'old per-tenant grants are replaced');
+  const inserts = executed.filter(e => /INSERT INTO app_user_tenant_sections/.test(e.sql))
+    .map(e => e.params.find(p => p.name === 'spId').value + ':' + e.params.find(p => p.name === 'sectionKey').value);
+  assert.deepEqual(inserts, ['1:workspaces', '1:analysis', '2:capacities']);
+});
+
+test('a tenant-bound page refuses the selected scan\'s tenant when the section is held elsewhere', () => {
+  const { requireSectionAccess } = require('../src/middleware/permissions');
+  const p = require('../src/services/permissionService');
+  const permsFor = () => p.resolvePermissions({
+    user: { email: 'ann@x.com' }, anyAdminConfigured: true, tenants: [{ id: 1 }, { id: 2 }],
+    record: { is_active: true, tenantIds: [1, 2], sectionKeys: [], tenantSections: { 1: ['workspaces'] } },
+  });
+  const runs = [
+    { id: 20, sp_id: 2, sp_name: 'Fabrikam' },
+    { id: 10, sp_id: 1, sp_name: 'Contoso' },
+  ];
+  function call(globalRun) {
+    const out = { next: false, status: null, view: null, locals: null };
+    const req = { path: '/workspaces', permissions: permsFor(), xhr: false, get: () => '' };
+    const res = {
+      locals: { globalRun, availableRuns: runs },
+      status(code) { out.status = code; return this; },
+      render(view, locals) { out.view = view; out.locals = locals; },
+      json() {},
+    };
+    requireSectionAccess(req, res, () => { out.next = true; });
+    return out;
+  }
+
+  assert.equal(call(runs[1]).next, true, 'Contoso: Workspaces is held there');
+  const refused = call(runs[0]);
+  assert.equal(refused.next, false);
+  assert.equal(refused.status, 403);
+  assert.match(refused.locals.message, /not in Fabrikam/);
+  // The way forward: Contoso's newest scan, on the same page.
+  assert.deepEqual(refused.locals.switchTo, [{ label: 'Switch to Contoso', href: '/workspaces?runId=10' }]);
+  assert.equal(refused.locals.hideRunSelector, false);
+});
+
+test('Edit on the access panel receives data it can parse, whatever the name contains', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/settings/permissions.ejs', {
+    currentUser: { name: 'T' }, user: { name: 'T' }, currentPath: '/settings/permissions',
+    breadcrumb: [], availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Users & Access',
+    users: [{ id: 1, email: 'ann@x.com', display_name: 'Ann "The Boss" O\'Neil <x>', role: 'user', is_active: true,
+      tenantIds: [2], sectionKeys: ['mdm'], tenantSections: { 2: ['workspaces'] } }],
+    tenants: [{ id: 2, name: 'Fabrikam', tenant_id: 'abc' }, { id: 3, name: 'Contoso', tenant_id: 'def' }],
+    sections: sections.GRANTABLE_SECTIONS,
+    bootstrap: false, success: [], error: [],
+    permissions: { isAdmin: true }, visibleSections: sections.APP_SECTIONS,
+  });
+  // Decode the attribute exactly as a browser does, then parse it as the page does.
+  const raw = html.match(/class="btn btn-sm btn-outline-primary js-edit-user"\s+data-user="([^"]*)"/)[1];
+  const decoded = raw.replace(/&#34;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  const row = JSON.parse(decoded);
+  assert.equal(row.display_name, 'Ann "The Boss" O\'Neil <x>');
+  assert.deepEqual(row.tenantSections, { 2: ['workspaces'] });
+  // Removing asks first without inlining the name into script.
+  assert.doesNotMatch(html, /onsubmit=/);
+  assert.match(html, /class="d-inline js-remove-user"/);
+  // One grid row per tenant, one box per tenant-bound section, named per tenant.
+  for (const section of sections.TENANT_SECTIONS) {
+    assert.match(html, new RegExp('name="ts_2"\\s+value="' + section.key + '"'));
+    assert.match(html, new RegExp('name="ts_3"\\s+value="' + section.key + '"'));
+  }
+  // Application-wide sections are offered once, not per tenant.
+  for (const section of sections.APP_WIDE_SECTIONS) {
+    assert.match(html, new RegExp('name="sectionKeys"\\s+value="' + section.key + '"'));
+  }
+  // The row summary names what each tenant grants.
+  assert.match(html, /<strong>Fabrikam:<\/strong>/);
+});
+
+test('the sidebar names the application only', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/partials/header.ejs', {
+    currentUser: { name: 'T' }, currentPath: '/', breadcrumb: [], availableRuns: [], globalRun: null,
+    hideRunSelector: true, title: 'x', visibleSections: sections.APP_SECTIONS, permissions: { isAdmin: true },
+  });
+  assert.match(html, /class="pd-brand-name">Fabric Governance</);
+  assert.doesNotMatch(html, /pd-brand-suite/);
 });

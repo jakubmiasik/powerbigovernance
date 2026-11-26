@@ -43,7 +43,15 @@ function shapeUser(row) {
     principal_type: row.principal_type === PRINCIPAL_GROUP ? PRINCIPAL_GROUP : PRINCIPAL_USER,
     tenantIds: [],
     sectionKeys: [],
+    // spId -> section keys granted in that tenant only
+    tenantSections: {},
   };
+}
+
+function addTenantSection(entry, spId, key) {
+  const id = Number(spId);
+  if (!Number.isFinite(id) || !key) return;
+  (entry.tenantSections[id] = entry.tenantSections[id] || []).push(key);
 }
 
 /** Attaches tenant and section grants to already-loaded entries, in place. */
@@ -60,6 +68,10 @@ async function attachGrants(conn, entries) {
   for (const row of await execSql(conn, 'SELECT user_id, section_key FROM app_user_sections')) {
     const entry = byId.get(Number(row.user_id));
     if (entry) entry.sectionKeys.push(row.section_key);
+  }
+  for (const row of await execSql(conn, 'SELECT user_id, sp_id, section_key FROM app_user_tenant_sections')) {
+    const entry = byId.get(Number(row.user_id));
+    if (entry) addTenantSection(entry, row.sp_id, row.section_key);
   }
   return entries;
 }
@@ -121,6 +133,9 @@ async function getUserByIdentity({ objectId = null, emails = [] } = {}) {
     }
     for (const row of await execSql(conn, 'SELECT section_key FROM app_user_sections WHERE user_id = @userId', [int('userId', user.id)])) {
       user.sectionKeys.push(row.section_key);
+    }
+    for (const row of await execSql(conn, 'SELECT sp_id, section_key FROM app_user_tenant_sections WHERE user_id = @userId', [int('userId', user.id)])) {
+      addTenantSection(user, row.sp_id, row.section_key);
     }
     return user;
   });
@@ -200,7 +215,7 @@ async function hasAnyGroupGrant() {
  * complete intended state, and merging would make unticking a box do nothing.
  */
 async function saveUser({
-  id, email, displayName, role, isActive = true, tenantIds = [], sectionKeys = [], actor = null,
+  id, email, displayName, role, isActive = true, tenantIds = [], sectionKeys = [], tenantSections = {}, actor = null,
   principalType = PRINCIPAL_USER, entraObjectId = null,
 }) {
   const kind = principalType === PRINCIPAL_GROUP ? PRINCIPAL_GROUP : PRINCIPAL_USER;
@@ -266,11 +281,21 @@ async function saveUser({
 
     await execSql(conn, 'DELETE FROM app_user_tenants WHERE user_id = @userId', [int('userId', userId)]);
     await execSql(conn, 'DELETE FROM app_user_sections WHERE user_id = @userId', [int('userId', userId)]);
+    await execSql(conn, 'DELETE FROM app_user_tenant_sections WHERE user_id = @userId', [int('userId', userId)]);
 
-    for (const spId of [...new Set(tenantIds.map(Number).filter(Number.isFinite))]) {
+    const grantedTenants = [...new Set(tenantIds.map(Number).filter(Number.isFinite))];
+    for (const spId of grantedTenants) {
       await execSql(conn, 'INSERT INTO app_user_tenants (user_id, sp_id) VALUES (@userId, @spId)', [
         int('userId', userId), int('spId', spId),
       ]);
+      // Only for tenants actually granted: sections in a tenant the entry cannot
+      // see would be grants that never apply.
+      const keys = tenantSections[spId] || tenantSections[String(spId)] || [];
+      for (const key of [...new Set((Array.isArray(keys) ? keys : [keys]).filter(Boolean))]) {
+        await execSql(conn, 'INSERT INTO app_user_tenant_sections (user_id, sp_id, section_key) VALUES (@userId, @spId, @sectionKey)', [
+          int('userId', userId), int('spId', spId), str('sectionKey', key),
+        ]);
+      }
     }
     for (const key of [...new Set(sectionKeys.filter(Boolean))]) {
       await execSql(conn, 'INSERT INTO app_user_sections (user_id, section_key) VALUES (@userId, @sectionKey)', [
@@ -288,6 +313,7 @@ async function deleteUser(id) {
   await withConnection(async (conn) => {
     await execSql(conn, 'DELETE FROM app_user_tenants WHERE user_id = @userId', [int('userId', userId)]);
     await execSql(conn, 'DELETE FROM app_user_sections WHERE user_id = @userId', [int('userId', userId)]);
+    await execSql(conn, 'DELETE FROM app_user_tenant_sections WHERE user_id = @userId', [int('userId', userId)]);
     await execSql(conn, 'DELETE FROM app_users WHERE id = @userId', [int('userId', userId)]);
   });
 }

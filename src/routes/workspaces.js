@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
+const { fallbackTenant } = require('../services/permissionService');
 const { createPowerBIService } = require('../services/powerbiService');
 const { computeWorkspaceInsights, FINDING_DEFS, isAdminRole, isPersonPrincipal, isGroupPrincipal, userDisplay } = require('../services/workspaceInsightsService');
 
@@ -93,7 +94,10 @@ async function getPbiService(req, res) {
   if (!sp) {
     const sps = await db.getServicePrincipals();
     if (sps.length === 0) throw new Error('No service principal configured. Go to Settings to add one.');
-    sp = sps[0];
+    // The first tenant where this person holds the section, not simply the first
+    // configured one: that may be a tenant they were never granted.
+    sp = fallbackTenant(res && res.locals ? res.locals.permissions : null, 'workspaces', sps);
+    if (!sp) throw new Error('No tenant is available to you for Workspaces. Ask an administrator to grant one under Users & Access.');
   }
   const keyVaultAuthUrl = `/settings/kv/auth?spId=${encodeURIComponent(String(sp.id))}&returnTo=${encodeURIComponent(req.originalUrl || '/workspaces')}`;
   return createPowerBIService(sp, {
@@ -216,8 +220,13 @@ router.post('/delete', async (req, res) => {
 
     const pbi = await getPbiService(req, res);
     const { run } = await resolveRun(req, res);
+    // The service principal the deletion runs as, so administrator elevation grants
+    // that application its role. Taking the first configured one would, with more
+    // than one tenant, elevate a different tenant's application.
     const sps = await db.getServicePrincipals();
-    const sp = sps.length ? sps[0] : null;
+    const activeSpId = res.locals.globalRun && res.locals.globalRun.sp_id;
+    const sp = (activeSpId && sps.find(candidate => Number(candidate.id) === Number(activeSpId)))
+      || fallbackTenant(res.locals.permissions, 'workspaces', sps);
 
     const summary = await deleteWorkspaces(pbi, targets, {
       runId: run ? run.id : null,

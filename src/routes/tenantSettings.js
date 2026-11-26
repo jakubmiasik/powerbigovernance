@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
+const { fallbackTenant } = require('../services/permissionService');
 const { createPowerBIService } = require('../services/powerbiService');
 const { summarizeTenantSettings } = require('../services/runMetricsService');
 
@@ -15,7 +16,10 @@ async function getPbiService(req, res) {
   if (!sp) {
     const sps = await db.getServicePrincipals();
     if (sps.length === 0) throw new Error('No service principal configured. Go to Settings to add one.');
-    sp = sps[0];
+    // The first tenant where this person holds the section, not simply the first
+    // configured one: that may be a tenant they were never granted.
+    sp = fallbackTenant(res && res.locals ? res.locals.permissions : null, 'tenant-settings', sps);
+    if (!sp) throw new Error('No tenant is available to you for Tenant Settings. Ask an administrator to grant one under Users & Access.');
   }
   const keyVaultAuthUrl = `/settings/kv/auth?spId=${encodeURIComponent(String(sp.id))}&returnTo=${encodeURIComponent('/tenant-settings')}`;
   return createPowerBIService(sp, {

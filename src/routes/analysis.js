@@ -17,7 +17,7 @@ const {
 } = require('../services/analysisScopeService');
 const { SCHEDULE_TYPES } = require('../services/scheduleDueService');
 const { convertScheduleToUtc } = require('../services/scheduleTimeService');
-const { visibleTenants, visibleRuns, canSeeTenant } = require('../services/permissionService');
+const { visibleRuns, tenantsForSection, canUseSectionInTenant } = require('../services/permissionService');
 
 /**
  * The tenants this user may act on.
@@ -27,7 +27,13 @@ const { visibleTenants, visibleRuns, canSeeTenant } = require('../services/permi
  * that happened to read the full list for itself.
  */
 async function permittedServicePrincipals(req) {
-  return visibleTenants(req.permissions, await db.getServicePrincipals());
+  // Tenants where Run Analysis itself is granted: seeing a tenant's scans does
+  // not by itself allow starting new ones there.
+  return tenantsForSection(req.permissions, 'analysis', await db.getServicePrincipals());
+}
+
+function canAnalyseTenant(req, spId) {
+  return canUseSectionInTenant(req.permissions, 'analysis', spId);
 }
 
 const activeAnalyses = new Map();
@@ -244,8 +250,8 @@ router.post('/run', async (req, res) => {
     // Naming a tenant that was not granted is refused rather than quietly falling
     // back to a permitted one: starting a scan against the wrong tenant is worse
     // than being told no.
-    if (Number.isFinite(requestedSpId) && !canSeeTenant(req.permissions, requestedSpId)) {
-      return res.status(403).json({ success: false, message: 'You do not have access to that tenant.' });
+    if (Number.isFinite(requestedSpId) && !canAnalyseTenant(req, requestedSpId)) {
+      return res.status(403).json({ success: false, message: 'You do not have Run Analysis in that tenant.' });
     }
     const sp = (Number.isFinite(requestedSpId) && sps.find(s => parseInt(s.id, 10) === requestedSpId)) || sps[0];
 
@@ -285,8 +291,8 @@ router.get('/workspaces', async (req, res) => {
     const wantsLive = req.query.refresh === '1' || req.query.refresh === 'true';
     const sps = await permittedServicePrincipals(req);
     const requestedSpId = Number.parseInt(req.query.spId, 10);
-    if (Number.isFinite(requestedSpId) && !canSeeTenant(req.permissions, requestedSpId)) {
-      return res.status(403).json({ success: false, message: 'You do not have access to that tenant.' });
+    if (Number.isFinite(requestedSpId) && !canAnalyseTenant(req, requestedSpId)) {
+      return res.status(403).json({ success: false, message: 'You do not have Run Analysis in that tenant.' });
     }
     const sp = (Number.isFinite(requestedSpId) && sps.find(s => parseInt(s.id, 10) === requestedSpId)) || sps[0];
 

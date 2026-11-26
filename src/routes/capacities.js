@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../services/databaseService');
+const { fallbackTenant } = require('../services/permissionService');
 const { createPowerBIService } = require('../services/powerbiService');
 const { executeCapacityActionWithService } = require('../services/capacityActionService');
 const { normalizeTimezone, convertScheduleToUtc } = require('../services/scheduleTimeService');
@@ -82,7 +83,10 @@ async function getPbiService(req, res) {
   if (!sp) {
     const sps = await db.getServicePrincipals();
     if (sps.length === 0) throw new Error('No service principal configured. Go to Settings to add one.');
-    sp = sps[0];
+    // The first tenant where this person holds the section, not simply the first
+    // configured one: that may be a tenant they were never granted.
+    sp = fallbackTenant(res && res.locals ? res.locals.permissions : null, 'capacities', sps);
+    if (!sp) throw new Error('No tenant is available to you for Capacities. Ask an administrator to grant one under Users & Access.');
   }
   const keyVaultAuthUrl = `/settings/kv/auth?spId=${encodeURIComponent(String(sp.id))}&returnTo=${encodeURIComponent(req.originalUrl || '/capacities')}`;
   return createPowerBIService(sp, {
@@ -280,7 +284,8 @@ router.post('/:name/schedule', async (req, res) => {
     }
     const preferredSpId = res.locals.globalRun && res.locals.globalRun.sp_id ? parseInt(res.locals.globalRun.sp_id, 10) : null;
     const selectedSp = Number.isFinite(preferredSpId) ? allSps.find(s => parseInt(s.id, 10) === preferredSpId) : null;
-    const effectiveSp = selectedSp || allSps[0];
+    const effectiveSp = selectedSp || fallbackTenant(res.locals.permissions, 'capacities', allSps);
+    if (!effectiveSp) return res.json({ success: false, message: 'No tenant is available to you for Capacities.' });
     const normalizedTimezone = normalizeTimezone(timezone);
     let utcSchedule;
     try {

@@ -119,8 +119,43 @@ async function loadPermissions(req, res, next) {
   next();
 }
 
+/**
+ * The tenant-bound half of the check: a section granted in Contoso must not open
+ * on Fabrikam's data just because the scan selector points at Fabrikam.
+ *
+ * Pages act on the tenant of the selected scan, so that is the tenant checked.
+ * Run Analysis is left to its own route, which chooses the tenant to scan from
+ * the ones where the section is held.
+ */
+function tenantRefusal(req, res, section) {
+  const perms = req.permissions;
+  if (!section || !section.tenantScoped || section.key === 'analysis') return null;
+  if (!perms || perms.isAdmin) return null;
+  const run = res.locals.globalRun;
+  if (!run || run.sp_id === undefined || run.sp_id === null) return null;
+  if (permissions.canUseSectionInTenant(perms, section.key, run.sp_id)) return null;
+
+  // Where it is held instead, with the newest scan of each, so the refusal can
+  // offer a way forward rather than only a no.
+  const runs = res.locals.availableRuns || [];
+  const alternatives = [];
+  for (const candidate of runs) {
+    if (!permissions.canUseSectionInTenant(perms, section.key, candidate.sp_id)) continue;
+    if (alternatives.some(alt => Number(alt.spId) === Number(candidate.sp_id))) continue;
+    alternatives.push({ spId: candidate.sp_id, tenantName: candidate.sp_name || ('Tenant #' + candidate.sp_id), runId: candidate.id });
+  }
+  return {
+    tenantName: run.sp_name || ('Tenant #' + run.sp_id),
+    alternatives,
+  };
+}
+
 function requireSectionAccess(req, res, next) {
-  if (permissions.canAccessPath(req.permissions, req.path)) return next();
+  if (permissions.canAccessPath(req.permissions, req.path)) {
+    const refusal = tenantRefusal(req, res, sectionForPath(req.path));
+    if (!refusal) return next();
+    return refuseForTenant(req, res, sectionForPath(req.path), refusal);
+  }
 
   const section = sectionForPath(req.path);
   const message = req.permissions && req.permissions.reason === 'error'
@@ -150,4 +185,33 @@ function requireSectionAccess(req, res, next) {
   });
 }
 
-module.exports = { loadPermissions, requireSectionAccess, clearPermissionCache };
+function refuseForTenant(req, res, section, refusal) {
+  const message = 'You have access to ' + section.label + ' in '
+    + (refusal.alternatives.length ? refusal.alternatives.map(alt => alt.tenantName).join(', ') : 'other tenants')
+    + ', but not in ' + refusal.tenantName + ', the tenant of the selected scan.';
+
+  const wantsJson = req.xhr
+    || (req.get('accept') || '').includes('application/json')
+    || req.path.startsWith('/api/');
+  if (wantsJson) {
+    return res.status(403).json({ success: false, error: 'Forbidden', message, section: section.key });
+  }
+
+  res.status(403).render('no-access', {
+    title: 'No access',
+    user: req.user,
+    section,
+    message,
+    permissions: req.permissions,
+    // Each link selects that tenant's newest scan (loadRuns honours ?runId=) and
+    // reopens the same page.
+    switchTo: refusal.alternatives.map(alt => ({
+      label: 'Switch to ' + alt.tenantName,
+      href: section.href + '?runId=' + encodeURIComponent(alt.runId),
+    })),
+    // The selector stays, so another scan can be chosen from here as well.
+    hideRunSelector: false,
+  });
+}
+
+module.exports = { loadPermissions, requireSectionAccess, clearPermissionCache, _tenantRefusal: tenantRefusal };
