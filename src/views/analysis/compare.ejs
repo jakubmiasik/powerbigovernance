@@ -10,11 +10,20 @@
   });
   var tenantKeys = Object.keys(runsByTenant).sort();
 
-  function runLabel(r) {
+  // Shown both as Run Analysis → Compare Runs and as Overview → Since Last Scan.
+  var cmp = typeof compare !== 'undefined' && compare ? compare : {
+    basePath: '/analysis/compare', detailsPath: '/analysis/compare/details', title: 'Compare Runs',
+    subtitle: 'Summary totals are compared instantly; the detailed diff is loaded on demand.', backHref: '/analysis'
+  };
+  // A scan is its principal and that principal's own number.
+  function scanName(r) {
+    if (typeof runLabel === 'function') return runLabel(r);
+    return (r.sp_name || 'Unknown principal') + (r.sp_run_number ? ' #' + r.sp_run_number : ' (unnumbered, id ' + r.id + ')');
+  }
+  function optionLabel(r) {
     // The coverage leads, because comparing a one-workspace scan with a
     // whole-tenant one reads as the estate having shrunk by 47 workspaces.
-    return '[' + scopeTag(r) + '] Run #' + r.id + ' — ' + (r.sp_name || 'Unknown SP') + ' — ' +
-      (r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A');
+    return '[' + scopeTag(r) + '] ' + scanName(r) + ' — ' + (r.started_at ? new Date(r.started_at).toLocaleString() : 'N/A');
   }
 
   function formatBytes(bytes) {
@@ -33,26 +42,26 @@
 
 <div class="mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
   <div>
-    <h2><i class="bi bi-arrow-left-right me-2"></i>Compare Runs</h2>
-    <p class="text-muted mb-0">Summary totals are compared instantly; the detailed diff is loaded on demand.</p>
+    <h2><i class="bi bi-arrow-left-right me-2"></i><%= cmp.title %></h2>
+    <p class="text-muted mb-0"><%= cmp.subtitle %></p>
   </div>
-  <a href="/analysis" class="btn btn-outline-secondary btn-sm" onclick="goBackOr('/analysis'); return false;"><i class="bi bi-arrow-left me-1"></i>Back</a>
+  <% if (cmp.backHref) { %><a href="<%= cmp.backHref %>" class="btn btn-outline-secondary btn-sm" onclick="goBackOr('<%= cmp.backHref %>'); return false;"><i class="bi bi-arrow-left me-1"></i>Back</a><% } %>
 </div>
 
 <div class="card mb-4">
   <div class="card-header"><i class="bi bi-sliders me-2"></i>Select Runs</div>
   <div class="card-body">
     <% if (!tenantKeys.length) { %>
-      <p class="text-muted mb-0">No completed analysis runs yet. <a href="/analysis">Run an analysis</a> first.</p>
+      <p class="text-muted mb-0">No completed scans you can see yet. <a href="/analysis">Run an analysis</a> first.</p>
     <% } else { %>
-      <form method="get" action="/analysis/compare" class="row g-2 align-items-end">
+      <form method="get" action="<%= cmp.basePath %>" class="row g-2 align-items-end">
         <div class="col-md-5">
-          <label class="form-label small" for="fromRunSelect">Baseline run</label>
+          <label class="form-label small" for="fromRunSelect">Baseline scan</label>
           <select class="form-select form-select-sm" id="fromRunSelect" name="from" onchange="syncTenant('fromRunSelect')">
             <% tenantKeys.forEach(function(tenant) { %>
               <optgroup label="Tenant <%= tenant %>">
                 <% runsByTenant[tenant].forEach(function(r) { %>
-                  <option value="<%= r.id %>" data-tenant="<%= tenant %>" <%= fromRun && fromRun.id === r.id ? 'selected' : '' %>><%= runLabel(r) %></option>
+                  <option value="<%= r.id %>" data-tenant="<%= tenant %>" <%= fromRun && fromRun.id === r.id ? 'selected' : '' %>><%= optionLabel(r) %></option>
                 <% }) %>
               </optgroup>
             <% }) %>
@@ -64,7 +73,7 @@
             <% tenantKeys.forEach(function(tenant) { %>
               <optgroup label="Tenant <%= tenant %>">
                 <% runsByTenant[tenant].forEach(function(r) { %>
-                  <option value="<%= r.id %>" data-tenant="<%= tenant %>" <%= toRun && toRun.id === r.id ? 'selected' : '' %>><%= runLabel(r) %></option>
+                  <option value="<%= r.id %>" data-tenant="<%= tenant %>" <%= toRun && toRun.id === r.id ? 'selected' : '' %>><%= optionLabel(r) %></option>
                 <% }) %>
               </optgroup>
             <% }) %>
@@ -74,11 +83,14 @@
           <button type="submit" class="btn btn-primary btn-sm w-100"><i class="bi bi-arrow-left-right me-1"></i>Compare</button>
         </div>
       </form>
-      <div class="form-text mt-2"><i class="bi bi-info-circle me-1"></i>Runs can only be compared within the same tenant.</div>
+      <div class="form-text mt-2"><i class="bi bi-info-circle me-1"></i>Scans are named by service principal and that principal's own scan number, and can only be compared within the same tenant.</div>
     <% } %>
   </div>
 </div>
 
+<% if (typeof notice !== 'undefined' && notice) { %>
+  <div class="alert alert-info"><i class="bi bi-info-circle me-2"></i><%= notice %></div>
+<% } %>
 <% if (error) { %>
   <div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div>
 <% } %>
@@ -94,8 +106,8 @@
 <% if (scopesDiffer) { %>
   <div class="alert alert-warning">
     <i class="bi bi-exclamation-triangle me-2"></i>
-    These two scans did not cover the same thing — run #<%= fromRun.id %> covered
-    <strong><%= describeScope(scopeFromRow(fromRun)) %></strong> and run #<%= toRun.id %> covered
+    These two scans did not cover the same thing — <%= scanName(fromRun) %> covered
+    <strong><%= describeScope(scopeFromRow(fromRun)) %></strong> and <%= scanName(toRun) %> covered
     <strong><%= describeScope(scopeFromRow(toRun)) %></strong>. Every difference below is at least partly
     the difference between the two scopes, not a change in the estate.
   </div>
@@ -106,15 +118,15 @@
       <span><i class="bi bi-graph-up me-2"></i>Summary Comparison</span>
       <span class="small text-muted">
         <span title="<%= scopeTagTitle(fromRun) %>">[<%= scopeTag(fromRun) %>]</span>
-        Run #<%= fromRun.id %> (<%= fromRun.started_at ? new Date(fromRun.started_at).toLocaleString() : '-' %>)
+        <%= scanName(fromRun) %> (<%= fromRun.started_at ? new Date(fromRun.started_at).toLocaleString() : '-' %>)
         &rarr;
         <span title="<%= scopeTagTitle(toRun) %>">[<%= scopeTag(toRun) %>]</span>
-        Run #<%= toRun.id %> (<%= toRun.started_at ? new Date(toRun.started_at).toLocaleString() : '-' %>)
+        <%= scanName(toRun) %> (<%= toRun.started_at ? new Date(toRun.started_at).toLocaleString() : '-' %>)
       </span>
     </div>
     <div class="card-body py-3">
       <% if (!changedMetrics.length) { %>
-        <div class="alert alert-success small mb-3"><i class="bi bi-check-circle me-2"></i>No change in any summary total between these two runs.</div>
+        <div class="alert alert-success small mb-3"><i class="bi bi-check-circle me-2"></i>No change in any summary total between these two scans.</div>
       <% } %>
       <% if (typeof tenantSettingsComparable !== 'undefined' && !tenantSettingsComparable) { %>
         <div class="alert alert-info small mb-3">
@@ -127,8 +139,8 @@
           <thead>
             <tr>
               <th>Metric</th>
-              <th class="text-end">Run #<%= fromRun.id %></th>
-              <th class="text-end">Run #<%= toRun.id %></th>
+              <th class="text-end"><%= scanName(fromRun) %></th>
+              <th class="text-end"><%= scanName(toRun) %></th>
               <th class="text-end">Change</th>
               <th class="text-end">%</th>
             </tr>
@@ -341,7 +353,7 @@ async function loadDetails() {
   panel.innerHTML = '<div class="text-muted small d-flex align-items-center gap-2"><span class="spinner-border spinner-border-sm"></span> Comparing full run contents...</div>';
 
   try {
-    var resp = await fetch('/analysis/compare/details?from=' + compareFrom + '&to=' + compareTo);
+    var resp = await fetch(<%- JSON.stringify(cmp.detailsPath) %> + '?from=' + compareFrom + '&to=' + compareTo);
     var data = await resp.json();
     if (!data.success) {
       panel.innerHTML = '<div class="alert alert-warning small mb-0"><i class="bi bi-exclamation-triangle me-1"></i>' + escapeHtml(data.message) + '</div>';

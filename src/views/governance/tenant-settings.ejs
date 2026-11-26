@@ -30,7 +30,7 @@
       <p class="text-muted mb-0">
         Captured with
         <% if (run) { %>
-          analysis run #<%= run.id %><% if (run.name) { %> &mdash; <%= run.name %><% } %><% if (capturedAt) { %>
+          <%- include('../partials/scan-name', { run: run }).trim() %><% if (run.name) { %> &mdash; <%= run.name %><% } %><% if (capturedAt) { %>
           on <%= new Date(capturedAt).toLocaleString() %><% } %>.
         <% } else { %>
           the selected analysis run.

@@ -17,7 +17,7 @@
   <div class="pd-card mb-4">
     <div class="pd-card-header">
       <span><i class="bi bi-clock-history me-2" aria-hidden="true"></i><strong>Since the last scan</strong>
-        <span class="text-muted small ms-1">What changed in <%= homeRun.sp_name || 'this tenant' %>, what needs attention, who is active and where storage is growing.</span></span>
+        <span class="text-muted small ms-1">Compare the latest scan of <%= homeRun.sp_name || 'this principal' %> with its previous scan.</span></span>
       <a class="btn btn-sm btn-primary" href="/governance/changes?runId=<%= homeRun.id %>">Open</a>
     </div>
   </div>

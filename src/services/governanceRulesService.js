@@ -11,6 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { runLabel, runNumber } = require('./runLabelService');
 
 const DEFAULT_RULES_FILE = path.join(__dirname, '..', 'config', 'governance-rules.json');
 const STATUSES = ['Pass', 'Fail', 'Potential risk', 'Unknown'];
@@ -117,7 +118,7 @@ const CHECKS = {
       denominator: access.totalAssignments,
       value: share,
       detail: 'Admin ' + (share === null ? 'Unknown' : share + '%') + ' of assignments (threshold ' + t.adminSharePct + '%); '
-        + access.groupAssignments + ' group assignment' + (access.groupAssignments === 1 ? '' : 's') + '; access data from run ' + access.runId + '.',
+        + access.groupAssignments + ' group assignment' + (access.groupAssignments === 1 ? '' : 's') + '; access data from ' + access.label + '.',
       affected: [],
     };
   },
@@ -172,7 +173,7 @@ const CHECKS = {
       evaluated: true,
       count: hits.length,
       denominator: TREND_METRICS.length,
-      detail: 'Run ' + last.runId + ' compared with run ' + prev.runId + ' (threshold ±' + t.trendChangePct + '%).',
+      detail: last.label + ' compared with ' + prev.label + ' (threshold ±' + t.trendChangePct + '%).',
       affected: hits.map(m => ({ id: m.key, name: m.label, detail: prev.values[m.key] + ' → ' + last.values[m.key] + ' (' + (last.changes[m.key].pct > 0 ? '+' : '') + last.changes[m.key].pct + '%)' })),
     };
   },
@@ -181,7 +182,7 @@ const CHECKS = {
 // ── Sections ──
 
 function buildAccess(accessRun, rows, runId) {
-  if (!accessRun) return { available: false, runId: null, completedAt: null, isLatestRun: false };
+  if (!accessRun) return { available: false, runId: null, number: null, label: null, completedAt: null, isLatestRun: false };
   const byType = new Map();
   const rights = new Set();
   let total = 0;
@@ -205,6 +206,9 @@ function buildAccess(accessRun, rows, runId) {
   return {
     available: true,
     runId: accessRun.access_run_id,
+    spId: accessRun.sp_id === undefined ? null : accessRun.sp_id,
+    number: runNumber(accessRun),
+    label: runLabel({ ...accessRun, id: accessRun.access_run_id }),
     completedAt: iso(accessRun.access_completed_at),
     isLatestRun: accessRun.access_run_id === runId,
     totalAssignments: total,
@@ -229,7 +233,7 @@ function buildTrend(rows, thresholdPct) {
       const pct = pctChange(values[m.key], prev.values[m.key]);
       changes[m.key] = { abs, pct, hit: pct !== null && Math.abs(pct) > thresholdPct };
     }
-    runs.push({ runId: row.run_id, completedAt: iso(row.completed_at), values, changes });
+    runs.push({ runId: row.run_id, number: runNumber(row), label: runLabel({ ...row, id: row.run_id }), completedAt: iso(row.completed_at), values, changes });
   }
   return { metrics: TREND_METRICS, thresholdPct, runs };
 }
@@ -269,11 +273,11 @@ function buildKpis(totals) {
 
 function buildGaps({ run, totals, access, workspaces, trend, connectionMode, kpis }) {
   const gaps = [];
-  if (!totals) gaps.push({ id: 'totals-missing', message: 'Totals were not stored for run ' + run.run_id + ', so the KPI values show as Unknown.' });
+  if (!totals) gaps.push({ id: 'totals-missing', message: 'Totals were not stored for ' + runLabel({ ...run, id: run.run_id }) + ', so the KPI values show as Unknown.' });
   if (kpis.storage.status === 'Not collected') gaps.push({ id: 'storage-not-collected', message: 'Storage was not collected in this scan (storage_scanned_count = 0), so it shows as "Not collected".' });
   if (kpis.storage.status === 'Collected') gaps.push({ id: 'storage-units', message: 'Storage units are not confirmed: the raw value is shown as ' + STORAGE_UNITS_LABEL + ', and the GB figure is approximate.' });
   if (!access.available) gaps.push({ id: 'access-missing', message: 'No completed tenant scan has access data, so access is Unknown and F3 is not evaluated.' });
-  else if (!access.isLatestRun) gaps.push({ id: 'access-older-run', message: 'Access data from run ' + access.runId + ' (' + (access.completedAt ? access.completedAt.replace('T', ' ').slice(0, 19) + ' UTC' : 'date unknown') + '); latest run has no access data.' });
+  else if (!access.isLatestRun) gaps.push({ id: 'access-older-run', message: 'Access data from ' + access.label + ' (' + (access.completedAt ? access.completedAt.replace('T', ' ').slice(0, 19) + ' UTC' : 'date unknown') + '); latest run has no access data.' });
   const noSku = flagged(workspaces, 'no_sku').length;
   if (noSku) gaps.push({ id: 'sku-not-recorded', message: noSku + ' workspace' + (noSku === 1 ? ' has' : 's have') + ' no capacity SKU recorded; shown as "(not recorded)".' });
   if (trend.runs.length < 2) gaps.push({ id: 'trend-short', message: 'Fewer than two completed tenant scans have totals, so there is no trend and T1 is not evaluated.' });
@@ -296,11 +300,13 @@ function buildOutcome({ run, data, rules, connectionMode = 'application', genera
   const trend = buildTrend(data.trend, t.trendChangePct);
   const kpis = buildKpis(totals);
   const dataTimestamp = iso(run.completed_at);
+  // A scan is named by its principal and that principal's number; run_id is only the join key.
+  const scanRef = { spId: run.sp_id === undefined ? null : run.sp_id, principal: run.sp_name || null, number: runNumber(run), label: runLabel({ ...run, id: run.run_id }) };
 
   const context = { workspaces, totals, access, trend };
   const findings = rules.rules.map(rule => {
     const result = CHECKS[rule.check](context, t);
-    const base = { id: rule.id, title: rule.title, category: rule.category, severity: rule.severity, runId: run.run_id, dataTimestamp };
+    const base = { id: rule.id, title: rule.title, category: rule.category, severity: rule.severity, runId: run.run_id, scan: scanRef, dataTimestamp };
     if (!result.evaluated) return { ...base, status: 'Unknown', count: null, denominator: null, value: null, detail: result.reason, affected: [] };
     return {
       ...base,
@@ -322,7 +328,7 @@ function buildOutcome({ run, data, rules, connectionMode = 'application', genera
 
   return {
     tenant: { id: String(run.tenant_id || '').toLowerCase(), name: run.sp_name || null },
-    run: { id: run.run_id, status: run.status, scopeKind: run.scope_kind, startedAt: iso(run.started_at), completedAt: dataTimestamp, runBy: run.run_by || null },
+    run: { id: run.run_id, spId: scanRef.spId, principal: scanRef.principal, number: scanRef.number, label: scanRef.label, status: run.status, scopeKind: run.scope_kind, startedAt: iso(run.started_at), completedAt: dataTimestamp, runBy: run.run_by || null },
     dataAsOf: dataTimestamp,
     kpis,
     itemTypes: ITEM_TYPES.map(type => ({ key: type.key, label: type.label, value: totals ? num(totals[type.key]) : null })),
@@ -337,7 +343,7 @@ function buildOutcome({ run, data, rules, connectionMode = 'application', genera
     },
     access,
     trend,
-    deletions: (data.deletions || []).map(row => ({ workspaceName: row.workspace_name || '(unnamed)', state: row.state, deletedAt: iso(row.deleted_at), runId: row.run_id })),
+    deletions: (data.deletions || []).map(row => ({ workspaceName: row.workspace_name || '(unnamed)', state: row.state, deletedAt: iso(row.deleted_at), runId: row.run_id, scan: row.run_id ? runLabel({ ...row, id: row.run_id }) : null })),
     gaps: buildGaps({ run, totals, access, workspaces, trend, connectionMode, kpis }),
     meta: { generatedAt: iso(generatedAt), trigger, connectionMode, rulesVersion: rules.version || null, thresholds: t },
   };

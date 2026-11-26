@@ -12,6 +12,7 @@
  */
 
 const db = require('./databaseService');
+const { runLabel } = require('./runLabelService');
 const launcher = require('./analysisLauncher');
 const {
   scopeFromRow, scopeToRow, describeScope, requestedWorkspaceScope, normalizeScope, SCOPE_KIND,
@@ -125,7 +126,7 @@ async function executeSchedule(schedule, { source = 'scheduler' } = {}) {
     const runs = await db.getAnalysisRuns().catch(() => []);
     const inFlight = findRunningRun(runs, schedule.id);
     if (inFlight) {
-      const message = 'Skipped: run #' + inFlight.id + ' from this schedule is still going.';
+      const message = 'Skipped: ' + runLabel(inFlight) + ' from this schedule is still going.';
       await db.logAnalysisScheduleRun(schedule.id, inFlight.id, 'skipped', message);
       return { status: 'skipped', message };
     }
@@ -144,7 +145,13 @@ async function executeSchedule(schedule, { source = 'scheduler' } = {}) {
     });
 
     const runId = started && started.runId ? started.runId : null;
-    const message = 'Started run #' + runId + ' — ' + describeScope(scope) + ' (' + source + ').';
+    // Named by principal and number; the id is only stored for the link.
+    let startedRun = null;
+    if (runId && typeof db.getAnalysisRunMeta === 'function') {
+      try { startedRun = await db.getAnalysisRunMeta(runId); } catch { startedRun = null; }
+    }
+    const label = startedRun ? runLabel(startedRun) : runLabel({ id: runId, sp_name: sp.name, sp_id: sp.id });
+    const message = 'Started ' + label + ' — ' + describeScope(scope) + ' (' + source + ').';
     await db.logAnalysisScheduleRun(schedule.id, runId, 'started', message);
     return { status: 'started', message, runId };
   } catch (err) {

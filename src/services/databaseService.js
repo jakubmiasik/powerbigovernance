@@ -235,6 +235,57 @@ async function deleteServicePrincipal(id) {
   }
 }
 
+// ── Per-principal scan numbers ──
+//
+// Unnumbered runs get the next numbers of their principal in start order, oldest
+// first, after any number that principal already has. Runs without a principal
+// (managed identity) are numbered as one group. Idempotent: numbered runs are
+// never touched, so running it again changes nothing.
+const RUN_NUMBER_BACKFILL_SQL = `
+IF COL_LENGTH(N'analysis_runs', N'sp_run_number') IS NOT NULL
+BEGIN
+  ;WITH base AS (
+    SELECT sp_id, MAX(sp_run_number) AS last_number FROM analysis_runs GROUP BY sp_id
+  ), todo AS (
+    SELECT id, sp_id, ROW_NUMBER() OVER (PARTITION BY sp_id ORDER BY started_at, id) AS position
+    FROM analysis_runs WHERE sp_run_number IS NULL
+  )
+  UPDATE r SET sp_run_number = ISNULL(b.last_number, 0) + t.position
+  FROM analysis_runs AS r
+  JOIN todo AS t ON t.id = r.id
+  LEFT JOIN base AS b ON (b.sp_id = r.sp_id OR (b.sp_id IS NULL AND r.sp_id IS NULL));
+END`;
+
+// The next number for one new run, decided and written in one statement. The
+// range locks keep two scans of the same principal from taking the same number;
+// the unique index is the backstop, and a clash is retried.
+const ASSIGN_RUN_NUMBER_SQL = `
+UPDATE r SET sp_run_number = n.next_number
+FROM analysis_runs AS r
+CROSS APPLY (
+  SELECT ISNULL(MAX(x.sp_run_number), 0) + 1 AS next_number
+  FROM analysis_runs AS x WITH (UPDLOCK, HOLDLOCK)
+  WHERE (x.sp_id = r.sp_id OR (x.sp_id IS NULL AND r.sp_id IS NULL))
+) AS n
+WHERE r.id = @id AND r.sp_run_number IS NULL;
+SELECT sp_run_number FROM analysis_runs WHERE id = @id;`;
+
+async function assignRunNumber(conn, id) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const rows = await execSql(conn, ASSIGN_RUN_NUMBER_SQL, [{ name: 'id', type: TYPES.Int, value: id }]);
+      return rows[0] ? rows[0].sp_run_number : null;
+    } catch (err) {
+      const message = collectErrorMessages(err).join(' ');
+      // A database that has not run the migration yet: the run is still valid, it
+      // just shows its id until the next start numbers it.
+      if (/invalid column name/i.test(message)) return null;
+      if (!/duplicate key|UX_analysis_runs_sp_number/i.test(message) || attempt === 2) throw err;
+    }
+  }
+  return null;
+}
+
 // Analysis runs
 async function createAnalysisRun({ spId, spName, tenantId, runBy, scopeKind, scopeWorkspaces, scheduleId }) {
   const conn = await getConnection();
@@ -260,7 +311,16 @@ async function createAnalysisRun({ spId, spName, tenantId, runBy, scopeKind, sco
       ],
       build: specs => buildInsert('analysis_runs', specs, { output: 'INSERTED.id' }),
     });
-    return rows[0] ? rows[0].id : null;
+    const id = rows[0] ? rows[0].id : null;
+    if (id) {
+      try {
+        await assignRunNumber(conn, id);
+      } catch (err) {
+        // Never fail a scan over its label; the backfill numbers it at next start.
+        console.warn('[DB] Could not number run', id, err.message);
+      }
+    }
+    return id;
   } finally {
     conn.close();
   }
@@ -298,7 +358,7 @@ async function updateAnalysisRun(id, data) {
 // because `pickTenantWideRun` and the schedule overlap check read the same rows.
 const RUN_META_COLUMNS = `id, sp_id, sp_name, tenant_id, status, total_workspaces, total_reports,
   total_datasets, total_dashboards, total_dataflows, total_users, started_at, completed_at, run_by,
-  scope_kind, scope_workspaces, schedule_id`;
+  scope_kind, scope_workspaces, schedule_id, sp_run_number`;
 
 // The same list without the columns a pre-scoping deployment has not migrated yet.
 // Naming columns means a missing one fails the whole read rather than arriving as
@@ -317,6 +377,12 @@ async function selectRuns(conn, clause, params = []) {
     return await execSql(conn, 'SELECT ' + RUN_META_COLUMNS + ' FROM analysis_runs ' + clause, params);
   } catch (err) {
     if (!/invalid column name/i.test(err.message || '')) throw err;
+    // Without the scan number only: the runs then show their id until the migration runs.
+    try {
+      return await execSql(conn, 'SELECT ' + RUN_META_COLUMNS.replace(', sp_run_number', '') + ' FROM analysis_runs ' + clause, params);
+    } catch (again) {
+      if (!/invalid column name/i.test(again.message || '')) throw again;
+    }
     console.warn('[DB] Reading runs without the scope columns; run migrations to record scan coverage.');
     return execSql(conn, 'SELECT ' + RUN_META_COLUMNS_LEGACY + ' FROM analysis_runs ' + clause, params);
   }
@@ -1095,6 +1161,13 @@ async function runMigrations() {
     // Older deployments created analysis_runs.sp_id as NOT NULL, which broke runs
     // started with a Managed Identity (no service principal row to reference).
     await runStatement(conn, 'relax analysis_runs.sp_id', `IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'analysis_runs') AND name = N'sp_id' AND is_nullable = 0) ALTER TABLE analysis_runs ALTER COLUMN sp_id INT NULL`);
+    // Scans are numbered per service principal (1, 2, 3...), so a scan is named by
+    // its principal and number ("SoftwareOne #5") rather than by a database id that
+    // counts every principal's scans together. The id stays as the internal key that
+    // other tables join on; (sp_id, sp_run_number) is the unique key people see.
+    await runStatement(conn, 'add analysis_runs.sp_run_number', `IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'analysis_runs') AND type = 'U') AND COL_LENGTH(N'analysis_runs', N'sp_run_number') IS NULL ALTER TABLE analysis_runs ADD sp_run_number INT NULL`);
+    await runStatement(conn, 'number analysis runs per principal', RUN_NUMBER_BACKFILL_SQL);
+    await runStatement(conn, 'unique principal scan number', `IF COL_LENGTH(N'analysis_runs', N'sp_run_number') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_analysis_runs_sp_number' AND object_id = OBJECT_ID(N'analysis_runs')) CREATE UNIQUE INDEX UX_analysis_runs_sp_number ON analysis_runs (sp_id, sp_run_number) WHERE sp_run_number IS NOT NULL`);
 
     // Per-run snapshot of the Governance Overview totals, scoped by tenant so runs
     // are only ever compared within the same tenant.
@@ -1462,4 +1535,5 @@ module.exports = {
   _private: { buildInsert, buildUpdate, extractProblemColumns, RUN_META_COLUMNS, RUN_META_COLUMNS_LEGACY },
   // SQL primitives shared with feature-specific repositories.
   _sql: { getConnection, execSql, TYPES, execWithColumnFallback, buildInsert, buildUpdate },
+  _runNumbers: { RUN_NUMBER_BACKFILL_SQL, ASSIGN_RUN_NUMBER_SQL, assignRunNumber },
 };

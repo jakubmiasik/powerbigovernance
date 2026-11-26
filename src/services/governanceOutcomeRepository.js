@@ -72,10 +72,11 @@ const runParam = runId => ({ name: 'RunId', type: TYPES.Int, value: runId });
 // the tenant, so a run id can never pull another tenant's workspaces even if a
 // caller passed the wrong one.
 const RUN_BELONGS_TO_TENANT = 'EXISTS (SELECT 1 FROM dbo.analysis_runs AS g WHERE g.id = @RunId AND g.tenant_id = @TenantId)';
+const SAME_PRINCIPAL = '(r.sp_id = @SpId OR (r.sp_id IS NULL AND @SpId IS NULL))';
 
 const SQL = {
   latestRun: `
-SELECT TOP (1) r.id AS run_id, r.tenant_id, r.sp_name, r.status,
+SELECT TOP (1) r.id AS run_id, r.sp_id, r.sp_run_number, r.tenant_id, r.sp_name, r.status,
        r.started_at, r.completed_at, r.run_by, r.scope_kind
 FROM dbo.analysis_runs AS r
 WHERE r.tenant_id = @TenantId AND r.status = N'completed' AND r.scope_kind = N'tenant'
@@ -122,12 +123,15 @@ ORDER BY w.item_count DESC;`,
 
   // Q6, in two statements so the access run's date can be returned even when it
   // has rows to group, and its absence can be told apart from an empty result.
+  // Scans are identified by principal and that principal's number, so the fallback
+  // is the same principal's latest scan with access data, by number.
   accessRun: `
-SELECT TOP (1) r.id AS access_run_id, r.completed_at AS access_completed_at
+SELECT TOP (1) r.id AS access_run_id, r.sp_id, r.sp_name, r.sp_run_number, r.completed_at AS access_completed_at
 FROM dbo.analysis_runs AS r
 WHERE r.tenant_id = @TenantId AND r.status = N'completed' AND r.scope_kind = N'tenant'
+  AND ${SAME_PRINCIPAL}
   AND EXISTS (SELECT 1 FROM dbo.analysis_workspace_users AS u WHERE u.run_id = r.id)
-ORDER BY r.completed_at DESC;`,
+ORDER BY r.sp_run_number DESC, r.completed_at DESC;`,
 
   accessSummary: `
 SELECT u.principal_type, u.access_right,
@@ -137,16 +141,19 @@ WHERE u.run_id = @AccessRunId
   AND EXISTS (SELECT 1 FROM dbo.analysis_runs AS g WHERE g.id = @AccessRunId AND g.tenant_id = @TenantId)
 GROUP BY u.principal_type, u.access_right;`,
 
+  // Q7 within the latest scan's principal, in that principal's scan order: a
+  // change is only measured between two scans of the same principal.
   trend: `
-SELECT r.id AS run_id, r.completed_at, t.total_workspaces, t.total_items,
+SELECT r.id AS run_id, r.sp_id, r.sp_name, r.sp_run_number, r.completed_at, t.total_workspaces, t.total_items,
        t.total_warehouses, t.total_notebooks, t.total_pipelines, t.tenant_settings_total
 FROM dbo.analysis_runs AS r
 JOIN dbo.analysis_run_totals AS t ON t.run_id = r.id
 WHERE r.tenant_id = @TenantId AND r.status = N'completed' AND r.scope_kind = N'tenant'
-ORDER BY r.completed_at;`,
+  AND ${SAME_PRINCIPAL}
+ORDER BY r.sp_run_number, r.completed_at;`,
 
   deletions: `
-SELECT s.workspace_name, s.state, s.deleted_at, s.run_id
+SELECT s.workspace_name, s.state, s.deleted_at, s.run_id, r.sp_id, r.sp_name, r.sp_run_number
 FROM dbo.workspace_states AS s
 JOIN dbo.analysis_runs AS r ON r.id = s.run_id
 WHERE r.tenant_id = @TenantId AND s.state = N'Deleted'
@@ -170,19 +177,25 @@ async function latestRun(tenantId) {
   });
 }
 
-/** Q2–Q8 for one run of one tenant, on one connection. */
-async function readOutcomeData(tenantId, runId) {
+/**
+ * Q2–Q8 for one scan of one tenant, on one connection. `run` is Q1's row: its id
+ * is only the join key; its principal decides which scans the access fallback and
+ * the trend may use.
+ */
+async function readOutcomeData(tenantId, latest) {
+  const runId = latest.run_id;
+  const spParam = { name: 'SpId', type: TYPES.Int, value: latest.sp_id === null || latest.sp_id === undefined ? null : Number(latest.sp_id) };
   return withConnection(async conn => {
     const run = [tenantParam(tenantId), runParam(runId)];
     const totals = (await _sql.execSql(conn, SQL.totals, run))[0] || null;
     const workspacesByType = await _sql.execSql(conn, SQL.workspacesByType, run);
     const skus = await _sql.execSql(conn, SQL.skuDistribution, run);
     const workspaces = await _sql.execSql(conn, SQL.workspaceFlags, run);
-    const accessRun = (await _sql.execSql(conn, SQL.accessRun, [tenantParam(tenantId)]))[0] || null;
+    const accessRun = (await _sql.execSql(conn, SQL.accessRun, [tenantParam(tenantId), spParam]))[0] || null;
     const access = accessRun
       ? await _sql.execSql(conn, SQL.accessSummary, [tenantParam(tenantId), { name: 'AccessRunId', type: TYPES.Int, value: accessRun.access_run_id }])
       : [];
-    const trend = await _sql.execSql(conn, SQL.trend, [tenantParam(tenantId)]);
+    const trend = await _sql.execSql(conn, SQL.trend, [tenantParam(tenantId), spParam]);
     const deletions = await _sql.execSql(conn, SQL.deletions, [tenantParam(tenantId)]);
     return { totals, workspacesByType, skus, workspaces, accessRun, access, trend, deletions };
   });

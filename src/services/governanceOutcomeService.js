@@ -1,7 +1,7 @@
 /**
  * Generating, caching and authorising the Governance Outcome.
  *
- * The outcome is cached per (tenant, run). Q1 is read on every request to learn
+ * The outcome is cached per (tenant, service principal + scan number). Q1 is read on every request to learn
  * the tenant's latest completed tenant scan, so a new scan makes the cached
  * outcome stale without anyone having to clear it. It is generated:
  *   - right after a whole-tenant scan completes (the scan's last step),
@@ -62,8 +62,11 @@ function pickTenant(requested, allowed, { defaultTenantId, selectedRun } = {}) {
   return { error: 403, message: 'You do not have access to any tenant with a completed scan.' };
 }
 
-function cacheKey(tenantId, runId) {
-  return tenantId + '|' + runId;
+// Keyed by tenant and the scan's principal + number; the internal id only stands
+// in for a scan that a not-yet-migrated database has not numbered.
+function cacheKey(tenantId, run) {
+  const number = run.sp_run_number !== undefined && run.sp_run_number !== null ? run.sp_run_number : 'id' + run.run_id;
+  return tenantId + '|' + (run.sp_id === undefined || run.sp_id === null ? 'mi' : run.sp_id) + '|' + number;
 }
 
 function freshEnough(entry, ttlMs) {
@@ -83,7 +86,7 @@ async function getOutcome(tenantId, { force = false, trigger = 'on-demand', repo
   // Q1 filters by tenant; this is a second lock on the same door.
   if (normalizeTenantId(run.tenant_id) !== id) throw new Error('Governance outcome: the latest run does not belong to the requested tenant.');
 
-  const key = cacheKey(id, run.run_id);
+  const key = cacheKey(id, run);
   const config = getConfig();
   if (!force && freshEnough(cache.get(key), config.governance.cacheTtlMs)) {
     return { status: 200, outcome: cache.get(key).outcome, cached: true };
@@ -92,7 +95,7 @@ async function getOutcome(tenantId, { force = false, trigger = 'on-demand', repo
 
   const work = (async () => {
     const rules = loadRules(config.governance.rulesFile || undefined);
-    const data = await repo.readOutcomeData(id, run.run_id);
+    const data = await repo.readOutcomeData(id, run);
     const outcome = buildOutcome({ run, data, rules, connectionMode: repository.connectionMode(config), generatedAt: now(), trigger });
     for (const existing of cache.keys()) if (existing.startsWith(id + '|')) cache.delete(existing);
     cache.set(key, { outcome, storedAt: Date.now() });

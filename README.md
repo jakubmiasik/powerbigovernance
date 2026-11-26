@@ -202,6 +202,10 @@ src/
 
 ## Running an Analysis
 
+**Scan numbers.** Each service principal numbers its own scans from 1, so a scan is named *SoftwareOne #5*, not by a database id that counts every principal's scans together. The pair *(service principal, scan number)* is unique, enforced by a unique index. Existing scans were numbered once, oldest first, when this was introduced. The internal id is still used in links (`?runId=`) and to join tables.
+
+**Comparing scans.** *Run Analysis → Compare runs* compares any two scans of the same tenant. *Overview → Since Last Scan* is the same comparison, opened on the selected scan and the same principal's previous scan of the same scope. Both list only scans of tenants you may see.
+
 A scan reads the tenant through the admin APIs and stores what it found. Two things about *when* and *how much*:
 
 ### Scoping a scan
@@ -326,7 +330,9 @@ It shows: the run (tenant, tenant ID, run, scan start and end, run by, *Data as 
 
 The same data always gives the same outcome.
 
-**Cache.** The outcome is cached in memory per *(tenant ID, run ID)*. Every request first runs Q1 (the tenant's latest completed tenant scan), so a new scan changes the run ID and the cached outcome is no longer used. Workspace deletions recorded *between* scans appear after *Regenerate* or the next scan. `GOVERNANCE_OUTCOME_CACHE_TTL_MS` can also expire entries by age (0 = only a new scan or *Regenerate* refreshes).
+**Cache.** The outcome is cached in memory per *(tenant, service principal + scan number)*. Every request first runs Q1 (the tenant's latest completed tenant scan), so a new scan changes the key and the cached outcome is no longer used.
+
+**Scans are named by principal and number.** The outcome labels every scan as *Principal #N*. The access fallback (Q6) and the trend and T1 (Q7) only use scans of the **same service principal** as the latest scan, in that principal's scan-number order. A change is never measured between two different principals' scans. Internal run ids remain only as join keys. Workspace deletions recorded *between* scans appear after *Regenerate* or the next scan. `GOVERNANCE_OUTCOME_CACHE_TTL_MS` can also expire entries by age (0 = only a new scan or *Regenerate* refreshes).
 
 **API**
 - `GET /api/governance/summary?tenantId={id}` returns the outcome as one JSON object.

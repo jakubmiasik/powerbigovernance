@@ -3,13 +3,14 @@ const router = express.Router();
 const db = require('../services/databaseService');
 const { createPowerBIService, runWithApiReporter } = require('../services/powerbiService');
 const {
-  METRIC_DEFS, computeRunTotals, diffTotals, diffRunDetails,
+  computeRunTotals,
 } = require('../services/runMetricsService');
 const { buildItemDetails } = require('../services/itemDetailsService');
 const { buildWorkspaceAssignments, lookupAssignment } = require('../services/deploymentPipelineService');
 const runProgress = require('../services/runProgressService');
 const analysisModel = require('../services/analysisModelRepository');
 const governanceOutcome = require('../services/governanceOutcomeService');
+const { comparePage, compareDetails } = require('./compareRuns');
 const launcher = require('../services/analysisLauncher');
 const analysisSchedules = require('../services/analysisScheduleService');
 const {
@@ -458,139 +459,17 @@ router.get('/results/:runId', async (req, res) => {
   }
 });
 
-function parseRunResults(run) {
-  if (!run || !run.results_json) return null;
-  try { return JSON.parse(run.results_json); } catch { return null; }
-}
-
-// Totals for a run, computing and storing them on first use. Runs created before
-// the totals table existed are backfilled here rather than in a startup migration,
-// which would have meant parsing every historic run's results_json at boot.
-async function loadRunTotals(runId) {
-  const stored = await db.getRunTotals(runId);
-  if (stored) {
-    const totals = {};
-    for (const def of METRIC_DEFS) totals[def.key] = Number(stored[def.column]) || 0;
-    return { totals, run: null, backfilled: false };
-  }
-
-  const run = await db.getAnalysisRunById(runId);
-  const results = parseRunResults(run);
-  if (!results) return { totals: null, run, backfilled: false };
-
-  const totals = computeRunTotals(results);
-  try {
-    await db.saveRunTotals(
-      runId,
-      { tenantId: run.tenant_id, spId: run.sp_id, spName: run.sp_name, startedAt: run.started_at },
-      totals
-    );
-  } catch (err) {
-    console.warn('[Analysis] Could not backfill run totals for run', runId, err.message);
-  }
-  return { totals, run, backfilled: true };
-}
-
 // ── Run comparison (same tenant only) ──
-router.get('/compare', async (req, res) => {
-  try {
-    const allRuns = await db.getAnalysisRuns();
-    const completed = allRuns.filter(r => r.status === 'completed');
+// The same comparison serves Overview → Since Last Scan (governance.js).
+router.get('/compare', comparePage({
+  basePath: '/analysis/compare',
+  detailsPath: '/analysis/compare/details',
+  title: 'Compare Runs',
+  subtitle: 'Summary totals are compared instantly; the detailed diff is loaded on demand.',
+  backHref: '/analysis',
+}));
 
-    const fromId = Number.parseInt(req.query.from, 10);
-    const toId = Number.parseInt(req.query.to, 10);
-    const base = {
-      title: 'Compare Runs',
-      user: req.user,
-      runs: completed,
-      scopeTag, scopeTagTitle, describeScope, scopeFromRow,
-      fromRun: null,
-      toRun: null,
-      metrics: [],
-      error: null,
-      tenantSettingsComparable: true,
-    };
-
-    if (!Number.isInteger(fromId) || !Number.isInteger(toId)) {
-      return res.render('analysis/compare', base);
-    }
-    if (fromId === toId) {
-      return res.render('analysis/compare', { ...base, error: 'Pick two different runs to compare.' });
-    }
-
-    const [fromRun, toRun] = await Promise.all([
-      db.getAnalysisRunById(fromId),
-      db.getAnalysisRunById(toId),
-    ]);
-    if (!fromRun || !toRun) {
-      return res.render('analysis/compare', { ...base, error: 'One of the selected runs no longer exists.' });
-    }
-
-    // Comparing across tenants would produce numbers that look like change but are
-    // really two different estates, so it is refused rather than rendered.
-    if ((fromRun.tenant_id || '') !== (toRun.tenant_id || '')) {
-      return res.render('analysis/compare', {
-        ...base,
-        fromRun,
-        toRun,
-        error: 'These runs are from different tenants. Comparison is only available within a single tenant.',
-      });
-    }
-
-    const [fromTotals, toTotals] = await Promise.all([loadRunTotals(fromId), loadRunTotals(toId)]);
-    if (!fromTotals.totals || !toTotals.totals) {
-      return res.render('analysis/compare', {
-        ...base,
-        fromRun,
-        toRun,
-        error: 'One of the selected runs has no stored results to compare.',
-      });
-    }
-
-    // A run that predates tenant-settings capture stores zeroes, which would read
-    // as "every setting removed". Drop those rows and say why instead.
-    const tenantSettingsComparable = !!fromTotals.totals.tenantSettingsCaptured && !!toTotals.totals.tenantSettingsCaptured;
-    res.render('analysis/compare', {
-      ...base,
-      fromRun,
-      toRun,
-      metrics: diffTotals(fromTotals.totals, toTotals.totals, {
-        skipGroups: tenantSettingsComparable ? [] : ['tenantSettings'],
-      }),
-      tenantSettingsComparable,
-    });
-  } catch (err) {
-    res.render('error', { title: 'Error', user: req.user, message: err.message });
-  }
-});
-
-// Detailed diff, loaded on demand — this is the expensive path that parses both runs.
-router.get('/compare/details', async (req, res) => {
-  try {
-    const fromId = Number.parseInt(req.query.from, 10);
-    const toId = Number.parseInt(req.query.to, 10);
-    if (!Number.isInteger(fromId) || !Number.isInteger(toId) || fromId === toId) {
-      return res.json({ success: false, message: 'Pick two different runs to compare.' });
-    }
-
-    const [fromRun, toRun] = await Promise.all([
-      db.getAnalysisRunById(fromId),
-      db.getAnalysisRunById(toId),
-    ]);
-    if (!fromRun || !toRun) return res.json({ success: false, message: 'One of the selected runs no longer exists.' });
-    if ((fromRun.tenant_id || '') !== (toRun.tenant_id || '')) {
-      return res.json({ success: false, message: 'Comparison is only available within a single tenant.' });
-    }
-
-    const fromResults = parseRunResults(fromRun);
-    const toResults = parseRunResults(toRun);
-    if (!fromResults || !toResults) return res.json({ success: false, message: 'One of the selected runs has no stored results.' });
-
-    res.json({ success: true, details: diffRunDetails(fromResults, toResults) });
-  } catch (err) {
-    res.json({ success: false, message: err.message });
-  }
-});
+router.get('/compare/details', compareDetails());
 
 /**
  * Builds the relational view for a run recorded before those tables existed.

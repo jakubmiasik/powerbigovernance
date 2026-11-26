@@ -188,7 +188,7 @@
     <% } %>
 
     <div>
-      <h2 class="gov-section-title" id="inventoryHeading">Inventory · scan #<%= run.id %></h2>
+      <h2 class="gov-section-title" id="inventoryHeading">Inventory · <%- include('../partials/scan-name', { run: run }).trim() %></h2>
       <div class="gov-inventory" aria-labelledby="inventoryHeading">
         <% inventory.forEach(function(entry) { %>
           <%- include(pd + 'metric-card', { ui: { label: entry.label, value: Number(entry.count).toLocaleString(), icon: entry.icon, tone: 'neutral', href: '/governance/artifacts?type=' + entry.type + (runQuery ? '&' + runQuery : '') } }) %>
@@ -340,7 +340,7 @@
       <div class="pd-card-header"><h2 class="pd-card-title" id="scanContextHeading"><i data-lucide="info" aria-hidden="true"></i>Scan context</h2></div>
       <div class="pd-card-body">
         <dl class="pd-meta">
-          <dt>Scan</dt><dd>Run #<%= run.id %></dd>
+          <dt>Scan</dt><dd><%- include('../partials/scan-name', { run: run }).trim() %></dd>
           <dt>Service principal</dt><dd><%= run.sp_name || '—' %></dd>
           <dt>Tenant ID</dt><dd><%= run.tenant_id || '—' %></dd>
           <dt>Started</dt><dd><% if (run.started_at) { %><time datetime="<%= new Date(run.started_at).toISOString() %>" data-local-time><%= new Date(run.started_at).toISOString().replace('T', ' ').slice(0, 16) %> UTC</time><% } else { %><span class="pd-not-evaluated">Not available</span><% } %></dd>

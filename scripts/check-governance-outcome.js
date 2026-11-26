@@ -6,6 +6,8 @@
  *   node scripts/check-governance-outcome.js [tenantId] [--acceptance] [--json]
  *
  * --acceptance compares with the agreed SoftwareOne figures and exits 1 on a mismatch.
+ * Those figures name scans by their internal id (37, 36, ...); the page names them
+ * by principal and that principal's scan number, which this script also prints.
  */
 const { getConfig } = require('../src/config/settings');
 const { getOutcome } = require('../src/services/governanceOutcomeService');
@@ -41,6 +43,7 @@ async function main() {
 
   const actual = {
     runId: o.run.id,
+    scan: o.run.label,
     completedAt: utc(o.run.completedAt),
     kpis: { workspaces: o.kpis.workspaces, items: o.kpis.items, users: o.kpis.users, creators: o.kpis.creators, explorers: o.kpis.explorers, capacities: o.kpis.capacities },
     itemTypes: Object.fromEntries(o.itemTypes.map(t => [t.label, t.value])),
@@ -50,12 +53,13 @@ async function main() {
     findings: Object.fromEntries(o.findings.map(f => [f.id, f.count === null ? 'Unknown' : f.count + '/' + f.denominator])),
     statuses: Object.fromEntries(o.findings.map(f => [f.id, f.status])),
     access: o.access.available ? {
-      runId: o.access.runId, total: o.access.totalAssignments, admin: o.access.adminAssignments, adminShare: o.access.adminSharePct,
+      runId: o.access.runId, scan: o.access.label, total: o.access.totalAssignments, admin: o.access.adminAssignments, adminShare: o.access.adminSharePct,
       user: (o.access.byPrincipalType.find(t => t.principalType === 'User') || { total: 0 }).total,
       app: (o.access.byPrincipalType.find(t => t.principalType === 'App') || { total: 0 }).total,
       group: o.access.groupAssignments,
     } : null,
     trendRuns: o.trend.runs.map(r => r.runId),
+    trendScans: o.trend.runs.map(r => r.label),
     deletions: o.deletions.length,
     storage: o.kpis.storage.status,
     gaps: o.gaps.map(g => g.message),
@@ -78,11 +82,12 @@ async function main() {
   }
   for (const [id, ratio] of Object.entries(ACCEPTANCE.findings)) same(id, ratio, actual.findings[id]);
   for (const id of ACCEPTANCE.hits) if (actual.statuses[id] === 'Pass' || actual.statuses[id] === 'Unknown') problems.push(id + ' should be hit, is ' + actual.statuses[id]);
-  same('access', ACCEPTANCE.access, actual.access);
+  const { scan: _accessScan, ...accessFigures } = actual.access || {};
+  same('access', ACCEPTANCE.access, actual.access ? accessFigures : null);
   same('trend runs', ACCEPTANCE.trendRuns, actual.trendRuns);
   same('deletions', ACCEPTANCE.deletions, actual.deletions);
   same('storage', ACCEPTANCE.storage, actual.storage);
-  if (!actual.gaps.some(g => g.startsWith('Access data from run 36'))) problems.push('the "access data from run 36" banner is missing');
+  if (!actual.gaps.some(g => g.startsWith('Access data from ' + (actual.access && actual.access.scan)))) problems.push('the "access data from an earlier scan" banner is missing');
 
   if (problems.length) {
     console.error('\nAcceptance: ' + problems.length + ' mismatch(es)\n - ' + problems.join('\n - '));

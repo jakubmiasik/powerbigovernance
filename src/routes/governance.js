@@ -5,7 +5,7 @@ const { buildUser360, summarizeTenantSettings } = require('../services/runMetric
 const { canUseSectionInTenant, fallbackTenant } = require('../services/permissionService');
 const { computeWorkspaceInsights, FINDING_DEFS } = require('../services/workspaceInsightsService');
 const { loadNamingConvention } = require('../services/namingConventionStore');
-const { comparableRuns, buildScanChanges, buildTrends, latestPerTenant, compareTenants } = require('../services/scanChangesService');
+const { comparePage, compareDetails } = require('./compareRuns');
 
 function normalizeArtifactType(type) {
   return (type || 'all').trim().toLowerCase();
@@ -126,83 +126,19 @@ router.get('/', async (req, res) => {
   }
 });
 
-/**
- * Since the last scan: the selected scan against the previous completed scan of
- * the same tenant and scope (or an earlier one the reader picks). Everything on
- * the page comes from those two stored scans and the per-scan totals; when there
- * is no earlier scan the page says so and shows the current state alone.
- */
-router.get('/changes', async (req, res) => {
-  const base = {
-    title: 'Since the Last Scan', user: req.user,
-    breadcrumb: [{ label: 'Governance Overview', href: '/governance' }, { label: 'Since the Last Scan', href: '/governance/changes' }],
-  };
-  try {
-    const { run, results } = await loadGlobalResults(res);
-    if (!run || !results) return res.render('governance/changes', { ...base, noData: true });
+// Overview → Since Last Scan is Compare Runs, opened on the selected scan and the
+// same service principal's previous scan. Under /governance, so the Governance
+// Overview grant decides who sees it and which tenants' scans it lists.
+router.get('/changes', comparePage({
+  basePath: '/governance/changes',
+  detailsPath: '/governance/changes/details',
+  section: 'governance',
+  title: 'Since Last Scan',
+  subtitle: 'The selected scan compared with the same service principal\'s previous scan. Pick any two scans of a tenant to compare others.',
+  defaultToLatest: true,
+}));
 
-    const runs = res.locals.availableRuns || [];
-    const candidates = comparableRuns(run, runs);
-    let baseline = candidates[0] || null;
-    const wanted = Number.parseInt(req.query.from, 10);
-    if (Number.isInteger(wanted)) baseline = candidates.find(candidate => candidate.id === wanted) || baseline;
-
-    let fromRun = null;
-    let fromResults = null;
-    let baselineError = null;
-    if (baseline) {
-      try {
-        fromRun = await db.getAnalysisRunById(baseline.id);
-        fromResults = fromRun && fromRun.results_json ? JSON.parse(fromRun.results_json) : null;
-        if (!fromResults) baselineError = 'The earlier scan has no stored results to compare with.';
-      } catch (err) {
-        console.warn('[Changes] Could not read the earlier scan:', err.message);
-        baselineError = 'The earlier scan could not be read, so nothing is compared.';
-        fromResults = null;
-      }
-      if (!fromResults) fromRun = null;
-    }
-
-    let namingConvention = null;
-    try { namingConvention = await loadNamingConvention(); } catch (err) { console.warn('[Changes] Naming convention unavailable:', err.message); }
-    const changes = buildScanChanges({
-      toResults: results, fromResults, toRun: run, fromRun,
-      insightsOptions: {
-        namingConvention,
-        staleDays: Number.parseInt(process.env.WORKSPACE_STALE_DAYS, 10),
-        overSharedUsers: Number.parseInt(process.env.WORKSPACE_OVERSHARED_USERS, 10),
-      },
-    });
-
-    // The trend is this scan and up to seven comparable scans before it, read from
-    // the totals stored when each scan was saved.
-    const readTotals = async id => { try { return await db.getRunTotals(id); } catch { return null; } };
-    const trendRuns = [run, ...candidates].slice(0, 8);
-    const trends = buildTrends(await Promise.all(trendRuns.map(entry => readTotals(entry.id))));
-
-    // Tenants side by side: only tenants where this reader may use this page.
-    const pairs = latestPerTenant(runs.filter(entry => canUseSectionInTenant(req.permissions, 'governance', entry.sp_id)));
-    let tenants = [];
-    if (pairs.length > 1) {
-      const ids = [];
-      pairs.forEach(pair => { ids.push(pair.latest.id); if (pair.previous) ids.push(pair.previous.id); });
-      const totals = await Promise.all(ids.map(readTotals));
-      const byId = new Map();
-      ids.forEach((id, index) => { if (totals[index]) byId.set(id, totals[index]); });
-      tenants = compareTenants(pairs, byId);
-    }
-
-    res.render('governance/changes', {
-      ...base,
-      noData: false,
-      run, fromRun: fromResults ? (baseline || null) : null,
-      candidates, baselineError,
-      changes, trends, tenants,
-    });
-  } catch (err) {
-    res.render('error', { title: 'Error', user: req.user, message: err.message });
-  }
-});
+router.get('/changes/details', compareDetails({ section: 'governance' }));
 
 router.get('/users', async (req, res) => {
   try {
