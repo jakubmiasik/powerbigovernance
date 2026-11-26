@@ -1,0 +1,17 @@
+<%
+  // Drawer — contextual details. { ui: { id, title, subtitle } }
+  // Fill #<id>-body / #<id>-footer, then Podavo.drawer.open('<id>', opener).
+  // Placed inside a .pd-dock it docks beside the content at ≥1440 px; otherwise
+  // (and below 1440 px) it is a modal overlay, full screen below 768 px.
+  var p = (typeof ui !== 'undefined' && ui) || {};
+%><aside class="pd-drawer" id="<%= p.id %>" role="dialog" aria-modal="true" aria-labelledby="<%= p.id %>-title" aria-hidden="true" tabindex="-1">
+  <div class="pd-drawer-header">
+    <div class="pd-min-w-0" id="<%= p.id %>-head">
+      <h2 class="pd-drawer-title" id="<%= p.id %>-title"><%= p.title || 'Details' %></h2>
+      <div class="pd-drawer-subtitle" id="<%= p.id %>-subtitle"><%= p.subtitle || '' %></div>
+    </div>
+    <button type="button" class="pd-icon-btn pd-drawer-close" data-pd-drawer-close aria-label="Close details" title="Close (Esc)"><i data-lucide="x" aria-hidden="true"></i></button>
+  </div>
+  <div class="pd-drawer-body" id="<%= p.id %>-body"></div>
+  <div class="pd-drawer-footer" id="<%= p.id %>-footer"></div>
+</aside>

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en" data-product="governance" data-pd-variant="enterprise" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>@podavo/ui <%= pkg.version %> — component catalogue</title>
+  <script>
+    // URL switches, applied before first paint (the visual tests use these).
+    (function () {
+      var q = new URLSearchParams(location.search), r = document.documentElement;
+      if (q.get('theme')) r.setAttribute('data-theme', q.get('theme'));
+      if (q.get('variant')) r.setAttribute('data-pd-variant', q.get('variant'));
+      if (q.get('density')) r.setAttribute('data-density', q.get('density'));
+    })();
+  </script>
+  <link rel="stylesheet" href="../../css/podavo.css">
+  <style>
+    .cat-section { margin-bottom: var(--pd-space-8); }
+    .cat-section > h2 { font-size: var(--pd-text-lg); margin: 0 0 var(--pd-space-3); }
+    .cat-row { display: flex; flex-wrap: wrap; gap: var(--pd-space-3); align-items: center; margin-bottom: var(--pd-space-3); }
+    .cat-grid { display: grid; gap: var(--pd-space-4); grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .cat-swatch { width: 120px; border: 1px solid var(--pd-border); border-radius: var(--pd-radius-md); overflow: hidden; font-size: var(--pd-text-xs); }
+    .cat-swatch > span { display: block; height: 40px; }
+    .cat-swatch > code { display: block; padding: 4px 6px; }
+  </style>
+</head>
+<body>
+<% var p = '../ejs/'; %>
+<%- include(p + 'app-shell-start', { ui: {
+  sidebar: { brand: { name: 'Component catalogue', suite: 'Podavo UI ' + pkg.version, mark: 'layers' }, groups: [
+    { title: 'Foundations', items: [{ href: '#tokens', label: 'Tokens', icon: 'layout-grid', active: true }, { href: '#type', label: 'Type', icon: 'type' }] },
+    { title: 'Components', items: [
+      { href: '#buttons', label: 'Buttons', icon: 'square-check' }, { href: '#forms', label: 'Forms', icon: 'pencil' },
+      { href: '#badges', label: 'Badges', icon: 'tag' }, { href: '#metrics', label: 'Metric cards', icon: 'gauge' },
+      { href: '#filters', label: 'Filter bar', icon: 'funnel' }, { href: '#tabs', label: 'Tabs', icon: 'columns-3' },
+      { href: '#grid', label: 'Data grid', icon: 'table' }, { href: '#overlays', label: 'Drawer, dialog, popover', icon: 'panel-right' },
+      { href: '#states', label: 'States', icon: 'inbox' } ] }
+  ] },
+  breadcrumb: [{ label: 'Catalogue', href: '#' }],
+  search: { id: 'catSearch', placeholder: 'Search components…' },
+  actionsHtml: '<button type="button" class="pd-icon-btn" data-pd-theme-toggle onclick="Podavo.shell.toggleTheme()"></button>' +
+    '<button type="button" class="pd-icon-btn" data-pd-density-toggle onclick="Podavo.shell.toggleDensity()"></button>' +
+    '<button type="button" class="pd-btn pd-btn--sm" onclick="var r=document.documentElement;r.setAttribute(\'data-pd-variant\', r.getAttribute(\'data-pd-variant\')===\'consumer\'?\'enterprise\':\'consumer\')"><span>Toggle variant</span></button>'
+} }) %>
+
+<%- include(p + 'page-header', { ui: { title: 'Podavo UI', icon: 'layers', subtitle: 'Every shared component, in every state it supports. Switch theme, variant and density from the top bar.',
+  actionsHtml: include(p + 'button', { ui: { label: 'Primary action', icon: 'plus', variant: 'primary', size: 'sm' } }) } }) %>
+
+<section class="cat-section" id="tokens">
+  <h2>Colour tokens</h2>
+  <div class="cat-row">
+    <% ['primary', 'primary-soft', 'shell-bg', 'bg', 'surface', 'border', 'text', 'text-muted', 'success-solid', 'warning-solid', 'orange-solid', 'danger-solid', 'info-solid', 'neutral-solid'].forEach(function (t) { %>
+      <div class="cat-swatch"><span style="background: var(--pd-<%= t %>)"></span><code>--pd-<%= t %></code></div>
+    <% }) %>
+  </div>
+</section>
+
+<section class="cat-section" id="type">
+  <h2>Type</h2>
+  <p style="font-size:var(--pd-text-xl);font-weight:600;margin:0">Page title 22/600</p>
+  <p style="font-size:var(--pd-text-lg);margin:0">Body large 16</p>
+  <p style="font-size:var(--pd-text-md);margin:0">Body 14 — enterprise default</p>
+  <p class="pd-help" style="margin:0">Help 12</p>
+</section>
+
+<section class="cat-section" id="buttons">
+  <h2>Button and IconButton</h2>
+  <div class="cat-row">
+    <% ['primary', 'secondary', 'soft', 'ghost', 'danger', 'danger-outline'].forEach(function (v) { %>
+      <%- include(p + 'button', { ui: { label: v.charAt(0).toUpperCase() + v.slice(1), variant: v, icon: v === 'danger' ? 'trash-2' : null } }) %>
+    <% }) %>
+  </div>
+  <div class="cat-row">
+    <%- include(p + 'button', { ui: { label: 'Small', size: 'sm' } }) %>
+    <%- include(p + 'button', { ui: { label: 'Disabled', disabled: true } }) %>
+    <%- include(p + 'button', { ui: { label: 'Saving', variant: 'primary', loading: true } }) %>
+    <%- include(p + 'button', { ui: { label: 'Link button', href: '#buttons', iconEnd: 'arrow-right' } }) %>
+    <%- include(p + 'icon-button', { ui: { icon: 'settings', label: 'Settings' } }) %>
+    <%- include(p + 'icon-button', { ui: { icon: 'funnel', label: 'Filter', variant: 'outline' } }) %>
+    <%- include(p + 'icon-button', { ui: { icon: 'rows-3', label: 'Pressed toggle', pressed: true } }) %>
+    <%- include(p + 'icon-button', { ui: { icon: 'x', label: 'Disabled', disabled: true } }) %>
+  </div>
+</section>
+
+<section class="cat-section" id="forms">
+  <h2>Input, Select, SearchField</h2>
+  <div class="cat-grid">
+    <%- include(p + 'input', { ui: { id: 'c-name', label: 'Workspace name', placeholder: 'Sales Analytics', help: 'Shown in every report.' } }) %>
+    <%- include(p + 'input', { ui: { id: 'c-days', label: 'Stale after (days)', type: 'number', value: 'abc', error: 'Enter a whole number of days.', required: true } }) %>
+    <%- include(p + 'input', { ui: { id: 'c-dis', label: 'Disabled', value: 'Read only', disabled: true } }) %>
+    <%- include(p + 'select', { ui: { id: 'c-sel', label: 'Capacity', options: [{ value: 'a', label: 'Fabric-Cap-East' }, { value: 'b', label: 'Fabric-Cap-West', selected: true }] } }) %>
+    <%- include(p + 'search-field', { ui: { id: 'c-search', placeholder: 'Search workspaces…' } }) %>
+  </div>
+</section>
+
+<section class="cat-section" id="badges">
+  <h2>Badge</h2>
+  <div class="cat-row">
+    <% ['neutral', 'brand', 'success', 'info', 'warning', 'orange', 'danger', 'outline'].forEach(function (t) { %>
+      <%- include(p + 'badge', { ui: { label: t, tone: t } }) %>
+    <% }) %>
+    <%- include(p + 'badge', { ui: { label: 'Critical', tone: 'danger', pill: true, dot: true } }) %>
+    <span class="pd-person"><span class="pd-avatar">AM</span><span>A. Morgan</span></span>
+  </div>
+</section>
+
+<section class="cat-section" id="metrics">
+  <h2>MetricCard</h2>
+  <div class="pd-metric-grid">
+    <%- include(p + 'metric-card', { ui: { label: 'All workspaces', value: 63, hint: 'in tenant', icon: 'layers' } }) %>
+    <%- include(p + 'metric-card', { ui: { label: 'Need attention', value: 48, hint: '76.2%', icon: 'triangle-alert', tone: 'warning', href: '#metrics' } }) %>
+    <%- include(p + 'metric-card', { ui: { label: 'No issues', value: 15, hint: '23.8%', icon: 'circle-check', tone: 'success' } }) %>
+    <%- include(p + 'metric-card', { ui: { label: 'Compliance', value: null, icon: 'gauge', tone: 'neutral' } }) %>
+  </div>
+  <div class="pd-card" style="margin-top:var(--pd-space-3);padding:var(--pd-space-3) var(--pd-space-4)">
+    <div class="pd-dist-bar" role="img" aria-label="Critical 10, High 18, Low 8, Clean 11">
+      <span class="pd-fill-danger" style="width:21%"></span><span class="pd-fill-orange" style="width:38%"></span><span class="pd-fill-info" style="width:17%"></span><span class="pd-fill-success" style="width:24%"></span>
+    </div>
+    <ul class="pd-dist-legend"><li><span class="pd-dot pd-dot--danger"></span>Critical <strong>10</strong></li><li><span class="pd-dot pd-dot--orange"></span>High <strong>18</strong></li><li><span class="pd-dot pd-dot--info"></span>Low <strong>8</strong></li><li><span class="pd-dot pd-dot--success"></span>Clean <strong>11</strong></li></ul>
+  </div>
+</section>
+
+<section class="cat-section" id="filters">
+  <h2>FilterBar</h2>
+  <%- include(p + 'filter-bar', { ui: { label: 'Findings', items: [
+    { key: 'a', label: 'No group-based access', count: 37, icon: 'users', tone: 'orange', pressed: true },
+    { key: 'b', label: 'Off-convention names', count: 46, icon: 'type', tone: 'neutral' },
+    { key: 'c', label: 'Stale content', count: 34, icon: 'hourglass', tone: 'orange' },
+    { key: 'd', label: 'No admin', count: 0, icon: 'user-x', zero: true }
+  ] } }) %>
+  <div style="height:12px"></div>
+  <%- include(p + 'filter-bar', { ui: { kind: 'chips', label: 'Chips', items: [{ key: 'all', label: 'All', count: 63, pressed: true }, { key: 'risk', label: 'At risk', count: 48 }] } }) %>
+</section>
+
+<section class="cat-section" id="tabs">
+  <h2>Tabs</h2>
+  <%- include(p + 'tabs', { ui: { label: 'Example', tabs: [
+    { id: 't1', label: 'Overview', controls: 'tp1', selected: true }, { id: 't2', label: 'Findings', count: 4, controls: 'tp2' }, { id: 't3', label: 'Access', controls: 'tp3' } ] } }) %>
+  <div id="tp1" role="tabpanel" aria-labelledby="t1" class="pd-card-body">Overview panel</div>
+  <div id="tp2" role="tabpanel" aria-labelledby="t2" class="pd-card-body" hidden>Findings panel</div>
+  <div id="tp3" role="tabpanel" aria-labelledby="t3" class="pd-card-body" hidden>Access panel</div>
+  <div style="height:12px"></div>
+  <%- include(p + 'tabs', { ui: { label: 'Inventory', variant: 'pill', tabs: [{ label: 'Workspaces', icon: 'layers', count: 63, href: '#tabs', selected: true }, { label: 'Reports', icon: 'file-text', count: 44, href: '#tabs' }] } }) %>
+</section>
+
+<section class="cat-section" id="grid">
+  <h2>DataGrid with docked Drawer</h2>
+  <div class="pd-dock">
+    <div class="pd-card pd-grid">
+      <div data-grid-toolbar-for="cat-table"><%- include(p + 'popover', { ui: { id: 'cat-pop', triggerLabel: 'Thresholds', triggerIcon: 'sliders-horizontal', title: 'Thresholds',
+        bodyHtml: include(p + 'input', { ui: { id: 'c-th', label: 'Stale after (days)', type: 'number', value: 90, size: 'sm' } }) } }) %></div>
+      <div class="pd-grid-scroll">
+        <table class="pd-table" id="cat-table" data-grid data-grid-label="workspaces" data-grid-page-size="10">
+          <thead><tr><th scope="col" data-col="name" data-col-required>Workspace</th><th scope="col" class="is-num" data-col="score">Risk score</th><th scope="col" data-col="level" data-filter-col data-col-label="Risk level">Risk level</th><th scope="col" data-col="owner">Owner</th><th scope="col" data-col-required data-no-export><span class="pd-visually-hidden">Details</span></th></tr></thead>
+          <tbody>
+            <% [['Sales Analytics', 168, 'Critical', 'danger', 'A. Morgan'], ['Finance Reporting', 94, 'High', 'orange', 'B. Kumar'], ['Marketing Insights', 62, 'Medium', 'warning', 'E. Lawson'], ['Operations Hub', 28, 'Low', 'info', 'M. Shah'], ['Data Engineering', 0, 'Clean', 'success', 'C. Rivera']].forEach(function (r, i) { %>
+              <tr><td><strong><%= r[0] %></strong></td><td class="is-num"><%= r[1] %></td><td data-filter-value="<%= r[2] %>"><span class="pd-badge pd-badge--<%= r[3] %>"><%= r[2] %></span></td>
+                <td><span class="pd-person"><span class="pd-avatar"><%= r[4].split(' ').map(function (w) { return w[0]; }).join('') %></span><span><%= r[4] %></span></span></td>
+                <td><button type="button" class="pd-icon-btn pd-icon-btn--sm" aria-label="Details for <%= r[0] %>" onclick="Podavo.drawer.open('cat-drawer', this)"><i data-lucide="panel-right" aria-hidden="true"></i></button></td></tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <%- include(p + 'drawer', { ui: { id: 'cat-drawer', title: 'Sales Analytics', subtitle: 'Fabric · F64' } }) %>
+  </div>
+</section>
+
+<section class="cat-section" id="overlays">
+  <h2>Dialog and Menu</h2>
+  <div class="cat-row">
+    <button type="button" class="pd-btn" data-pd-dialog-open="cat-dialog"><span>Open dialog</span></button>
+    <%- include(p + 'popover', { ui: { id: 'cat-menu', role: 'menu', triggerLabel: 'Actions', triggerIcon: 'ellipsis',
+      bodyHtml: '<button class="pd-menu-item" role="menuitem"><i data-lucide="external-link"></i>Open</button><div class="pd-menu-sep"></div><button class="pd-menu-item pd-menu-item--danger" role="menuitem"><i data-lucide="trash-2"></i>Delete…</button>' } }) %>
+  </div>
+  <%- include(p + 'dialog', { ui: { id: 'cat-dialog', title: 'Delete workspaces', bodyHtml: '<p>This permanently deletes the selected workspaces. Type DELETE to confirm.</p>',
+    footerHtml: '<button class="pd-btn" data-pd-dialog-close>Cancel</button><button class="pd-btn pd-btn--danger">Delete</button>' } }) %>
+</section>
+
+<section class="cat-section" id="states">
+  <h2>State</h2>
+  <div class="cat-grid">
+    <% ['empty', 'loading', 'error', 'denied', 'unavailable'].forEach(function (k) { %>
+      <div class="pd-card"><%- include(p + 'state', { ui: { kind: k, compact: true, title: k.charAt(0).toUpperCase() + k.slice(1), message: 'What happened and what to do next.' } }) %></div>
+    <% }) %>
+  </div>
+</section>
+
+<%- include(p + 'app-shell-end', { ui: { footerHtml: '<span>@podavo/ui ' + pkg.version + '</span><span>Lucide 0.517.0</span>' } }) %>
+<script src="https://unpkg.com/lucide@0.517.0/dist/umd/lucide.min.js" crossorigin="anonymous"></script>
+<script src="../../js/podavo.js"></script>
+<script>
+  document.getElementById('cat-drawer-body').innerHTML = '<div class="pd-meta"><dt>Risk score</dt><dd>168</dd><dt>Owner</dt><dd>A. Morgan</dd></div>';
+  document.getElementById('cat-drawer-footer').innerHTML = '<button class="pd-btn pd-btn--primary"><span>Open workspace</span></button><button class="pd-btn" data-pd-drawer-close><span>Close</span></button>';
+</script>
+</body>
+</html>

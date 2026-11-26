@@ -1,0 +1,18 @@
+<%
+  // FilterBar — interactive filters. { ui: { id, label, kind: tiles|chips, items: [{ key, label, count, icon, tone, pressed, zero, title, attrs }],
+  //                                         hideZero } }
+  // Each item is a toggle button (aria-pressed); the page listens for clicks on [data-filter-key].
+  var p = (typeof ui !== 'undefined' && ui) || {};
+  function pdAttrs(o) { return Object.keys(o || {}).map(function (k) { var v = o[k]; if (v === false || v === null || v === undefined) return ""; return " " + k + (v === true ? "" : "=\"" + String(v).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;") + "\""); }).join(""); }
+%><div class="<%= p.kind === 'chips' ? 'pd-filterbar' : 'pd-filter-tiles' %>" role="group" aria-label="<%= p.label || 'Filters' %>"<% if (p.id) { %> id="<%= p.id %>"<% } %><% if (p.kind !== 'chips') { %> data-hide-zero="<%= p.hideZero ? 'true' : 'false' %>"<% } %>>
+  <% (p.items || []).forEach(function (it) { %>
+    <% if (p.kind === 'chips') { %>
+      <button type="button" class="pd-chip" data-filter-key="<%= it.key %>" aria-pressed="<%= it.pressed ? 'true' : 'false' %>"<% if (it.title) { %> title="<%= it.title %>"<% } %><%- pdAttrs(it.attrs) %>><% if (it.icon) { %><i data-lucide="<%= it.icon %>" aria-hidden="true"></i><% } %><%= it.label %><% if (it.count !== undefined) { %> <strong class="pd-num"><%= it.count %></strong><% } %></button>
+    <% } else { %>
+      <button type="button" class="pd-filter-tile<%= it.tone ? ' pd-filter-tile--' + it.tone : '' %><%= it.zero ? ' is-zero' : '' %>" data-filter-key="<%= it.key %>" aria-pressed="<%= it.pressed ? 'true' : 'false' %>"<% if (it.title) { %> title="<%= it.title %>"<% } %><%- pdAttrs(it.attrs) %>>
+        <span class="pd-filter-tile-top"><% if (it.icon) { %><i data-lucide="<%= it.icon %>" aria-hidden="true"></i><% } %><span class="pd-filter-tile-count"><%= it.count %></span></span>
+        <span class="pd-filter-tile-label"><%= it.label %></span>
+      </button>
+    <% } %>
+  <% }) %>
+</div>

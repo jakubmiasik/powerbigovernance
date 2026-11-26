@@ -1,0 +1,192 @@
+/* ══════════════════════════════════════════════════════════════
+   @podavo/ui — design tokens
+   Every value a component uses comes from here. Components never hard-code an
+   application colour: products override --pd-accent (and only that) through
+   [data-product="…"], and variants override the size tokens.
+
+   Axes, all set on <html>:
+     data-theme      light | dark
+     data-pd-variant enterprise (desktop-first, dense) | consumer (mobile-first, touch)
+     data-density    comfortable | compact            (row density inside data grids)
+     data-product    governance | …                   (accent only)
+
+   Breakpoints (media queries cannot read variables, so they are listed here and
+   used literally): sm 640 · md 768 · lg 992 · xl 1280 · 2xl 1440 · 3xl 1920 · 4xl 2560
+   Text/background pairs are checked against WCAG 2.2 AA; re-check when changing one.
+   ══════════════════════════════════════════════════════════════ */
+:root {
+  /* Neutrals */
+  --pd-bg: #f5f7fa;
+  --pd-surface: #ffffff;
+  --pd-surface-2: #f8fafc;
+  --pd-surface-3: #f1f5f9;
+  --pd-border: #e3e8ef;            /* decorative edges */
+  --pd-border-strong: #7c8799;     /* control boundaries, 3.6:1 on white */
+  --pd-divider: #edf1f5;
+  --pd-text: #0f172a;
+  --pd-text-muted: #475569;        /* 7.6:1 */
+  --pd-text-subtle: #5b6678;       /* 5.8:1 */
+  --pd-overlay: rgba(15, 23, 42, .45);
+
+  /* Brand: teal, shared by every Podavo product */
+  --pd-primary: #0f766e;           /* 5.5:1 on white */
+  --pd-primary-hover: #115e59;
+  --pd-primary-active: #134e4a;
+  --pd-primary-soft: #e6f4f2;
+  --pd-primary-soft-border: #99d5cd;
+  --pd-primary-text: #115e59;      /* teal text on soft fills */
+  --pd-on-primary: #ffffff;
+  --pd-primary-rgb: 15, 118, 110;
+  --pd-accent: var(--pd-primary);  /* products may override */
+
+  /* Semantic states: fg = text/icon, bg = tinted fill, solid = strong fill, border */
+  --pd-success-fg: #166534; --pd-success-bg: #dcfce7; --pd-success-solid: #15803d; --pd-success-border: #86efac;
+  --pd-warning-fg: #92400e; --pd-warning-bg: #fef3c7; --pd-warning-solid: #b45309; --pd-warning-border: #fcd34d;
+  --pd-orange-fg:  #9a3412; --pd-orange-bg:  #ffedd5; --pd-orange-solid:  #ea580c; --pd-orange-border:  #fdba74;
+  --pd-danger-fg:  #991b1b; --pd-danger-bg:  #fee2e2; --pd-danger-solid:  #dc2626; --pd-danger-border:  #fca5a5;
+  --pd-danger-strong: #b91c1c; --pd-danger-strong-hover: #991b1b; /* white text: 6.5:1 and 8.3:1, in both themes */
+  --pd-info-fg:    #1e40af; --pd-info-bg:    #dbeafe; --pd-info-solid:    #3b82f6; --pd-info-border:    #93c5fd;
+  --pd-neutral-fg: #334155; --pd-neutral-bg: #eef2f6; --pd-neutral-solid: #64748b; --pd-neutral-border: #cbd5e1;
+
+  /* Navigation shell: navy in every theme */
+  --pd-shell-bg: #0b1d33;
+  --pd-shell-raised: #112a45;
+  --pd-shell-border: rgba(255, 255, 255, .08);
+  --pd-shell-text: #cbd5e1;        /* 11.4:1 */
+  --pd-shell-text-strong: #ffffff;
+  --pd-shell-text-muted: #94a3b8;  /* 6.6:1 */
+  --pd-shell-hover: rgba(255, 255, 255, .07);
+  --pd-shell-active-bg: #0f766e;
+  --pd-shell-active-text: #ffffff;
+  --pd-shell-focus: #5eead4;
+
+  /* 4 px spacing grid */
+  --pd-space-1: 4px;  --pd-space-2: 8px;  --pd-space-3: 12px; --pd-space-4: 16px;
+  --pd-space-5: 20px; --pd-space-6: 24px; --pd-space-8: 32px; --pd-space-10: 40px; --pd-space-12: 48px;
+
+  /* Shape and depth: rounded, quiet */
+  --pd-radius-sm: 6px;
+  --pd-radius-md: 8px;
+  --pd-radius-lg: 12px;
+  --pd-radius-pill: 999px;
+  --pd-shadow-xs: 0 1px 2px rgba(15, 23, 42, .04);
+  --pd-shadow-sm: 0 1px 3px rgba(15, 23, 42, .06), 0 1px 2px rgba(15, 23, 42, .04);
+  --pd-shadow-md: 0 4px 12px rgba(15, 23, 42, .08);
+  --pd-shadow-lg: 0 16px 40px rgba(15, 23, 42, .16);
+
+  /* Type */
+  --pd-font: 'Segoe UI Variable Text', 'Segoe UI', Inter, system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
+  --pd-font-mono: 'Cascadia Mono', Consolas, 'SFMono-Regular', Menlo, monospace;
+  --pd-text-2xs: 0.6875rem; /* 11 */
+  --pd-text-xs: 0.75rem;    /* 12 */
+  --pd-text-sm: 0.8125rem;  /* 13 */
+  --pd-text-md: 0.875rem;   /* 14 */
+  --pd-text-lg: 1rem;       /* 16 */
+  --pd-text-xl: 1.375rem;   /* 22: page title */
+  --pd-text-2xl: 1.625rem;  /* 26: metric value */
+  --pd-weight-medium: 500;
+  --pd-weight-semibold: 600;
+  --pd-weight-bold: 700;
+
+  /* Motion */
+  --pd-ease: cubic-bezier(.2, 0, 0, 1);
+  --pd-duration: 160ms;
+
+  /* Focus */
+  --pd-focus-ring: 0 0 0 2px var(--pd-surface), 0 0 0 4px var(--pd-primary);
+
+  /* Variant: enterprise (default) — desktop-first, dense */
+  --pd-body-size: var(--pd-text-md);
+  --pd-control-h: 34px;
+  --pd-control-h-sm: 28px;
+  --pd-control-px: 12px;
+  --pd-control-font: var(--pd-text-md);
+  --pd-touch-min: 24px;           /* WCAG 2.5.8 minimum target */
+  --pd-card-pad: var(--pd-space-4);
+  --pd-gap: var(--pd-space-4);
+  --pd-page-pad: var(--pd-space-6);
+  --pd-row-py: 8px;
+  --pd-row-px: 12px;
+  --pd-row-font: var(--pd-text-sm);
+
+  /* Layout */
+  --pd-sidebar-w: 260px;
+  --pd-sidebar-w-collapsed: 64px;
+  --pd-topbar-h: 56px;
+  --pd-content-max: 1680px;
+  --pd-aside-w: 340px;
+  --pd-drawer-w: 420px;
+  --pd-dock-w: 400px;
+}
+
+/* Variant: consumer — mobile-first, comfortable, larger touch targets */
+[data-pd-variant="consumer"] {
+  --pd-body-size: var(--pd-text-lg);
+  --pd-control-h: 44px;
+  --pd-control-h-sm: 36px;
+  --pd-control-px: 16px;
+  --pd-control-font: var(--pd-text-lg);
+  --pd-touch-min: 44px;
+  --pd-card-pad: var(--pd-space-5);
+  --pd-gap: var(--pd-space-5);
+  --pd-page-pad: var(--pd-space-4);
+  --pd-row-py: 14px;
+  --pd-row-px: 16px;
+  --pd-row-font: var(--pd-text-md);
+  --pd-radius-lg: 16px;
+  --pd-radius-md: 10px;
+}
+
+/* Row density inside data grids (enterprise users switch this) */
+[data-density="compact"] {
+  --pd-row-py: 4px;
+  --pd-row-px: 8px;
+  --pd-row-font: var(--pd-text-xs);
+  --pd-card-pad: var(--pd-space-3);
+}
+
+/* Product accents. Only --pd-accent may differ between products. */
+[data-product="governance"] { --pd-accent: #0f766e; }
+
+/* Dark theme */
+[data-theme="dark"] {
+  --pd-bg: #0e141f;
+  --pd-surface: #151d2b;
+  --pd-surface-2: #1a2333;
+  --pd-surface-3: #202a3b;
+  --pd-border: #2c374a;
+  --pd-border-strong: #5b6a82;
+  --pd-divider: #243045;
+  --pd-text: #e2e8f0;
+  --pd-text-muted: #9aa6b8;
+  --pd-text-subtle: #8391a6;
+  --pd-overlay: rgba(0, 0, 0, .55);
+  --pd-primary: #2dd4bf;
+  --pd-primary-hover: #5eead4;
+  --pd-primary-active: #99f6e4;
+  --pd-primary-soft: rgba(45, 212, 191, .12);
+  --pd-primary-soft-border: rgba(45, 212, 191, .4);
+  --pd-primary-text: #5eead4;
+  --pd-on-primary: #0f172a;
+  --pd-primary-rgb: 45, 212, 191;
+  --pd-success-fg: #4ade80; --pd-success-bg: rgba(74, 222, 128, .14);  --pd-success-solid: #22c55e; --pd-success-border: rgba(74, 222, 128, .4);
+  --pd-warning-fg: #fbbf24; --pd-warning-bg: rgba(251, 191, 36, .14);  --pd-warning-solid: #f59e0b; --pd-warning-border: rgba(251, 191, 36, .4);
+  --pd-orange-fg:  #fb923c; --pd-orange-bg:  rgba(251, 146, 60, .14);  --pd-orange-solid:  #f97316; --pd-orange-border:  rgba(251, 146, 60, .4);
+  --pd-danger-fg:  #f87171; --pd-danger-bg:  rgba(248, 113, 113, .14); --pd-danger-solid:  #ef4444; --pd-danger-border:  rgba(248, 113, 113, .4);
+  --pd-info-fg:    #93c5fd; --pd-info-bg:    rgba(147, 197, 253, .14); --pd-info-solid:    #60a5fa; --pd-info-border:    rgba(147, 197, 253, .4);
+  --pd-neutral-fg: #cbd5e1; --pd-neutral-bg: rgba(148, 163, 184, .16); --pd-neutral-solid: #94a3b8; --pd-neutral-border: rgba(148, 163, 184, .4);
+  --pd-shell-bg: #08111f;
+  --pd-shell-raised: #0d1b2e;
+  --pd-shadow-xs: 0 1px 2px rgba(0, 0, 0, .3);
+  --pd-shadow-sm: 0 1px 3px rgba(0, 0, 0, .35);
+  --pd-shadow-md: 0 4px 12px rgba(0, 0, 0, .4);
+  --pd-shadow-lg: 0 16px 40px rgba(0, 0, 0, .55);
+  color-scheme: dark;
+}
+[data-theme="dark"][data-product="governance"] { --pd-accent: #2dd4bf; }
+
+/* Responsive layout tokens */
+@media (min-width: 1440px) { :root { --pd-page-pad: var(--pd-space-8); --pd-aside-w: 360px; --pd-dock-w: 420px; } }
+@media (min-width: 1920px) { :root { --pd-content-max: 1840px; --pd-aside-w: 400px; --pd-drawer-w: 520px; --pd-dock-w: 460px; } }
+@media (min-width: 2560px) { :root { --pd-content-max: 2280px; --pd-aside-w: 460px; --pd-drawer-w: 600px; --pd-dock-w: 520px; } }
+@media (max-width: 767.98px) { :root { --pd-page-pad: var(--pd-space-4); } }

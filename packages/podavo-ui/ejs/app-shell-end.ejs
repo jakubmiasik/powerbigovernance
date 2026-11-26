@@ -1,0 +1,8 @@
+<%
+  // AppShell (closing half). { ui: { footerHtml } } — footerHtml is inserted unescaped.
+  var shellEnd = (typeof ui !== 'undefined' && ui) || {};
+%>    </main>
+    <% if (shellEnd.footerHtml) { %><footer class="pd-footer"><%- shellEnd.footerHtml %></footer><% } %>
+  </div>
+</div>
+<div class="pd-toasts" id="pdToasts" role="status" aria-live="polite"></div>

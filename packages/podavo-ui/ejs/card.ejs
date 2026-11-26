@@ -1,0 +1,16 @@
+<%
+  // Card. { ui: { id, title, icon, meta, headerHtml, bodyHtml, footerHtml, flush, headingLevel: 2 } }
+  // *Html slots are inserted unescaped: pass markup you rendered, never raw user input.
+  var p = (typeof ui !== 'undefined' && ui) || {};
+  var h = 'h' + (p.headingLevel || 2);
+%><section class="pd-card<%= p.flush ? ' pd-card--flush' : '' %><%= p.class ? ' ' + p.class : '' %>"<% if (p.id) { %> id="<%= p.id %>"<% } %><% if (p.title) { %> aria-labelledby="<%= (p.id || 'card') %>-title"<% } %>>
+  <% if (p.title || p.headerHtml) { %>
+    <div class="pd-card-header">
+      <% if (p.title) { %><<%= h %> class="pd-card-title" id="<%= (p.id || 'card') %>-title"><% if (p.icon) { %><i data-lucide="<%= p.icon %>" aria-hidden="true"></i><% } %><%= p.title %></<%= h %>><% } %>
+      <% if (p.meta) { %><span class="pd-card-meta"><%= p.meta %></span><% } %>
+      <%- p.headerHtml || '' %>
+    </div>
+  <% } %>
+  <div class="pd-card-body"><%- p.bodyHtml || '' %></div>
+  <% if (p.footerHtml) { %><div class="pd-card-footer"><%- p.footerHtml %></div><% } %>
+</section>

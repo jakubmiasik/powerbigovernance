@@ -4,3 +4,11 @@ config.local.json
 *.log
 .DS_Store
 Thumbs.db
+
+# Visual regression output (baselines in visual/__screenshots__ are committed)
+visual/.out/
+visual/.results/
+visual/.report/
+packages/podavo-ui/catalogue/dist/
+packages/podavo-ui/test-results/
+packages/podavo-ui/playwright-report/

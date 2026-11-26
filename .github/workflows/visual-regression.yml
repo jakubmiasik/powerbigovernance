@@ -1,0 +1,71 @@
+name: Visual regression
+
+# Screenshots of the @podavo/ui catalogue and the Fabric Governance screens in
+# light and dark mode, both density variants and the supported desktop widths.
+# A screenshot without a baseline is written on its first run and uploaded as an
+# artifact: commit it to accept it. A difference fails the job and the report
+# shows expected, actual and diff side by side.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/podavo-ui/**'
+      - 'src/views/**'
+      - 'src/public/**'
+      - 'visual/**'
+      - '.github/workflows/visual-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  visual:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: npm
+
+      - name: Install app dependencies
+        run: npm ci
+
+      - name: Install the design system's dev dependencies
+        working-directory: packages/podavo-ui
+        run: npm install --no-audit --no-fund
+
+      # Installed without touching package.json or the lockfile: Playwright is a
+      # test tool, not something the deployed app needs.
+      - name: Install Playwright for the app screens
+        run: npm install --no-save --no-audit --no-fund @playwright/test@1.49.1
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Component contract tests
+        working-directory: packages/podavo-ui
+        run: npm test
+
+      - name: Catalogue screenshots
+        working-directory: packages/podavo-ui
+        run: npm run test:visual
+
+      - name: Screen screenshots
+        run: npm run test:visual
+
+      - name: Upload report and new baselines
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-regression
+          path: |
+            visual/.report
+            visual/.results
+            visual/__screenshots__
+            packages/podavo-ui/playwright-report
+            packages/podavo-ui/test-results
+            packages/podavo-ui/tests/__screenshots__
+          if-no-files-found: ignore

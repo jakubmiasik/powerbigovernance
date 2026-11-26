@@ -1,0 +1,12 @@
+<%
+  // SearchField. { ui: { id, label, placeholder, value, shell: true (rounded, top bar), kbd: 'Ctrl K',
+  //                      command: true (combobox over the navigation), targets: [{ label, href, hint, icon }] } }
+  // With command: true it becomes an ARIA combobox; podavo.js fills the listbox.
+  var p = (typeof ui !== 'undefined' && ui) || {};
+%><div class="pd-search<%= p.shell ? ' pd-search--shell' : '' %>"<% if (p.command) { %> role="search"<% } %>>
+  <label for="<%= p.id %>" class="pd-visually-hidden"><%= p.label || p.placeholder || 'Search' %></label>
+  <i data-lucide="search" class="pd-search-icon" aria-hidden="true"></i>
+  <input type="search" class="pd-input<%= p.size === 'sm' ? ' pd-input--sm' : '' %>" id="<%= p.id %>" placeholder="<%= p.placeholder || 'Search' %>" value="<%= p.value || '' %>" autocomplete="off" spellcheck="false"<% if (p.command) { %> data-pd-search role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="<%= p.id %>-results"<% if (p.targets) { %> data-pd-search-targets="<%= JSON.stringify(p.targets) %>"<% } %><% } %><% if (p.attrs) { Object.keys(p.attrs).forEach(function (k) { %> <%= k %>="<%= p.attrs[k] %>"<% }) } %>>
+  <% if (p.kbd) { %><span class="pd-kbd pd-search-kbd" aria-hidden="true"><%= p.kbd %></span><% } %>
+  <% if (p.command) { %><ul id="<%= p.id %>-results" class="pd-listbox" role="listbox" aria-label="Search results" hidden></ul><% } %>
+</div>

@@ -1,0 +1,14 @@
+<%
+  // PageHeader. { ui: { title, subtitle, icon, actionsHtml } } — renders the page's single <h1>.
+  // actionsHtml is inserted unescaped: pass markup you rendered.
+  var p = (typeof ui !== 'undefined' && ui) || {};
+%><div class="pd-page-header">
+  <div class="pd-page-header-main">
+    <% if (p.icon) { %><span class="pd-page-icon" aria-hidden="true"><i data-lucide="<%= p.icon %>"></i></span><% } %>
+    <div class="pd-min-w-0">
+      <h1 class="pd-page-title"><%= p.title %></h1>
+      <% if (p.subtitle) { %><p class="pd-page-subtitle"><%= p.subtitle %></p><% } %>
+    </div>
+  </div>
+  <% if (p.actionsHtml) { %><div class="pd-page-actions"><%- p.actionsHtml %></div><% } %>
+</div>

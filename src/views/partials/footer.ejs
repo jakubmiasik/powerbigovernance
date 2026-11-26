@@ -1,11 +1,7 @@
-    </main><!-- /.page-content -->
-
-    <footer class="app-footer">
-      <span>Fabric Governance &copy; <%= new Date().getFullYear() %></span>
-      <span>Press <span class="kbd-hint">?</span> for keyboard shortcuts &middot; <span class="kbd-hint">Ctrl K</span> to search</span>
-    </footer>
-  </div><!-- /.main-content -->
-</div><!-- /.app-layout -->
+<%- include('../../../packages/podavo-ui/ejs/app-shell-end', { ui: {
+  footerHtml: '<span>Fabric Governance &copy; ' + new Date().getFullYear() + ' &middot; Podavo design system</span>' +
+    '<span>Press <span class="pd-kbd">?</span> for keyboard shortcuts &middot; <span class="pd-kbd">Ctrl K</span> to search</span>'
+} }) %>
 
 <!-- Toast container. A polite live region, so results are announced without
      stealing focus from the work in progress. -->
@@ -213,25 +209,20 @@ document.addEventListener('DOMContentLoaded', function() {
       th.setAttribute('aria-sort', 'none');
       th.setAttribute('tabindex', '0');
       th.title = 'Sort by ' + label;
-      var sortIcon = document.createElement('i');
-      sortIcon.className = 'bi bi-chevron-expand ms-1 small text-muted';
-      sortIcon.setAttribute('aria-hidden', 'true');
-      th.appendChild(sortIcon);
+      // The direction is drawn by CSS from aria-sort, so there is no icon element
+      // to keep in step with the state.
 
       function sortBy() {
         var tbody = table.querySelector('tbody');
         if (!tbody) return;
-        var rows = Array.from(tbody.querySelectorAll('tr')).filter(function(r) { return !r.classList.contains('grid-empty'); });
+        var rows = Array.from(tbody.querySelectorAll('tr')).filter(function(r) { return !r.classList.contains('pd-grid-empty'); });
         var asc = th.getAttribute('aria-sort') !== 'ascending';
         headers.forEach(function(h) {
-          var icon = h.querySelector('i.bi');
-          if (icon && h.hasAttribute('aria-sort')) icon.className = 'bi bi-chevron-expand ms-1 small text-muted';
           if (h.hasAttribute('aria-sort')) h.setAttribute('aria-sort', 'none');
           h.removeAttribute('data-sort-dir');
         });
         th.setAttribute('aria-sort', asc ? 'ascending' : 'descending');
         th.setAttribute('data-sort-dir', asc ? 'asc' : 'desc');
-        sortIcon.className = asc ? 'bi bi-chevron-up ms-1 small' : 'bi bi-chevron-down ms-1 small';
         rows.sort(function(a, b) {
           var aCell = a.cells[colIndex], bCell = b.cells[colIndex];
           if (!aCell || !bCell) return 0;
@@ -292,7 +283,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // / — focus this page's search (the global search has Ctrl+K)
     if (e.key === '/') {
-      var searchInput = document.querySelector('.page-content [data-grid-search], .page-content .table-search input, .page-content input[type="search"], .page-content input[placeholder*="earch"], .page-content input[placeholder*="ilter"]')
+      var searchInput = document.querySelector('.pd-page [data-grid-search], .pd-page .table-search input, .pd-page input[type="search"], .pd-page input[placeholder*="earch"], .pd-page input[placeholder*="ilter"]')
         || document.getElementById('globalSearch');
       if (searchInput) {
         e.preventDefault();
@@ -330,6 +321,9 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/js/app.js"></script>
-<script src="/js/ui.js"></script>
+<%# Lucide is pinned: v1 renamed icons. If it cannot load, Bootstrap Icons remain visible. %>
+<script src="https://unpkg.com/lucide@0.517.0/dist/umd/lucide.min.js" crossorigin="anonymous"></script>
+<script src="/podavo-ui/js/podavo.js"></script>
+<script src="/js/icon-map.js"></script>
 </body>
 </html>

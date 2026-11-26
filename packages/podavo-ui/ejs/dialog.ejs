@@ -1,0 +1,13 @@
+<%
+  // Dialog — native <dialog>, modal, Esc closes, focus returns to the opener.
+  // { ui: { id, title, size: lg, bodyHtml, footerHtml } }. Open with data-pd-dialog-open="<id>".
+  // *Html slots are inserted unescaped: pass markup you rendered, never raw user input.
+  var p = (typeof ui !== 'undefined' && ui) || {};
+%><dialog class="pd-dialog<%= p.size === 'lg' ? ' pd-dialog--lg' : '' %>" id="<%= p.id %>" aria-labelledby="<%= p.id %>-title">
+  <div class="pd-dialog-header">
+    <h2 class="pd-dialog-title" id="<%= p.id %>-title"><%= p.title %></h2>
+    <button type="button" class="pd-icon-btn" style="margin-left:auto" data-pd-dialog-close aria-label="Close"><i data-lucide="x" aria-hidden="true"></i></button>
+  </div>
+  <div class="pd-dialog-body"><%- p.bodyHtml || '' %></div>
+  <% if (p.footerHtml) { %><div class="pd-dialog-footer"><%- p.footerHtml %></div><% } %>
+</dialog>

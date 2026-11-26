@@ -1,0 +1,15 @@
+<%
+  // Tabs. { ui: { id, label, variant: line|pill, tabs: [{ id, label, icon, count, selected, href, controls }] } }
+  // Tabs with controls switch panels in place (role=tab, arrow keys). Tabs with href are
+  // navigation links styled as tabs (aria-current on the current one).
+  var p = (typeof ui !== 'undefined' && ui) || {};
+  var isPanels = (p.tabs || []).some(function (t) { return t.controls; });
+%><div class="pd-tabs<%= p.variant === 'pill' ? ' pd-tabs--pill' : '' %>"<% if (isPanels) { %> role="tablist"<% } else { %> role="navigation"<% } %> aria-label="<%= p.label || 'Sections' %>"<% if (p.id) { %> id="<%= p.id %>"<% } %>>
+  <% (p.tabs || []).forEach(function (t) { %>
+    <% if (t.controls) { %>
+      <button type="button" class="pd-tab" role="tab" id="<%= t.id %>" aria-controls="<%= t.controls %>" aria-selected="<%= t.selected ? 'true' : 'false' %>" tabindex="<%= t.selected ? '0' : '-1' %>"><% if (t.icon) { %><i data-lucide="<%= t.icon %>" aria-hidden="true"></i><% } %><%= t.label %><% if (t.count !== undefined && t.count !== null) { %> <span class="pd-tab-count"><%= t.count %></span><% } %></button>
+    <% } else { %>
+      <a class="pd-tab<%= t.selected ? ' is-active' : '' %>" href="<%= t.href %>"<% if (t.selected) { %> aria-current="page"<% } %>><% if (t.icon) { %><i data-lucide="<%= t.icon %>" aria-hidden="true"></i><% } %><%= t.label %><% if (t.count !== undefined && t.count !== null) { %> <span class="pd-tab-count"><%= t.count %></span><% } %></a>
+    <% } %>
+  <% }) %>
+</div>
