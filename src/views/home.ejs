@@ -9,6 +9,18 @@
   </button>
 </div>
 
+<% var homeSections = (typeof visibleSections !== 'undefined' && visibleSections ? visibleSections : []).map(function(s) { return s.key; });
+   var homeRun = typeof globalRun !== 'undefined' ? globalRun : null;
+   if (homeRun && homeSections.indexOf('governance') !== -1) { %>
+  <div class="pd-card mb-4">
+    <div class="pd-card-header">
+      <span><i class="bi bi-clock-history me-2" aria-hidden="true"></i><strong>Since the last scan</strong>
+        <span class="text-muted small ms-1">What changed in <%= homeRun.sp_name || 'this tenant' %>, what needs attention, who is active and where storage is growing.</span></span>
+      <a class="btn btn-sm btn-primary" href="/governance/changes?runId=<%= homeRun.id %>">Open</a>
+    </div>
+  </div>
+<% } %>
+
 <!-- What has to be true before any of this works. Every failure mode below has been
      hit in practice, and each one looks like an application fault from the inside:
      an empty scan, a capacity that will not pause, a lakehouse that refuses a query. -->

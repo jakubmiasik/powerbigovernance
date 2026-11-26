@@ -71,6 +71,7 @@
   title: 'Governance Overview', icon: 'shield-check',
   subtitle: noData ? 'Tenant-wide governance findings and inventory.' : 'What needs attention across the tenant, worst first, followed by the inventory it was found in.',
   actionsHtml: noData ? '' :
+    include(pd + 'button', { ui: { label: 'Since last scan', icon: 'git-compare-arrows', href: '/governance/changes' + (runQuery ? '?' + runQuery : ''), size: 'sm' } }) +
     (canOpen('analysis') ? include(pd + 'button', { ui: { label: 'Run analysis', icon: 'circle-play', href: '/analysis', size: 'sm' } }) : '') +
     (canOpen('workspaces') ? include(pd + 'button', { ui: { label: 'Open workspace triage', icon: 'layers', href: triageHref(), size: 'sm', variant: 'primary' } }) : '')
 } }) %>
