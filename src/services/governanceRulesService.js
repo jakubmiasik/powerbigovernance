@@ -277,7 +277,7 @@ function buildGaps({ run, totals, access, workspaces, trend, connectionMode, kpi
   if (kpis.storage.status === 'Not collected') gaps.push({ id: 'storage-not-collected', message: 'Storage was not collected in this scan (storage_scanned_count = 0), so it shows as "Not collected".' });
   if (kpis.storage.status === 'Collected') gaps.push({ id: 'storage-units', message: 'Storage units are not confirmed: the raw value is shown as ' + STORAGE_UNITS_LABEL + ', and the GB figure is approximate.' });
   if (!access.available) gaps.push({ id: 'access-missing', message: 'No completed tenant scan has access data, so access is Unknown and F3 is not evaluated.' });
-  else if (!access.isLatestRun) gaps.push({ id: 'access-older-run', message: 'Access data from ' + access.label + ' (' + (access.completedAt ? access.completedAt.replace('T', ' ').slice(0, 19) + ' UTC' : 'date unknown') + '); latest run has no access data.' });
+  else if (!access.isLatestRun) gaps.push({ id: 'access-older-run', message: 'Access data from ' + access.label + ' (' + (access.completedAt ? access.completedAt.replace('T', ' ').slice(0, 19) + ' UTC' : 'date unknown') + '): ' + runLabel({ ...run, id: run.run_id }) + ' recorded no access, so access and F3 are read from the earlier scan.' });
   const noSku = flagged(workspaces, 'no_sku').length;
   if (noSku) gaps.push({ id: 'sku-not-recorded', message: noSku + ' workspace' + (noSku === 1 ? ' has' : 's have') + ' no capacity SKU recorded; shown as "(not recorded)".' });
   if (trend.runs.length < 2) gaps.push({ id: 'trend-short', message: 'Fewer than two completed tenant scans have totals, so there is no trend and T1 is not evaluated.' });
@@ -291,7 +291,7 @@ function buildGaps({ run, totals, access, workspaces, trend, connectionMode, kpi
  * `data` is what the repository returned; `run` is Q1's row. Every query was
  * already tied to the tenant, and this function only ever sees that tenant's rows.
  */
-function buildOutcome({ run, data, rules, connectionMode = 'application', generatedAt, trigger = 'on-demand' }) {
+function buildOutcome({ run, data, rules, connectionMode = 'application', generatedAt, trigger = 'on-demand', selected = null }) {
   const t = { ...rules.thresholds };
   for (const key of Object.keys(t)) t[key] = Number(t[key]);
   const totals = data.totals || null;
@@ -344,7 +344,9 @@ function buildOutcome({ run, data, rules, connectionMode = 'application', genera
     access,
     trend,
     deletions: (data.deletions || []).map(row => ({ workspaceName: row.workspace_name || '(unnamed)', state: row.state, deletedAt: iso(row.deleted_at), runId: row.run_id, scan: row.run_id ? runLabel({ ...row, id: row.run_id }) : null })),
-    gaps: buildGaps({ run, totals, access, workspaces, trend, connectionMode, kpis }),
+    gaps: (selected ? [{ id: 'selected-scan-scoped', message: 'The selected scan, ' + runLabel({ ...selected, id: selected.run_id }) + ', covered only some workspaces. The outcome reads whole-tenant scans, so it shows ' + scanRef.label + ', the latest whole-tenant scan of this principal at or before it.' }] : [])
+      .concat(buildGaps({ run, totals, access, workspaces, trend, connectionMode, kpis })),
+    selection: selected ? { selectedRunId: selected.run_id, selectedLabel: runLabel({ ...selected, id: selected.run_id }), shownLabel: scanRef.label } : null,
     meta: { generatedAt: iso(generatedAt), trigger, connectionMode, rulesVersion: rules.version || null, thresholds: t },
   };
 }

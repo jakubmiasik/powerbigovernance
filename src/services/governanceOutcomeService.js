@@ -18,6 +18,7 @@ const { canUseSectionInTenant } = require('./permissionService');
 const TENANT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const cache = new Map();
+const MAX_CACHED = 50;
 const inFlight = new Map();
 
 function normalizeTenantId(value) {
@@ -47,17 +48,19 @@ function allowedTenants(permissions, runs) {
     .sort((a, b) => String(a.name).localeCompare(String(b.name)));
 }
 
-/** The tenant to show: the one asked for, else the configured default, else the selected scan's. */
+/** The tenant to show: the one asked for, else the selected scan's, else the configured default. */
 function pickTenant(requested, allowed, { defaultTenantId, selectedRun } = {}) {
   const wanted = normalizeTenantId(requested);
   if (requested !== undefined && requested !== null && requested !== '') {
     if (!wanted) return { error: 400, message: 'tenantId must be a tenant GUID.' };
     return allowed.some(t => t.id === wanted) ? { tenantId: wanted } : { error: 403, message: 'You do not have access to that tenant.' };
   }
-  const fallback = normalizeTenantId(defaultTenantId);
-  if (fallback && allowed.some(t => t.id === fallback)) return { tenantId: fallback };
+  // The scan selected at the top decides first; the configured tenant only when
+  // nothing the reader may see is selected.
   const selected = selectedRun ? normalizeTenantId(selectedRun.tenant_id) : null;
   if (selected && allowed.some(t => t.id === selected)) return { tenantId: selected };
+  const fallback = normalizeTenantId(defaultTenantId);
+  if (fallback && allowed.some(t => t.id === fallback)) return { tenantId: fallback };
   if (allowed.length) return { tenantId: allowed[0].id };
   return { error: 403, message: 'You do not have access to any tenant with a completed scan.' };
 }
@@ -77,16 +80,28 @@ function freshEnough(entry, ttlMs) {
  * The outcome for a tenant's latest completed tenant scan.
  * Returns { status: 200, outcome, cached } or { status: 404, message }.
  */
-async function getOutcome(tenantId, { force = false, trigger = 'on-demand', repo = repository, now = () => new Date() } = {}) {
+async function getOutcome(tenantId, { runId = null, force = false, trigger = 'on-demand', repo = repository, now = () => new Date() } = {}) {
   const id = normalizeTenantId(tenantId);
   if (!id) return { status: 400, message: 'tenantId must be a tenant GUID.' };
 
-  const run = await repo.latestRun(id);
-  if (!run) return { status: 404, message: 'No completed tenant scan' };
-  // Q1 filters by tenant; this is a second lock on the same door.
-  if (normalizeTenantId(run.tenant_id) !== id) throw new Error('Governance outcome: the latest run does not belong to the requested tenant.');
+  // The selected scan when there is one, else the tenant's latest whole-tenant scan.
+  let run = null;
+  let selected = null;
+  if (runId !== null && runId !== undefined) {
+    const found = await repo.runForSelected(id, runId);
+    if (!found) return { status: 404, message: 'The selected scan is not a completed scan of this tenant.' };
+    selected = found.selected;
+    run = found.run;
+    if (!run) return { status: 404, message: 'No completed whole-tenant scan of this principal at or before the selected scan' };
+  } else {
+    run = await repo.latestRun(id);
+    if (!run) return { status: 404, message: 'No completed tenant scan' };
+  }
+  // The queries filter by tenant; this is a second lock on the same door.
+  if (normalizeTenantId(run.tenant_id) !== id) throw new Error('Governance outcome: the scan does not belong to the requested tenant.');
+  const substituted = selected && selected.run_id !== run.run_id ? selected : null;
 
-  const key = cacheKey(id, run);
+  const key = cacheKey(id, run) + (substituted ? '|for' + substituted.run_id : '');
   const config = getConfig();
   if (!force && freshEnough(cache.get(key), config.governance.cacheTtlMs)) {
     return { status: 200, outcome: cache.get(key).outcome, cached: true };
@@ -96,9 +111,11 @@ async function getOutcome(tenantId, { force = false, trigger = 'on-demand', repo
   const work = (async () => {
     const rules = loadRules(config.governance.rulesFile || undefined);
     const data = await repo.readOutcomeData(id, run);
-    const outcome = buildOutcome({ run, data, rules, connectionMode: repository.connectionMode(config), generatedAt: now(), trigger });
-    for (const existing of cache.keys()) if (existing.startsWith(id + '|')) cache.delete(existing);
+    const outcome = buildOutcome({ run, data, rules, connectionMode: repository.connectionMode(config), generatedAt: now(), trigger, selected: substituted });
+    // Several scans per tenant may be looked at; keep the most recent few.
+    cache.delete(key);
     cache.set(key, { outcome, storedAt: Date.now() });
+    while (cache.size > MAX_CACHED) cache.delete(cache.keys().next().value);
     return outcome;
   })();
   inFlight.set(key, work);

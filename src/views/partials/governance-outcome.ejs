@@ -3,13 +3,14 @@
   // drawn by /js/governance-outcome.js: fixed queries and fixed rules, no generated text.
   var oTenants = typeof outcomeTenants !== 'undefined' && outcomeTenants ? outcomeTenants : [];
   var oTenant = typeof outcomeTenantId !== 'undefined' ? outcomeTenantId : null;
+  var oRun = typeof outcomeRunId !== 'undefined' && outcomeRunId ? outcomeRunId : '';
 %>
 <% if (oTenant) { %>
-<section class="go" id="governanceOutcome" data-tenant-id="<%= oTenant %>" aria-labelledby="goTitle">
+<section class="go" id="governanceOutcome" data-tenant-id="<%= oTenant %>" data-run-id="<%= oRun %>" aria-labelledby="goTitle">
   <div class="go-head">
     <div class="pd-min-w-0">
       <h2 class="go-title" id="goTitle"><i data-lucide="clipboard-check" aria-hidden="true"></i>Governance outcome</h2>
-      <p class="go-sub" id="goSub">Fixed rules over the latest completed whole-tenant scan.</p>
+      <p class="go-sub" id="goSub">Fixed rules over the scan selected at the top.</p>
     </div>
     <div class="go-actions">
       <% if (oTenants.length > 1) { %>

@@ -14,6 +14,12 @@
   <div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-1"></i><%= error %></div>
 <% } %>
 
+<% if (typeof armError !== 'undefined' && armError && capacities.length) { %>
+  <div class="alert alert-warning small"><i class="bi bi-shield-exclamation me-1"></i>The service principal could not read
+    any capacity in Azure (<%= armError %>), so none of them can be paused or resumed from here. Give it Reader on the
+    capacities, or their resource group, to fill in where each one lives; Contributor to pause and resume.</div>
+<% } %>
+
 <% if (capacities.length) { %>
   <div class="card">
     <div class="card-body p-0">
@@ -36,6 +42,17 @@
               <tr data-filter="<%= (cap.displayName || '') + ' ' + (cap.sku || '') + ' ' + (cap.region || '') %>">
                 <td>
                   <a href="/capacities/<%= cap.id %>" class="fw-semibold text-decoration-none"><%= cap.displayName || 'Unnamed' %></a>
+                  <% var armStatus = cap.armAccess ? cap.armAccess.status : null; %>
+                  <% if (armStatus === 'no-access') { %>
+                    <div class="small text-warning-emphasis cap-no-sp-access"
+                         title="The service principal cannot see this capacity in Azure, so it cannot read where it lives or pause and resume it. Grant it Reader (Contributor to pause) on the capacity.">
+                      <i class="bi bi-shield-exclamation me-1"></i>Service principal does not have access
+                    </div>
+                  <% } else if (armStatus === 'not-azure') { %>
+                    <div class="small text-muted" title="Only Fabric F SKUs are Azure resources that can be paused.">
+                      <i class="bi bi-info-circle me-1"></i>Not an Azure resource
+                    </div>
+                  <% } %>
                 </td>
                 <td><code><%= (cap.sku || '-').toUpperCase() %></code></td>
                 <td class="small"><%= cap.region || '-' %></td>

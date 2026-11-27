@@ -381,6 +381,15 @@ function createPowerBIService(spConfig, authOptions = {}) {
     }
   }
 
+  // The same call, but a failure stays a failure. A scan has to tell "nobody is in
+  // this workspace" apart from "the list could not be read"; the lenient version
+  // above answers an empty list for both.
+  async function readWorkspaceUsers(workspaceId) {
+    const token = await getToken();
+    const data = await safeGet(token, PBI_ADMIN + '/groups/' + workspaceId + '/users');
+    return data.value || [];
+  }
+
   // ── Dataset refresh history: PBI API ──
   async function getDatasetRefreshHistory(workspaceId, datasetId, top) {
     const token = await getToken();
@@ -589,6 +598,18 @@ function createPowerBIService(spConfig, authOptions = {}) {
     return safePost(token, PBI_ADMIN + '/workspaces/getInfo',
       { workspaces: workspaceIds },
       { datasetExpressions: true, datasetSchema: true, datasourceDetails: true, getArtifactUsers: true });
+  }
+
+  // A scanner request that asks for nothing but who holds which role. Up to 100
+  // workspaces per call, against a limit of 500 calls an hour, where reading the
+  // same lists one workspace at a time costs one call each against roughly 200.
+  // No schema or expressions are requested, so it does not depend on the tenant
+  // setting for detailed metadata.
+  async function startAccessScan(workspaceIds) {
+    const token = await getToken();
+    return safePost(token, PBI_ADMIN + '/workspaces/getInfo',
+      { workspaces: workspaceIds },
+      { getArtifactUsers: true });
   }
 
   async function getScanStatus(scanId) {
@@ -847,6 +868,14 @@ function createPowerBIService(spConfig, authOptions = {}) {
   }
 
   // List all Fabric capacities in the subscription via ARM
+  // The subscriptions the principal can read anything in. A Reader role on a
+  // resource group is enough for the subscription to be listed here.
+  async function listSubscriptions() {
+    const token = await getArmToken();
+    const data = await safeGet(token, ARM_BASE + '/subscriptions?api-version=2022-12-01');
+    return data.value || [];
+  }
+
   async function listArmCapacities(subscriptionId) {
     const token = await getArmToken();
     const url = `${ARM_BASE}/subscriptions/${subscriptionId}/providers/Microsoft.Fabric/capacities?api-version=2023-11-01`;
@@ -1107,6 +1136,8 @@ function createPowerBIService(spConfig, authOptions = {}) {
     getItemsByType,
     getAllItems,
     getWorkspaceUsers,
+    readWorkspaceUsers,
+    startAccessScan,
     getDatasetRefreshHistory,
     getDatasetDatasources,
     getDatasetParameters,
@@ -1125,6 +1156,7 @@ function createPowerBIService(spConfig, authOptions = {}) {
     getItemConnections: getWorkspaceLineage,
     getWorkspaceLineage,
     listArmCapacities,
+    listSubscriptions,
     getArmCapacityDetail,
     suspendCapacity,
     resumeCapacity,

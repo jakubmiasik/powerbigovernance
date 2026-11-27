@@ -23,10 +23,11 @@
               </select>
             </div>
             <div class="col-md-4">
-              <button class="btn btn-primary w-100" onclick="startAnalysis()">
+              <%# The hint sits where the select keeps its label, so the button lines up with the select. %>
+              <label for="runAnalysisBtn" class="form-label">Scan &mdash; you choose the scope next</label>
+              <button class="btn btn-primary w-100" id="runAnalysisBtn" onclick="startAnalysis()">
                 <i class="bi bi-play-fill me-1"></i>Run Analysis&hellip;
               </button>
-              <div class="form-text text-center">You choose the scope next</div>
             </div>
           </div>
           <div class="small text-muted mt-2">

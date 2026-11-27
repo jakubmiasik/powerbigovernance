@@ -65,6 +65,15 @@
   </div>
 <% } %>
 
+<% if (run && (t.workspaces || 0) > 0 && !(t.grants || 0)) { %>
+  <div class="alert alert-warning" id="noAccessRecorded">
+    <i class="bi bi-exclamation-triangle me-2"></i>This scan recorded <strong>no access at all</strong> across
+    <%= t.workspaces %> workspace(s). That is a gap in the scan, not a tenant with nobody in it: earlier scans read
+    access one workspace at a time and lost the lists to Power BI's hourly API limit. Scans now read access through the
+    admin scanner, so <a href="/analysis">run a new analysis</a>, or pick another scan above.
+  </div>
+<% } %>
+
 <!-- ── What the access model looks like ── -->
 <div class="row g-3 mb-4">
   <div class="col-6 col-lg-2">
@@ -233,7 +242,7 @@
           </tr></thead>
           <tbody>
             <% if (!o.grants.length) { %>
-              <tr><td colspan="6" class="text-muted small py-3">No access grants recorded in this scan.</td></tr>
+              <tr><td colspan="6" class="text-muted small py-3">No access grants recorded in this scan<%= (t.unreadable || 0) ? " — " + t.unreadable + " workspace(s) could not be read" : "" %>.</td></tr>
             <% } %>
             <% o.grants.forEach(function(g) { %>
               <tr data-search="<%= [g.workspaceName || '', g.displayName || '', g.email || ''].join(' ').toLowerCase() %>"

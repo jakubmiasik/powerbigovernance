@@ -20,6 +20,7 @@ const {
 const { SCHEDULE_TYPES } = require('../services/scheduleDueService');
 const { convertScheduleToUtc } = require('../services/scheduleTimeService');
 const { visibleRuns, tenantsForSection, canUseSectionInTenant } = require('../services/permissionService');
+const { readWorkspaceAccess } = require('../services/workspaceAccessScanService');
 
 /**
  * The tenants this user may act on.
@@ -719,43 +720,61 @@ async function runAnalysis(runId, sp, authOptions = {}, scopeInput = null) {
     }
     completePhase(progress, 'workspaceDetails');
 
-    beginPhase(progress, 'access', { total: workspaces.length, message: 'Fetching workspace users...' });
-    const batchSize = 10;
-    let usersFetched = 0;
-    let userFetchFailures = 0;
-    for (let i = 0; i < workspaces.length; i += batchSize) {
-      ensureNotCancelled(progress);
-      const batch = workspaces.slice(i, i + batchSize);
-      setProgress(progress, { detail: 'Reading access for ' + batch.map(ws => ws.displayName || ws.name || ws.id).slice(0, 3).join(', ') + (batch.length > 3 ? ' and ' + (batch.length - 3) + ' more' : '') });
-      const userResults = await Promise.allSettled(batch.map((ws) => pbi.getWorkspaceUsers(ws.id)));
-      ensureNotCancelled(progress);
-      userFetchFailures += userResults.filter(r => r.status === 'rejected').length;
-      for (let j = 0; j < userResults.length; j += 1) {
-        if (userResults[j].status === 'fulfilled') {
-          const users = userResults[j].value;
-          const wsDetail = workspaceDetails.find((workspace) => workspace.id === batch[j].id);
-          if (wsDetail) {
-            wsDetail.userCount = users.length;
-            wsDetail.users = users.map((user) => ({
-              name: user.displayName,
-              email: user.emailAddress,
-              role: user.groupUserAccessRight,
-              type: user.principalType,
-            }));
-          }
-          users.forEach((user) => allUsers.add(user.emailAddress || user.displayName || user.identifier));
-        }
+    // ── Access ──
+    // Read through the admin scanner, 100 workspaces per request, with the
+    // per-workspace endpoint only for what the scanner did not answer. A workspace
+    // nobody could read is stored as not readable, never as one with nobody in it.
+    beginPhase(progress, 'access', { total: workspaces.length, message: 'Reading workspace access...' });
+    const accessApi = {
+      startAccessScan: typeof pbi.startAccessScan === 'function' ? (ids) => pbi.startAccessScan(ids) : undefined,
+      getScanStatus: (id) => pbi.getScanStatus(id),
+      getScanResult: (id) => pbi.getScanResult(id),
+      readWorkspaceUsers: (id) => (typeof pbi.readWorkspaceUsers === 'function'
+        ? pbi.readWorkspaceUsers(id) : pbi.getWorkspaceUsers(id)),
+    };
+    const access = await readWorkspaceAccess(accessApi, workspaces.map(ws => ws.id), {
+      shouldStop: () => ensureNotCancelled(progress),
+      onProgress: ({ done, total, stage }) => {
+        setProgress(progress, { current: done });
+        advancePhase(progress, 'access', {
+          done,
+          message: (stage === 'scanner' ? 'Reading access through the scanner: ' : 'Reading access one workspace at a time: ')
+            + done + ' / ' + total + ' workspaces...',
+        });
+      },
+    });
+    ensureNotCancelled(progress);
+    const unreadAccess = new Set(access.unread);
+    for (const wsDetail of workspaceDetails) {
+      if (unreadAccess.has(wsDetail.id) || !access.users.has(wsDetail.id)) {
+        wsDetail.usersReadable = false;
+        wsDetail.userCount = null;
+        wsDetail.users = [];
+        continue;
       }
-      usersFetched = Math.min(i + batchSize, workspaces.length);
-      setProgress(progress, { current: usersFetched });
-      advancePhase(progress, 'access', {
-        done: usersFetched,
-        message: 'Fetching users: ' + usersFetched + ' / ' + workspaces.length + ' workspaces...',
-      });
+      const users = access.users.get(wsDetail.id) || [];
+      wsDetail.usersReadable = true;
+      wsDetail.userCount = users.length;
+      wsDetail.users = users.map((user) => ({
+        name: user.displayName,
+        email: user.emailAddress,
+        role: user.groupUserAccessRight,
+        type: user.principalType,
+        id: user.graphId || user.identifier || null,
+      }));
+      users.forEach((user) => allUsers.add(user.emailAddress || user.displayName || user.identifier));
     }
+    const userFetchFailures = access.unread.length;
     completePhase(progress, 'access', { note: userFetchFailures ? userFetchFailures + ' not readable' : null });
+    if (access.scannerError) {
+      addProgressEvent(progress, 'warning', 'The admin scanner could not read access (' + access.scannerError
+        + '); fell back to one request per workspace for ' + access.viaFallback + ' workspace(s).');
+    } else {
+      addProgressEvent(progress, 'info', 'Access read for ' + access.viaScanner + ' workspace(s) through the admin scanner'
+        + (access.viaFallback ? ' and ' + access.viaFallback + ' one at a time.' : '.'));
+    }
     if (userFetchFailures) {
-      addProgressEvent(progress, 'warning', userFetchFailures + ' workspace(s) would not return their access list — usually missing permission');
+      addProgressEvent(progress, 'warning', userFetchFailures + ' workspace(s) would not return their access list — usually missing permission or the hourly API limit. They are stored as not readable.');
     }
 
     // ── OneLake Storage Scan ──

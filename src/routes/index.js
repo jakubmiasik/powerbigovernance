@@ -16,11 +16,14 @@ router.get('/', (req, res) => {
     defaultTenantId: getConfig().governance.tenantId,
     selectedRun: res.locals.globalRun,
   });
+  const selected = res.locals.globalRun;
+  const outcomeRunId = selected && picked.tenantId && outcomes.normalizeTenantId(selected.tenant_id) === picked.tenantId ? selected.id : null;
   res.render('home', {
     title: 'Home', user: req.user, breadcrumb: [{ label: 'Home', href: '/' }],
     prerequisites: PREREQUISITES,
     outcomeTenants,
     outcomeTenantId: picked.tenantId || null,
+    outcomeRunId,
   });
 });
 
