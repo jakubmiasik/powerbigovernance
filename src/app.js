@@ -26,6 +26,8 @@ app.set('view engine', 'ejs');
 
 // Middleware
 app.use(securityHeaders);
+// Time spent in SQL per request: a Server-Timing header, and a log line when slow.
+app.use(require('./services/requestTimingService').middleware());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Every view names scans the same way: principal and that principal's scan number.
