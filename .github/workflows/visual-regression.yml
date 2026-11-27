@@ -17,18 +17,13 @@ on:
   workflow_dispatch:
 
 permissions:
-  # Write, so the first run on a pull request can commit the baselines it recorded.
-  contents: write
+  contents: read
 
 jobs:
   visual:
     runs-on: ubuntu-latest
     steps:
-      # The branch itself rather than the merge commit, so recorded baselines can
-      # be pushed back to it.
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -75,22 +70,6 @@ jobs:
           else
             echo "::warning::No screen baselines committed yet; recording them. Commit visual/__screenshots__ from the visual-regression artifact."
             npm run test:visual:update
-          fi
-
-      # Baselines are committed, not only uploaded: a run without them compares
-      # nothing. Only for pull requests from this repository, whose branch the
-      # token may push to.
-      - name: Commit recorded baselines
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add visual/__screenshots__ packages/podavo-ui/tests/__screenshots__ 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "Baselines already committed."
-          else
-            git commit -m "Record visual regression baselines"
-            git push origin HEAD:${{ github.head_ref }}
           fi
 
       - name: Upload report and new baselines
