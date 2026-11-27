@@ -10,6 +10,7 @@ const { SECURITY_GROUP_MIGRATIONS } = require('./securityGroupSchema');
 const { PERMISSION_MIGRATIONS } = require('./permissionSchema');
 const { AUDIT_MIGRATIONS } = require('./auditSchema');
 const { encryptSecret, isEncryptionConfigured } = require('./secretCryptoService');
+const requestTiming = require('./requestTimingService');
 
 const cfg = getConfig();
 const SQL_SERVER = cfg.sql.server;
@@ -27,7 +28,7 @@ async function getToken() {
   return response.token;
 }
 
-function getConnection() {
+function openConnection() {
   return new Promise(async (resolve, reject) => {
     try {
       if (!SQL_SERVER || !SQL_DATABASE) {
@@ -61,10 +62,124 @@ function getConnection() {
   });
 }
 
+// ── Connection pool ──
+// Opening a connection to Azure SQL costs a TCP and TLS handshake plus an Entra
+// sign-in — commonly 100–300 ms, more across regions — and every query used to
+// pay it, so a page making eight queries spent most of its time connecting.
+// Connections are now kept and reused. Callers are unchanged: `getConnection()`
+// still hands out a connection, and `close()` on it returns it to the pool.
+// A connection is used by one caller at a time (tedious runs one request per
+// connection), is dropped after an error, and is replaced after MAX_AGE so a
+// session never outlives the token it signed in with by long.
+const POOL_MAX = Math.max(1, Number.parseInt(process.env.SQL_POOL_MAX || '10', 10) || 10);
+const POOL_IDLE_MS = 5 * 60 * 1000;
+const POOL_MAX_AGE_MS = 30 * 60 * 1000;
+const POOL_WAIT_MS = 30000;
+
+const pool = { idle: [], total: 0, waiters: [], opened: 0, reused: 0 };
+let opener = openConnection; // replaced in tests only
+
+function poolStats() {
+  return { idle: pool.idle.length, inUse: pool.total - pool.idle.length, total: pool.total, waiting: pool.waiters.length, opened: pool.opened, reused: pool.reused, max: POOL_MAX };
+}
+
+function destroyEntry(entry) {
+  pool.total = Math.max(0, pool.total - 1);
+  try { entry.realClose(); } catch { /* already closed */ }
+}
+
+function usable(entry) {
+  return !entry.broken && Date.now() - entry.createdAt < POOL_MAX_AGE_MS;
+}
+
+function lease(entry) {
+  let released = false;
+  entry.conn.close = () => {
+    if (released) return;
+    released = true;
+    release(entry);
+  };
+  return entry.conn;
+}
+
+function release(entry) {
+  if (!usable(entry)) {
+    destroyEntry(entry);
+    serveWaiters();
+    return;
+  }
+  const waiter = pool.waiters.shift();
+  if (waiter) {
+    clearTimeout(waiter.timer);
+    pool.reused += 1;
+    waiter.resolve(lease(entry));
+    return;
+  }
+  entry.lastUsed = Date.now();
+  pool.idle.push(entry);
+}
+
+// A slot freed by a dropped connection goes to the next caller in line.
+function serveWaiters() {
+  while (pool.waiters.length && pool.total < POOL_MAX) {
+    const waiter = pool.waiters.shift();
+    clearTimeout(waiter.timer);
+    createEntry().then(entry => waiter.resolve(lease(entry)), waiter.reject);
+  }
+}
+
+async function createEntry() {
+  pool.total += 1;
+  try {
+    const conn = await opener();
+    pool.opened += 1;
+    const entry = { conn, createdAt: Date.now(), lastUsed: Date.now(), broken: false, realClose: conn.close.bind(conn) };
+    // A connection that errors or ends is never handed out again.
+    conn.on('error', () => { entry.broken = true; });
+    conn.on('end', () => { entry.broken = true; });
+    return entry;
+  } catch (err) {
+    pool.total = Math.max(0, pool.total - 1);
+    throw err;
+  }
+}
+
+async function getConnection() {
+  while (pool.idle.length) {
+    const entry = pool.idle.pop();
+    if (usable(entry)) {
+      pool.reused += 1;
+      return lease(entry);
+    }
+    destroyEntry(entry);
+  }
+  if (pool.total < POOL_MAX) return lease(await createEntry());
+  return new Promise((resolve, reject) => {
+    const waiter = { resolve, reject, timer: null };
+    waiter.timer = setTimeout(() => {
+      pool.waiters.splice(pool.waiters.indexOf(waiter), 1);
+      reject(new Error('All ' + POOL_MAX + ' database connections are busy; try again.'));
+    }, POOL_WAIT_MS);
+    pool.waiters.push(waiter);
+  });
+}
+
+// Idle connections are closed after a while, so a quiet app holds none.
+const poolSweeper = setInterval(() => {
+  const now = Date.now();
+  pool.idle = pool.idle.filter((entry) => {
+    if (now - entry.lastUsed > POOL_IDLE_MS || !usable(entry)) { destroyEntry(entry); return false; }
+    return true;
+  });
+}, 60 * 1000);
+if (poolSweeper.unref) poolSweeper.unref();
+
 function execSql(conn, sql, params = []) {
+  const started = process.hrtime.bigint();
   return new Promise((resolve, reject) => {
     const rows = [];
     const request = new Request(sql, (err, rowCount) => {
+      requestTiming.recordQuery(Number(process.hrtime.bigint() - started) / 1e6);
       if (err) reject(err);
       else resolve(rows);
     });
@@ -388,6 +503,7 @@ async function createAnalysisRun({ spId, spName, tenantId, runBy, scopeKind, sco
 }
 
 async function updateAnalysisRun(id, data) {
+  forgetRun(id);
   const conn = await getConnection();
   try {
     await execSql(
@@ -475,19 +591,53 @@ async function getAnalysisRunMeta(id) {
   }
 }
 
+// ── Completed runs, kept in memory ──
+// A completed scan's row carries its whole result document, often megabytes,
+// and nearly every page asked the database for it again on each request. It only
+// changes through this process (storage refresh, indexing, a workspace marked
+// deleted), and each of those writes drops it from here. Callers still parse it
+// themselves, so no request can change another request's copy.
+const RUN_ROW_CACHE_MAX = Math.max(0, Number.parseInt(process.env.RUN_ROW_CACHE_MAX || '4', 10));
+const RUN_ROW_CACHE_TTL_MS = 10 * 60 * 1000;
+const runRowCache = new Map(); // id → { row, expiresAt }, oldest first
+
+function forgetRun(id) {
+  runRowCache.delete(Number(id));
+}
+
+function rememberRun(row) {
+  if (!RUN_ROW_CACHE_MAX || !row || row.status !== 'completed') return;
+  const id = Number(row.id);
+  runRowCache.delete(id);
+  runRowCache.set(id, { row, expiresAt: Date.now() + RUN_ROW_CACHE_TTL_MS });
+  while (runRowCache.size > RUN_ROW_CACHE_MAX) runRowCache.delete(runRowCache.keys().next().value);
+}
+
 async function getAnalysisRunById(id) {
+  const key = Number(id);
+  const cached = runRowCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    // Most recently used goes to the back of the line.
+    runRowCache.delete(key);
+    runRowCache.set(key, cached);
+    requestTiming.recordCacheHit();
+    return { ...cached.row };
+  }
   const conn = await getConnection();
   try {
     const rows = await execSql(conn, 'SELECT * FROM analysis_runs WHERE id=@id', [
       { name: 'id', type: TYPES.Int, value: id },
     ]);
-    return rows[0] || null;
+    const row = rows[0] || null;
+    rememberRun(row);
+    return row ? { ...row } : null;
   } finally {
     conn.close();
   }
 }
 
 async function deleteAnalysisRun(id) {
+  forgetRun(id);
   const conn = await getConnection();
   try {
     for (const table of [
@@ -878,6 +1028,7 @@ async function markWorkspaceDeletedInRuns(workspaceId) {
       if (!workspace || workspace.state === WORKSPACE_STATE_DELETED) continue;
       workspace.state = WORKSPACE_STATE_DELETED;
       workspace.deletedAt = new Date().toISOString();
+      forgetRun(run.id);
       await execSql(conn, 'UPDATE analysis_runs SET results_json=@json WHERE id=@id', [
         { name: 'json', type: TYPES.NVarChar, value: JSON.stringify(results) },
         { name: 'id', type: TYPES.Int, value: run.id },
@@ -1695,5 +1846,11 @@ module.exports = {
   _private: { buildInsert, buildUpdate, extractProblemColumns, RUN_META_COLUMNS, RUN_META_COLUMNS_LEGACY },
   // SQL primitives shared with feature-specific repositories.
   _sql: { getConnection, execSql, TYPES, execWithColumnFallback, buildInsert, buildUpdate },
+  _pool: {
+    poolStats, runRowCache, forgetRun, POOL_MAX,
+    // Tests only: open connections with a fake, and start from an empty pool.
+    useOpener(fn) { opener = fn || openConnection; },
+    reset() { pool.idle.splice(0).forEach(destroyEntry); pool.total = 0; pool.waiters.length = 0; pool.opened = 0; pool.reused = 0; runRowCache.clear(); },
+  },
   _runNumbers: { RUN_NUMBER_BACKFILL_SQL, ASSIGN_RUN_NUMBER_SQL, assignRunNumber },
 };
