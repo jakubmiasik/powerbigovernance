@@ -6,6 +6,21 @@ const { createPowerBIService } = require('../services/powerbiService');
 const { executeCapacityActionWithService } = require('../services/capacityActionService');
 const { normalizeTimezone, convertScheduleToUtc } = require('../services/scheduleTimeService');
 const { kickScheduler, getSchedulerStatus, runSchedulerNow } = require('../services/schedulerService');
+const { listVisibleArmCapacities, describeArmAccess } = require('../services/capacityArmService');
+
+// The capacities the principal can see in Azure. Never fatal: the list and the
+// detail page still work without it, they only cannot fill in where each one lives.
+async function armCapacitiesFor(pbi, res) {
+  const sp = res && res.locals && res.locals.globalRun ? res.locals.globalRun.sp_id : null;
+  try {
+    return await listVisibleArmCapacities(pbi, {
+      configuredSubscriptionId: process.env.AZURE_SUBSCRIPTION_ID || null,
+      cacheKey: sp ? 'sp:' + sp : null,
+    });
+  } catch (err) {
+    return { capacities: [], error: err.message };
+  }
+}
 
 function formatUtcScheduleLabel(scheduleType, utcSchedule) {
   if (!utcSchedule || utcSchedule.scheduleMinuteUtc == null) return null;
@@ -100,10 +115,12 @@ router.get('/', async (req, res) => {
   try {
     const pbi = await getPbiService(req, res);
     const capacities = await pbi.getCapacities();
+    const arm = await armCapacitiesFor(pbi, res);
     res.render('capacities/list', {
       title: 'Capacities',
       user: req.user,
-      capacities,
+      capacities: capacities.map(capacity => ({ ...capacity, armAccess: describeArmAccess(capacity, arm.capacities) })),
+      armError: arm.error,
       breadcrumb: [{ label: 'Capacities', href: '/capacities' }],
     });
   } catch (err) {
@@ -152,32 +169,11 @@ router.get('/:id', async (req, res) => {
       return res.render('error', { title: 'Error', user: req.user, message: 'Capacity not found.' });
     }
 
-    // Try to get ARM details if subscription info is configured
-    let armDetail = null;
-    const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID;
-    if (subscriptionId) {
-      try {
-        const armCaps = await pbi.listArmCapacities(subscriptionId);
-        armDetail = armCaps.find(c =>
-          (c.name || '').toLowerCase() === (capacity.displayName || '').toLowerCase() ||
-          (c.properties?.administrationMembers || []).length > 0
-        );
-        // Better match: find by capacity ID from ARM properties
-        if (!armDetail) {
-          armDetail = armCaps.find(c =>
-            c.id && c.id.toLowerCase().includes(req.params.id.toLowerCase())
-          );
-        }
-        // Match by display name
-        if (!armDetail) {
-          armDetail = armCaps.find(c =>
-            (c.name || '').toLowerCase() === (capacity.displayName || '').toLowerCase()
-          );
-        }
-      } catch (armErr) {
-        armDetail = { error: armErr.message };
-      }
-    }
+    // Where the capacity lives in Azure, when the principal can see it there.
+    const arm = await armCapacitiesFor(pbi, res);
+    const armAccess = describeArmAccess(capacity, arm.capacities);
+    const armDetail = armAccess.arm || (arm.error ? { error: arm.error } : null);
+    const subscriptionId = armAccess.subscriptionId || process.env.AZURE_SUBSCRIPTION_ID || '';
 
     // Get schedules for this capacity
     const allSchedules = await db.getCapacitySchedules();
@@ -200,6 +196,7 @@ router.get('/:id', async (req, res) => {
       history,
       schedulerStatus,
       subscriptionId: subscriptionId || '',
+      armAccess,
       breadcrumb: [{ label: 'Capacities', href: '/capacities' }, { label: capacity.displayName || 'Detail', href: '#' }],
     });
   } catch (err) {

@@ -200,7 +200,7 @@
       h('div', null, [h('span', { class: 'go-big', text: a.adminSharePct === null ? 'Unknown' : a.adminSharePct + '%' }), h('span', { class: 'go-dim', text: ' Admin share · ' + num(a.adminAssignments) + ' of ' + num(a.totalAssignments) + ' assignments' })]),
       h('div', null, [h('span', { class: 'go-big', text: num(a.groupAssignments) }), h('span', { class: 'go-dim', text: ' group assignments' })]),
     ]);
-    var banner = a.isLatestRun ? null : h('div', { class: 'go-banner', role: 'note', text: 'Access data from ' + a.label + ' (' + utc(a.completedAt) + '); latest run has no access data.' });
+    var banner = a.isLatestRun ? null : h('div', { class: 'go-banner', role: 'note', text: 'Access data from ' + a.label + ' (' + utc(a.completedAt) + '): ' + (o.run.label || 'the shown scan') + ' recorded no access, so access and F3 are read from the earlier scan.' });
     return card('Access', 'key-round', [banner, facts, bars, legend], null, 'As of ' + a.label);
   }
 

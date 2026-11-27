@@ -37,8 +37,13 @@ const { pickTenantWideRun, isTenantWide, scopeFromRow, describeScope } = require
  * saw. Saying which run, and when it ran, is the difference between a report
  * somebody can act on and one they have to distrust.
  */
-async function resolveRun(requestedId) {
-  const runs = (await db.getAnalysisRuns()).filter(run => run.status === 'completed');
+async function resolveRun(requestedId, locals = {}) {
+  // Only the scans this user may see — the same list the scan selector offers, so
+  // a tenant someone has no grant for is not one query-string edit away.
+  const permitted = Array.isArray(locals.availableRuns)
+    ? locals.availableRuns
+    : await db.getAnalysisRuns();
+  const runs = permitted.filter(run => run.status === 'completed');
   if (!runs.length) return { runs: [], run: null };
 
   const wanted = Number.parseInt(requestedId, 10);
@@ -47,12 +52,19 @@ async function resolveRun(requestedId) {
     if (asked) return { runs, run: asked };
   }
 
-  // The default has to be a whole-tenant scan. Every figure on this page is about
-  // the tenant — how many workspaces nobody administers, who holds admin anywhere —
-  // and a scan of three workspaces would not be wrong about those three, it would
-  // be wrong about everything else and silently. A scoped run is only the default
-  // when there is no tenant-wide one to prefer, and the page says so.
-  return { runs, run: pickTenantWideRun(runs) || runs[0] };
+  // The scan selected in the header decides the tenant. Within it the default has
+  // to be a whole-tenant scan: every figure on this page is about the tenant — how
+  // many workspaces nobody administers, who holds admin anywhere — and a scan of
+  // three workspaces would be wrong about everything else and silently. A scoped
+  // run is only the default when there is no tenant-wide one, and the page says so.
+  const selected = locals.globalRun
+    ? runs.find(candidate => Number(candidate.id) === Number(locals.globalRun.id)) || null
+    : null;
+  if (selected && isTenantWide(selected)) return { runs, run: selected };
+  const sameTenant = selected
+    ? runs.filter(candidate => String(candidate.tenant_id || '') === String(selected.tenant_id || ''))
+    : runs;
+  return { runs, run: pickTenantWideRun(sameTenant) || selected || pickTenantWideRun(runs) || runs[0] };
 }
 
 /**
@@ -105,7 +117,7 @@ router.get('/', async (req, res) => {
     partialScope: false,
   };
   try {
-    const { runs, run } = await resolveRun(req.query.accessRunId);
+    const { runs, run } = await resolveRun(req.query.accessRunId, res.locals);
     const servicePrincipals = await db.getServicePrincipals();
 
     if (!run) {
@@ -141,7 +153,7 @@ router.get('/', async (req, res) => {
  */
 router.get('/workspaces', async (req, res) => {
   try {
-    const { run } = await resolveRun(req.query.accessRunId);
+    const { run } = await resolveRun(req.query.accessRunId, res.locals);
     if (!run) return res.json({ success: false, message: 'No completed analysis run found. Run an analysis first.' });
 
     const spId = Number.parseInt(req.query.spId, 10);
@@ -282,7 +294,7 @@ router.get('/roles/candidates', async (req, res) => {
     const objectId = String(sp.enterprise_app_object_id || '').trim().toLowerCase();
     if (objectId) {
       try {
-        const { run } = await resolveRun(req.query.accessRunId);
+        const { run } = await resolveRun(req.query.accessRunId, res.locals);
         if (run) {
           const { overview } = await loadAccess(run.id);
           for (const workspace of overview.workspaces) {
@@ -476,3 +488,4 @@ router.post('/pending', (req, res) => {
 });
 
 module.exports = router;
+module.exports._resolveRun = resolveRun;

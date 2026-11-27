@@ -10,13 +10,12 @@
   var sku = (cap.sku || '').toUpperCase();
   var licType = sku.startsWith('F') && sku !== 'FREE' ? 'Fabric' : sku === 'PPU' ? 'PPU' : sku.startsWith('P') || sku.startsWith('EM') || sku.startsWith('A') ? 'Premium' : 'Shared';
 
-  var armRg = '';
-  var armSub = subscriptionId || '';
-  if (arm && arm.id) {
-    var parts = arm.id.split('/');
-    var rgIdx = parts.indexOf('resourceGroups');
-    if (rgIdx >= 0) armRg = parts[rgIdx + 1] || '';
-  }
+  var access = (typeof armAccess !== 'undefined' && armAccess) ? armAccess : { status: 'no-access' };
+  var armRg = access.resourceGroup || '';
+  var armSub = access.subscriptionId || subscriptionId || '';
+  // Read from Azure, so not for typing over: a hand-edited resource group is how a
+  // pause lands on the wrong capacity.
+  var armLocked = access.status === 'reachable' && !!armSub && !!armRg;
 %>
 
 <div class="mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
@@ -117,9 +116,17 @@
         </div>
       <% } else { %>
         <div class="card-body">
+          <% if (access.status === 'not-azure') { %>
+          <div class="alert alert-secondary small mb-0">
+            <i class="bi bi-info-circle me-1"></i>
+            <strong>Not an Azure resource.</strong> Only Fabric F SKUs are paused and resumed in Azure; a
+            <%= sku || 'capacity of this type' %> capacity (Premium, Premium Per User or a Fabric trial) is not, so there
+            is nothing to read or pause here.
+          </div>
+          <% } else { %>
           <div class="alert alert-warning small mb-0">
             <i class="bi bi-exclamation-triangle me-1"></i>
-            <strong>Azure Resource details unavailable.</strong><br>
+            <strong>Service principal does not have access to this capacity in Azure.</strong><br>
             <% if (armError) { %>
               <span class="text-muted"><%= armError %></span><br>
             <% } %>
@@ -127,11 +134,12 @@
             <hr class="my-2">
             <small>Ensure:</small>
             <ul class="small mb-0 mt-1">
-              <li><code>AZURE_SUBSCRIPTION_ID</code> is set in App Settings</li>
+              <li>The capacity's subscription is one the SP can list, or <code>AZURE_SUBSCRIPTION_ID</code> is set in App Settings</li>
               <li>The SP has <strong>Reader</strong> role on the subscription or resource group containing the capacity</li>
               <li>For Pause/Resume: SP needs <strong>Contributor</strong> role on the capacity resource</li>
             </ul>
           </div>
+          <% } %>
         </div>
       <% } %>
     </div>
@@ -142,14 +150,26 @@
 <div class="card mb-4">
   <div class="card-header"><i class="bi bi-gear me-2"></i>Pause / Resume</div>
   <div class="card-body">
+    <% if (armLocked) { %>
+      <div class="small text-muted mb-2" id="armLockedNote">
+        <i class="bi bi-lock me-1"></i>Read from Azure: the service principal can see this capacity, so its subscription
+        and resource group are filled in and cannot be edited.
+      </div>
+    <% } else if (access.status === 'no-access') { %>
+      <div class="small text-warning-emphasis mb-2" id="armNoAccessNote">
+        <i class="bi bi-shield-exclamation me-1"></i>Service principal does not have access to this capacity in Azure.
+        Enter the subscription and resource group by hand, or give the principal Reader on the capacity so they are read
+        for you. Pausing needs Contributor.
+      </div>
+    <% } %>
     <div class="row g-2 align-items-end">
       <div class="col-auto">
-        <label class="form-label small">Subscription ID</label>
-        <input type="text" class="form-control form-control-sm" id="armSubscription" value="<%= armSub %>" style="width:300px;" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+        <label class="form-label small" for="armSubscription">Subscription ID</label>
+        <input type="text" class="form-control form-control-sm<%= armLocked ? ' bg-body-secondary text-body-secondary' : '' %>" id="armSubscription" value="<%= armSub %>" style="width:300px;" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"<%= armLocked ? ' readonly aria-readonly=true' : '' %>>
       </div>
       <div class="col-auto">
-        <label class="form-label small">Resource Group</label>
-        <input type="text" class="form-control form-control-sm" id="armResourceGroup" value="<%= armRg %>" style="width:200px;" placeholder="rg-my-fabric">
+        <label class="form-label small" for="armResourceGroup">Resource Group</label>
+        <input type="text" class="form-control form-control-sm<%= armLocked ? ' bg-body-secondary text-body-secondary' : '' %>" id="armResourceGroup" value="<%= armRg %>" style="width:200px;" placeholder="rg-my-fabric"<%= armLocked ? ' readonly aria-readonly=true' : '' %>>
       </div>
       <div class="col-auto">
         <button class="btn btn-sm btn-success" onclick="doAction('resume')">

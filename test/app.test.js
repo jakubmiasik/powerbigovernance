@@ -7731,7 +7731,7 @@ test('governance outcome: access, trend, deletions and data gaps follow the spec
   const gapIds = o.gaps.map(g => g.id);
   assert.ok(gapIds.includes('storage-not-collected'));
   assert.ok(gapIds.includes('access-older-run'));
-  assert.equal(o.gaps.find(g => g.id === 'access-older-run').message, 'Access data from SoftwareOne #11 (2026-11-25 18:10:00 UTC); latest run has no access data.');
+  assert.equal(o.gaps.find(g => g.id === 'access-older-run').message, 'Access data from SoftwareOne #11 (2026-11-25 18:10:00 UTC): SoftwareOne #12 recorded no access, so access and F3 are read from the earlier scan.');
   assert.equal(o.access.label, 'SoftwareOne #11');
   assert.ok(gapIds.includes('sku-not-recorded'));
 });
@@ -8219,4 +8219,176 @@ test('Home hands the selected scan to the outcome, and Getting Started sits abov
   const gs = html.indexOf('title="Getting Started" data-nav-group="Overview"');
   const home = html.indexOf('title="Home" data-nav-group="Overview"');
   assert.ok(gs > -1 && home > -1 && gs < home, 'Getting Started comes before Home in the menu');
+});
+
+// ── Access through the admin scanner, capacities in Azure, Run Analysis layout ──
+
+test('workspace access is read through the scanner, 100 at a time, with a fallback only for what it missed', async () => {
+  const { readWorkspaceAccess } = require('../src/services/workspaceAccessScanService');
+  const ids = Array.from({ length: 230 }, (_, i) => 'WS-' + i);
+  const started = [];
+  const perWorkspace = [];
+  const api = {
+    startAccessScan: async (batch) => { started.push(batch.length); return { id: 'scan-' + started.length }; },
+    getScanStatus: async () => ({ status: 'Succeeded' }),
+    getScanResult: async (scanId) => {
+      const n = Number(scanId.split('-')[1]);
+      const batch = ids.slice((n - 1) * 100, n * 100);
+      return { workspaces: batch.map(id => (id === 'WS-5'
+        ? { id: id.toLowerCase() } // answered without users: not read
+        : { id: id.toLowerCase(), users: [{ displayName: 'A', groupUserAccessRight: 'Admin', principalType: 'User' }] })) };
+    },
+    readWorkspaceUsers: async (id) => { perWorkspace.push(id); if (id === 'WS-5') throw new Error('429'); return []; },
+  };
+  const result = await readWorkspaceAccess(api, ids, { pollMs: 0 });
+  assert.deepEqual(started, [100, 100, 30], 'three scanner requests rather than 230 per-workspace calls');
+  assert.equal(result.viaScanner, 229);
+  assert.deepEqual(perWorkspace, ['WS-5'], 'only the workspace the scanner did not answer is asked one by one');
+  assert.deepEqual(result.unread, ['WS-5'], 'and a refusal there leaves it unread, not empty');
+  assert.equal(result.users.get('WS-0').length, 1);
+  assert.equal(result.users.has('WS-5'), false);
+});
+
+test('a scanner that fails entirely falls back to one request per workspace and says so', async () => {
+  const { readWorkspaceAccess } = require('../src/services/workspaceAccessScanService');
+  const api = {
+    startAccessScan: async () => { throw new Error('Unauthorized'); },
+    getScanStatus: async () => ({}), getScanResult: async () => ({}),
+    readWorkspaceUsers: async (id) => (id === 'b' ? Promise.reject(new Error('429')) : [{ displayName: 'X' }]),
+  };
+  const result = await readWorkspaceAccess(api, ['a', 'b', 'c'], { pollMs: 0 });
+  assert.equal(result.scannerError, 'Unauthorized');
+  assert.equal(result.viaFallback, 2);
+  assert.deepEqual(result.unread, ['b']);
+});
+
+test('a scan that never finishes stops waiting instead of hanging the run', async () => {
+  const { readWorkspaceAccess } = require('../src/services/workspaceAccessScanService');
+  let clock = 0;
+  const api = {
+    startAccessScan: async () => ({ id: 's' }),
+    getScanStatus: async () => ({ status: 'Running' }),
+    getScanResult: async () => { throw new Error('should not be read'); },
+    readWorkspaceUsers: async () => [],
+  };
+  const result = await readWorkspaceAccess(api, ['a'], { pollMs: 0, timeoutMs: 10, now: () => (clock += 5), sleep: async () => {} });
+  assert.match(result.scannerError, /did not finish/);
+  assert.equal(result.viaFallback, 1);
+});
+
+test('the analysis stores unreadable access as not readable, never as an empty workspace', () => {
+  const source = require('fs').readFileSync('src/routes/analysis.js', 'utf8');
+  assert.match(source, /readWorkspaceAccess\(accessApi/);
+  assert.match(source, /wsDetail\.usersReadable = false;/);
+  assert.doesNotMatch(source, /batch\.map\(\(ws\) => pbi\.getWorkspaceUsers/, 'no per-workspace loop as the main path');
+});
+
+test('Grant Access reads only scans the user may see, and follows the selected scan\'s tenant', async () => {
+  const { _resolveRun } = require('../src/routes/access');
+  const runs = [
+    { id: 40, status: 'completed', tenant_id: 'B', scope_kind: 'workspaces', scope_workspaces: '["x"]' },
+    { id: 39, status: 'completed', tenant_id: 'A' },
+    { id: 38, status: 'completed', tenant_id: 'B' },
+  ];
+  const picked = await _resolveRun(undefined, { availableRuns: runs, globalRun: runs[0] });
+  assert.equal(picked.run.id, 38, 'the whole-tenant scan of the selected scan\'s tenant');
+  const own = await _resolveRun(undefined, { availableRuns: runs, globalRun: runs[1] });
+  assert.equal(own.run.id, 39);
+  const foreign = await _resolveRun('99', { availableRuns: runs, globalRun: runs[1] });
+  assert.equal(foreign.run.id, 39, 'a scan outside the user\'s list is ignored');
+});
+
+test('Grant Access says a scan with no access recorded is a gap, not an empty tenant', async () => {
+  const ejs = require('ejs');
+  const overview = workspaceAccess.buildAccessOverview({ workspaces: [{ workspace_id: 'w1', name: 'Sales' }, { workspace_id: 'w2', name: 'Ops' }], grants: [] });
+  const html = await ejs.renderFile('src/views/access/index.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T', email: 't@example.com' },
+    currentPath: '/settings/access', breadcrumb: [], availableRuns: [], globalRun: null,
+    hideRunSelector: true, title: 'Grant Access',
+    accessLevels: workspaceAccess.ACCESS_LEVELS, principalTypes: workspaceAccess.PRINCIPAL_TYPES,
+    fabricRoles: workspaceAccess.FABRIC_ROLES,
+    accessLevel: workspaceAccess.accessLevel, principalTypeLabel: workspaceAccess.principalTypeLabel,
+    describeScope: analysisScope.describeScope, scopeFromRow: analysisScope.scopeFromRow,
+    partialScope: false, overview, indexed: true, error: null, grantAuth: false,
+    runs: [{ id: 9, started_at: '2026-08-01T00:00:00Z' }], run: { id: 9, started_at: '2026-08-01T00:00:00Z' },
+    servicePrincipals: [],
+  });
+  assert.match(html, /id="noAccessRecorded"/);
+  assert.match(html, /recorded <strong>no access at all<\/strong> across\s+2 workspace/);
+});
+
+test('a capacity is matched in Azure by name only, and its resource group is read from the resource id', () => {
+  const arm = require('../src/services/capacityArmService');
+  const armCaps = [
+    { name: 'otherCap', id: '/subscriptions/S1/resourceGroups/rg-x/providers/Microsoft.Fabric/capacities/otherCap', properties: { administration: { members: ['a'] } } },
+    { name: 'fabricprod', id: '/subscriptions/S2/resourceGroups/rg-fabric/providers/Microsoft.Fabric/capacities/fabricprod' },
+  ];
+  assert.deepEqual(arm.describeArmAccess({ displayName: 'FabricProd', sku: 'F64' }, armCaps),
+    { status: 'reachable', arm: armCaps[1], subscriptionId: 'S2', resourceGroup: 'rg-fabric' });
+  assert.equal(arm.describeArmAccess({ displayName: 'missing', sku: 'F2' }, armCaps).status, 'no-access',
+    'a capacity with admins listed is not a match for another one');
+  assert.equal(arm.describeArmAccess({ displayName: 'otherCap', sku: 'P1' }, armCaps).status, 'not-azure');
+  assert.equal(arm.describeArmAccess({ displayName: 'trial', sku: 'FT1' }, armCaps).status, 'not-azure');
+});
+
+test('capacities are looked up in every subscription the principal can list', async () => {
+  const arm = require('../src/services/capacityArmService');
+  arm.clearCache();
+  const asked = [];
+  const pbi = {
+    listSubscriptions: async () => [{ subscriptionId: 'S2' }, { subscriptionId: 'S1' }],
+    listArmCapacities: async (sub) => { asked.push(sub); if (sub === 'S1') throw new Error('403'); return [{ name: 'c-' + sub }]; },
+  };
+  const found = await arm.listVisibleArmCapacities(pbi, { configuredSubscriptionId: 'S1' });
+  assert.deepEqual(asked.sort(), ['S1', 'S2']);
+  assert.deepEqual(found, { capacities: [{ name: 'c-S2' }], error: null });
+
+  const none = await arm.listVisibleArmCapacities({ listSubscriptions: async () => { throw new Error('No Azure access'); }, listArmCapacities: async () => [] }, {});
+  assert.deepEqual(none, { capacities: [], error: 'No Azure access' });
+});
+
+test('Pause / Resume locks the subscription and resource group when they were read from Azure', async () => {
+  const ejs = require('ejs');
+  const common = {
+    user: { name: 'T' }, currentUser: { name: 'T', email: 't@example.com' }, currentPath: '/capacities/c1', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Capacity',
+    capacity: { id: 'c1', displayName: 'fabricprod', sku: 'F64', state: 'Active' },
+    schedules: [], history: [], schedulerStatus: {},
+  };
+  const reachable = await ejs.renderFile('src/views/capacities/detail.ejs', {
+    ...common, subscriptionId: 'S2',
+    armDetail: { id: '/subscriptions/S2/resourceGroups/rg-fabric/providers/Microsoft.Fabric/capacities/fabricprod', name: 'fabricprod', properties: { state: 'Active' } },
+    armAccess: { status: 'reachable', subscriptionId: 'S2', resourceGroup: 'rg-fabric' },
+  });
+  assert.match(reachable, /id="armSubscription" value="S2"[^>]* readonly/);
+  assert.match(reachable, /id="armResourceGroup" value="rg-fabric"[^>]* readonly/);
+  assert.match(reachable, /bg-body-secondary/);
+
+  const blocked = await ejs.renderFile('src/views/capacities/detail.ejs', {
+    ...common, subscriptionId: '', armDetail: { error: '403' }, armAccess: { status: 'no-access' },
+  });
+  assert.doesNotMatch(blocked, /id="armSubscription"[^>]* readonly/);
+  assert.match(blocked, /Service principal does not have access to this capacity in Azure/);
+});
+
+test('the Capacities list marks each capacity the service principal cannot reach in Azure', async () => {
+  const ejs = require('ejs');
+  const html = await ejs.renderFile('src/views/capacities/list.ejs', {
+    user: { name: 'T' }, currentUser: { name: 'T', email: 't@example.com' }, currentPath: '/capacities', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, title: 'Capacities', armError: null,
+    capacities: [
+      { id: 'a', displayName: 'ok', sku: 'F2', armAccess: { status: 'reachable' } },
+      { id: 'b', displayName: 'blocked', sku: 'F4', armAccess: { status: 'no-access' } },
+      { id: 'c', displayName: 'premium', sku: 'P1', armAccess: { status: 'not-azure' } },
+    ],
+  });
+  assert.equal((html.match(/cap-no-sp-access/g) || []).length, 1);
+  assert.match(html, /Service principal does not have access/);
+  assert.match(html, /Not an Azure resource/);
+});
+
+test('Run Analysis puts its hint above the button, so the button lines up with the select', () => {
+  const view = require('fs').readFileSync('src/views/analysis/index.ejs', 'utf8');
+  assert.match(view, /<label for="runAnalysisBtn" class="form-label">Scan &mdash; you choose the scope next<\/label>\s*<button class="btn btn-primary w-100" id="runAnalysisBtn"/);
+  assert.doesNotMatch(view, /form-text text-center">You choose the scope next/);
 });
