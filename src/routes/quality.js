@@ -12,6 +12,9 @@ const securityGroups = require('../services/securityGroupGuideService');
 const sgMapping = require('../services/securityGroupMappingService');
 const sgRepo = require('../services/securityGroupRepository');
 const { ACCESS_LEVELS } = require('../services/workspaceAccessService');
+const sgPeople = require('../services/securityGroupPeopleService');
+const { tenantsForSection, canUseSectionInTenant } = require('../services/permissionService');
+const { isTenantWide } = require('../services/analysisScopeService');
 // Looked up on each call rather than destructured once, so a test can substitute
 // it — destructuring captures the function at load and the stub is ignored.
 const powerbi = require('../services/powerbiService');
@@ -124,6 +127,48 @@ router.get('/', async (req, res) => {
 });
 
 
+
+// ── Security groups: one tenant at a time ──
+
+/**
+ * The tenant a Security Groups request acts on: the one asked for (spId), the
+ * selected scan's, or the first the user holds the section in. A tenant the user
+ * was not granted is refused, never quietly swapped.
+ */
+async function sgTenant(req, res) {
+  const all = await db.getServicePrincipals().catch(() => []);
+  const permitted = tenantsForSection(req.permissions || res.locals.permissions, 'security-groups', all);
+  const asked = Number.parseInt((req.body && req.body.spId) || req.query.spId, 10);
+  if (Number.isFinite(asked)) {
+    if (!canUseSectionInTenant(req.permissions || res.locals.permissions, 'security-groups', asked)) {
+      const err = new Error('You do not have Security Groups in that tenant.');
+      err.status = 403;
+      throw err;
+    }
+    const sp = permitted.find(candidate => Number(candidate.id) === asked);
+    if (!sp) { const err = new Error('That tenant is not configured.'); err.status = 404; throw err; }
+    return { sp, tenantId: String(sp.tenant_id || '').toLowerCase(), permitted };
+  }
+  const run = res.locals.globalRun;
+  const sp = (run && permitted.find(candidate => Number(candidate.id) === Number(run.sp_id))) || permitted[0] || null;
+  return { sp, tenantId: sp ? String(sp.tenant_id || '').toLowerCase() : null, permitted };
+}
+
+function sgFail(res, err) {
+  return res.status(err.status || 200).json({ success: false, message: err.message });
+}
+
+/** The newest whole-tenant scan of this tenant that recorded access, and its rows. */
+async function tenantAccessRows(tenantId, availableRuns) {
+  const runs = (availableRuns || await db.getAnalysisRuns())
+    .filter(run => run.status === 'completed' && String(run.tenant_id || '').toLowerCase() === tenantId && isTenantWide(run));
+  for (const run of runs.slice(0, 5)) {
+    const rows = await analysisModel.listRunAccess(run.id).catch(() => []);
+    if (rows.length) return { run, rows };
+  }
+  return { run: runs[0] || null, rows: [] };
+}
+
 /**
  * Which security groups a Fabric tenant should have, who is in them, and whether
  * the tenant agrees.
@@ -164,23 +209,39 @@ router.get('/security-groups', async (req, res) => {
     tab: req.query.tab === 'design' ? 'design' : 'mapping',
   };
 
+  let tenant = { sp: null, tenantId: null, permitted: [] };
   try {
-    const [{ assignments, groups }, servicePrincipals] = await Promise.all([
-      sgRepo.loadMapping(),
-      db.getServicePrincipals().catch(() => []),
-    ]);
+    tenant = await sgTenant(req, res);
+  } catch (err) {
+    return view(res, 'quality/securityGroups', {
+      ...base, assignments: [], groups: [], servicePrincipals: [], tenantSp: null, people: [], peopleSummary: null,
+      peopleRun: null, groupOverview: [], error: err.message,
+    });
+  }
+  try {
+    if (!tenant.tenantId) throw new Error('No tenant is available to you for Security Groups.');
+    const { assignments, groups } = await sgRepo.loadMapping(tenant.tenantId);
+    const decoratedGroups = decorateGroups(groups, assignments);
+    const access = await tenantAccessRows(tenant.tenantId, res.locals.availableRuns);
+    const people = sgPeople.buildPeople(access.rows, assignments);
     view(res, 'quality/securityGroups', {
       ...base,
       assignments: decorateAssignments(assignments),
-      groups: decorateGroups(groups, assignments),
-      servicePrincipals,
+      groups: decoratedGroups,
+      servicePrincipals: tenant.permitted,
+      tenantSp: tenant.sp,
+      people,
+      peopleSummary: sgPeople.summarize(people),
+      peopleRun: access.run,
+      groupOverview: sgPeople.groupOverview(decoratedGroups),
       error: null,
     });
   } catch (err) {
     // The design half needs no database at all, so a database that is asleep or
     // unmigrated must not take the whole page down with it.
     view(res, 'quality/securityGroups', {
-      ...base, assignments: [], groups: [], servicePrincipals: [], error: err.message,
+      ...base, assignments: [], groups: [], servicePrincipals: tenant.permitted, tenantSp: tenant.sp,
+      people: [], peopleSummary: null, peopleRun: null, groupOverview: [], error: err.message,
     });
   }
 });
@@ -237,6 +298,7 @@ function decorateGroups(groups, assignments) {
 router.post('/security-groups/assignments', async (req, res) => {
   try {
     const body = req.body || {};
+    const { tenantId } = await sgTenant(req, res);
     const result = await sgRepo.saveAssignment({
       stream: body.stream,
       projectRole: body.projectRole,
@@ -244,19 +306,52 @@ router.post('/security-groups/assignments', async (req, res) => {
       email: body.email,
       environments: Array.isArray(body.environments) ? body.environments : [],
       note: body.note,
-    }, actorOf(req));
+    }, actorOf(req), tenantId);
     res.json({ success: true, ...result });
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    sgFail(res, err);
+  }
+});
+
+/**
+ * Adds everyone the scan found and nobody has mapped yet, as Other. A starting
+ * point: each row's role is then corrected one by one.
+ */
+router.post('/security-groups/people/other', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { tenantId } = await sgTenant(req, res);
+    const stream = sgMapping.normalizeStream(body.stream);
+    if (!stream) return res.json({ success: false, message: 'Choose the stream these people belong to first.' });
+    const environments = Array.isArray(body.environments) && body.environments.length ? body.environments : ['DEV'];
+    const { assignments } = await sgRepo.loadMapping(tenantId);
+    const access = await tenantAccessRows(tenantId, res.locals.availableRuns);
+    const unmapped = sgPeople.buildPeople(access.rows, assignments).filter(person => !person.mapped);
+    const actor = actorOf(req);
+    const failed = [];
+    let added = 0;
+    for (const person of unmapped) {
+      try {
+        await sgRepo.saveAssignment({ stream, projectRole: sgPeople.OTHER, name: person.name, email: person.email, environments }, actor, tenantId);
+        added += 1;
+      } catch (rowErr) {
+        failed.push({ name: person.name, reason: rowErr.message });
+      }
+    }
+    res.json({ success: true, added, failed });
+  } catch (err) {
+    sgFail(res, err);
   }
 });
 
 router.post('/security-groups/assignments/:id/delete', async (req, res) => {
   try {
+    const { tenantId } = await sgTenant(req, res);
+    await sgRepo.assertInTenant('assignment', req.params.id, tenantId);
     const result = await sgRepo.deleteAssignment(req.params.id);
     res.json({ success: true, ...result });
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    sgFail(res, err);
   }
 });
 
@@ -272,13 +367,14 @@ router.post('/security-groups/import', async (req, res) => {
   try {
     const parsed = sgMapping.parseMappingCsv((req.body || {}).csv || '');
     if (parsed.error) return res.json({ success: false, message: parsed.error });
+    const { tenantId } = await sgTenant(req, res);
 
     const actor = actorOf(req);
     const failed = [];
     let imported = 0;
     for (const assignment of parsed.assignments) {
       try {
-        await sgRepo.saveAssignment(assignment, actor);
+        await sgRepo.saveAssignment(assignment, actor, tenantId);
         imported += 1;
       } catch (rowErr) {
         failed.push({ name: assignment.name, reason: rowErr.message });
@@ -287,18 +383,19 @@ router.post('/security-groups/import', async (req, res) => {
 
     res.json({ success: true, imported, failed, skipped: parsed.skipped });
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    sgFail(res, err);
   }
 });
 
 router.get('/security-groups/export.csv', async (req, res) => {
   try {
-    const assignments = await sgRepo.listAssignments();
+    const { tenantId } = await sgTenant(req, res);
+    const assignments = await sgRepo.listAssignments(tenantId);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="fabric-security-mapping.csv"');
     res.send(sgMapping.toMappingCsv(assignments, sgMapping.DEFAULT_RULES));
   } catch (err) {
-    res.status(500).send('Could not export the mapping: ' + err.message);
+    res.status(err.status || 500).send('Could not export the mapping: ' + err.message);
   }
 });
 
@@ -307,21 +404,23 @@ router.post('/security-groups/groups/:id/link', async (req, res) => {
   try {
     const body = req.body || {};
     if (!body.id) return res.json({ success: false, message: 'Pick a group from the directory first.' });
+    await sgRepo.assertInTenant('group', req.params.id, (await sgTenant(req, res)).tenantId);
     await sgRepo.linkEntraGroup(req.params.id, {
       id: body.id, displayName: body.displayName, type: body.groupType || body.type,
     }, actorOf(req));
     res.json({ success: true });
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    sgFail(res, err);
   }
 });
 
 router.post('/security-groups/groups/:id/unlink', async (req, res) => {
   try {
+    await sgRepo.assertInTenant('group', req.params.id, (await sgTenant(req, res)).tenantId);
     await sgRepo.unlinkEntraGroup(req.params.id);
     res.json({ success: true });
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    sgFail(res, err);
   }
 });
 
@@ -331,6 +430,7 @@ router.post('/security-groups/groups/:id/workspaces', async (req, res) => {
     const body = req.body || {};
     const workspaces = Array.isArray(body.workspaces) ? body.workspaces : [];
     if (!workspaces.length) return res.json({ success: false, message: 'Select at least one workspace.' });
+    await sgRepo.assertInTenant('group', req.params.id, (await sgTenant(req, res)).tenantId);
 
     const actor = actorOf(req);
     let attached = 0;
@@ -342,24 +442,28 @@ router.post('/security-groups/groups/:id/workspaces', async (req, res) => {
     }
     res.json({ success: true, attached });
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    sgFail(res, err);
   }
 });
 
 router.post('/security-groups/attachments/:id/detach', async (req, res) => {
   try {
+    await sgRepo.assertInTenant('attachment', req.params.id, (await sgTenant(req, res)).tenantId);
     await sgRepo.detachWorkspace(req.params.id);
     res.json({ success: true });
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    sgFail(res, err);
   }
 });
 
 /** The workspaces a group can be attached to, from the last completed scan. */
 router.get('/security-groups/workspaces', async (req, res) => {
   try {
-    const runs = await db.getAnalysisRuns();
-    const run = (runs || []).find(candidate => candidate.status === 'completed');
+    // This tenant's newest whole-tenant scan: a group is never offered another
+    // tenant's workspaces.
+    const { tenantId } = await sgTenant(req, res);
+    const run = (res.locals.availableRuns || await db.getAnalysisRuns())
+      .find(candidate => candidate.status === 'completed' && String(candidate.tenant_id || '').toLowerCase() === tenantId && isTenantWide(candidate));
     if (!run) return res.json({ success: true, runId: null, workspaces: [] });
 
     let rows = await analysisModel.listRunWorkspaces(run.id).catch(() => []);
@@ -383,7 +487,7 @@ router.get('/security-groups/workspaces', async (req, res) => {
         .sort((a, b) => String(a.name).localeCompare(String(b.name))),
     });
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    sgFail(res, err);
   }
 });
 
@@ -398,7 +502,8 @@ router.get('/security-groups/workspaces', async (req, res) => {
  */
 router.post('/security-groups/verify', async (req, res) => {
   try {
-    const groups = await sgRepo.listGroups();
+    const tenant = await sgTenant(req, res);
+    const groups = await sgRepo.listGroups(tenant.tenantId);
     const targets = [];
     for (const group of groups) {
       for (const attachment of group.workspaces) {
@@ -409,11 +514,9 @@ router.post('/security-groups/verify', async (req, res) => {
       return res.json({ success: true, results: [], summary: sgMapping.summarizeChecks([]), checkedAt: new Date().toISOString() });
     }
 
-    const servicePrincipals = await db.getServicePrincipals();
-    if (!servicePrincipals.length) return res.json({ success: false, message: 'No service principal configured.' });
-    const wanted = Number.parseInt((req.body || {}).spId, 10);
-    const sp = (Number.isFinite(wanted) && servicePrincipals.find(candidate => Number(candidate.id) === wanted))
-      || servicePrincipals[0];
+    // The tenant's own principal reads its own workspaces.
+    const sp = tenant.sp;
+    if (!sp) return res.json({ success: false, message: 'No service principal configured for this tenant.' });
 
     const pbi = powerbi.createPowerBIService(sp, {
       keyVaultDelegatedToken: (req.session && req.session.keyVaultDelegatedToken && req.session.keyVaultDelegatedToken.token) || null,
@@ -469,7 +572,7 @@ router.post('/security-groups/verify', async (req, res) => {
       summary: sgMapping.summarizeChecks(results),
     });
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    sgFail(res, err);
   }
 });
 
@@ -727,3 +830,4 @@ router.get('/sources/:id/datasets', async (req, res) => {
 });
 
 module.exports = router;
+module.exports._sgTenant = sgTenant;

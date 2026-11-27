@@ -19,6 +19,13 @@
   </div>
 </div>
 
+<% (typeof credentialReminders !== 'undefined' ? credentialReminders : []).forEach(function(reminder) { %>
+  <div class="alert alert-<%= reminder.state === 'expired' ? 'danger' : 'warning' %> py-2 credential-reminder">
+    <i class="bi bi-alarm me-2"></i>The credential of <strong><%= reminder.name %></strong> <%= reminder.state === 'expired' ? 'has expired' : 'expires soon' %>
+    (<%= reminder.label %>). Scans and schedules for that tenant stop when it does. <a href="/settings">Renew it in Settings</a>.
+  </div>
+<% }) %>
+
 <% if (hasOutcome) { %>
   <%- include('./partials/governance-outcome') %>
 <% } else { %>

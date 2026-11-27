@@ -31,6 +31,15 @@
       </button>
     </div>
 
+    <% (typeof credentialReminders !== 'undefined' ? credentialReminders : []).forEach(function(reminder) { %>
+      <div class="alert alert-<%= reminder.state === 'expired' ? 'danger' : 'warning' %> py-2 credential-reminder">
+        <i class="bi bi-alarm me-2"></i><strong><%= reminder.name %></strong>: the credential
+        <%= reminder.state === 'expired' ? 'has expired' : 'expires soon' %> — <%= reminder.label %>, from <%= reminder.source %>.
+        Every scan, schedule and capacity action for this tenant stops when it does. Renew it in Entra ID, put the new value in
+        Key Vault (or here), and set the new expiry.
+      </div>
+    <% }) %>
+
     <% if (!servicePrincipals.length) { %>
       <div class="alert alert-info mb-4">
         <i class="bi bi-info-circle me-2"></i>No Service Principal configured yet.
@@ -45,8 +54,16 @@
             <span class="<%= idx === 0 ? 'badge bg-primary me-2' : 'badge bg-secondary me-2' %>"><%= idx === 0 ? 'Active' : 'Inactive' %></span>
             <strong><i class="bi bi-key me-1 text-primary"></i><%= sp.name %></strong>
             <span class="text-muted small ms-2 font-monospace"><%= sp.client_id %></span>
-            <% if (sp.key_vault_name) { %>
+            <% if (sp.auth_method === 'certificate') { %>
+              <span class="badge bg-info ms-2"><i class="bi bi-patch-check me-1"></i>Certificate in Key Vault</span>
+            <% } else if (sp.key_vault_name) { %>
               <span class="badge bg-info ms-2"><i class="bi bi-safe me-1"></i>Key Vault</span>
+            <% } %>
+            <% if (sp.credential) { %>
+              <span class="badge ms-2 <%= sp.credential.state === 'expired' ? 'bg-danger' : sp.credential.state === 'expiring' ? 'bg-warning text-dark' : sp.credential.state === 'ok' ? 'bg-light text-dark border' : 'bg-light text-muted border' %>"
+                    title="<%= sp.credential.source ? 'From ' + sp.credential.source : 'Not known yet: read when the credential is first used from Key Vault, or enter it when editing' %>">
+                <i class="bi bi-calendar-event me-1"></i><%= sp.credential.label %>
+              </span>
             <% } %>
             <% if (sp.client_secret) { %>
               <span class="badge bg-secondary ms-2"><i class="bi bi-lock-fill me-1"></i>Stored secret</span>
@@ -67,6 +84,9 @@
               data-sp-eaoid="<%= sp.enterprise_app_object_id || '' %>"
               data-sp-kv-name="<%= sp.key_vault_name || '' %>"
               data-sp-kv-secret="<%= sp.key_vault_secret_name || '' %>"
+              data-sp-auth="<%= sp.auth_method || 'secret' %>"
+              data-sp-kv-cert="<%= sp.key_vault_certificate_name || '' %>"
+              data-sp-expires="<%= sp.credential && sp.credential.expiresAt ? sp.credential.expiresAt.slice(0, 10) : '' %>"
               data-sp-has-secret="<%= sp.client_secret ? 'true' : 'false' %>"
               onclick="openSpForm(this)"
             >
@@ -158,6 +178,28 @@
               </div>
 
               <div class="form-check mb-2">
+                <input class="form-check-input" type="radio" name="secretSource" id="secretSourceCert" value="certificate" onchange="updateSecretSource()">
+                <label class="form-check-label" for="secretSourceCert"><strong>Certificate in Azure Key Vault</strong> <span class="badge bg-success ms-1">Most secure</span></label>
+              </div>
+              <div id="certFields" class="ms-4 mb-3" style="display:none;">
+                <div class="row">
+                  <div class="col-md-6 mb-3 mb-md-0">
+                    <label for="spCertKvName" class="form-label">Key Vault Name</label>
+                    <input type="text" class="form-control" id="spCertKvName" placeholder="my-key-vault" oninput="document.getElementById('spKvName').value = this.value">
+                  </div>
+                  <div class="col-md-6">
+                    <label for="spKvCert" class="form-label">Certificate Name</label>
+                    <input type="text" class="form-control" id="spKvCert" name="keyVaultCertificateName" placeholder="pbi-sp-certificate">
+                  </div>
+                </div>
+                <div class="form-text mt-2">
+                  No secret exists to leak: the app signs in with the certificate's private key, read from Key Vault. Create the
+                  certificate with the <strong>PEM</strong> content type, and upload its public part to the app registration
+                  under Certificates &amp; secrets. Its expiry is read from the certificate.
+                </div>
+              </div>
+
+              <div class="form-check mb-2">
                 <input class="form-check-input" type="radio" name="secretSource" id="secretSourceDirect" value="direct" onchange="updateSecretSource()">
                 <label class="form-check-label" for="secretSourceDirect"><strong>Enter the client secret directly</strong></label>
               </div>
@@ -176,6 +218,16 @@
                   </div>
                 <% } %>
               </div>
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label for="spCredentialExpires" class="form-label">Credential expires on <span class="text-muted">(optional)</span></label>
+            <input type="date" class="form-control" id="spCredentialExpires" name="credentialExpiresAt" style="max-width:220px;">
+            <div class="form-text">
+              Shown as a reminder <%= typeof credentialWarnDays !== 'undefined' ? credentialWarnDays : 30 %> days ahead. Read
+              automatically from Key Vault when the secret has an expiry set, and from the certificate itself — enter it here for
+              a secret stored directly, from Entra ID → App registrations → Certificates &amp; secrets.
             </div>
           </div>
 
@@ -212,8 +264,13 @@ function openSpForm(button) {
   secretInput.value = '';
   var hasStoredSecret = isEdit && button.getAttribute('data-sp-has-secret') === 'true';
   var usesKeyVault = !isEdit || !!(button.getAttribute('data-sp-kv-name') || '');
-  document.getElementById('secretSourceKv').checked = usesKeyVault || !hasStoredSecret;
-  document.getElementById('secretSourceDirect').checked = !usesKeyVault && hasStoredSecret;
+  var usesCert = isEdit && button.getAttribute('data-sp-auth') === 'certificate';
+  document.getElementById('spKvCert').value = isEdit ? button.getAttribute('data-sp-kv-cert') || '' : '';
+  document.getElementById('spCertKvName').value = document.getElementById('spKvName').value;
+  document.getElementById('spCredentialExpires').value = isEdit ? button.getAttribute('data-sp-expires') || '' : '';
+  document.getElementById('secretSourceCert').checked = usesCert;
+  document.getElementById('secretSourceKv').checked = !usesCert && (usesKeyVault || !hasStoredSecret);
+  document.getElementById('secretSourceDirect').checked = !usesCert && !usesKeyVault && hasStoredSecret;
   document.getElementById('spClientSecretHelp').innerHTML = hasStoredSecret
     ? 'A secret is already stored (encrypted). Leave this blank to keep it, or enter a new value to replace it.'
     : 'Encrypted with AES-256-GCM before it is written to the database — it is never stored as plain text, and it is never sent back to the browser.';
@@ -222,10 +279,16 @@ function openSpForm(button) {
 
 function updateSecretSource() {
   var useKv = document.getElementById('secretSourceKv').checked;
+  var useCert = document.getElementById('secretSourceCert').checked;
   document.getElementById('kvFields').style.display = useKv ? '' : 'none';
-  document.getElementById('directFields').style.display = useKv ? 'none' : '';
+  document.getElementById('certFields').style.display = useCert ? '' : 'none';
+  document.getElementById('directFields').style.display = (useKv || useCert) ? 'none' : '';
+  // The certificate option shares the vault name field, which stays in the form.
   document.getElementById('spKvName').required = useKv;
   document.getElementById('spKvSecret').required = useKv;
+  document.getElementById('spCertKvName').required = useCert;
+  document.getElementById('spKvCert').required = useCert;
+  if (useCert) document.getElementById('spKvName').value = document.getElementById('spCertKvName').value;
 }
 
 async function testSP(id) {

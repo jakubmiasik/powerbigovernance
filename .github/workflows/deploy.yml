@@ -74,6 +74,15 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           package: .
 
+      # The scan worker, when one is deployed (set the repository variable
+      # AZURE_WORKER_APP_NAME to its name). Same package, started with npm run worker.
+      - name: Deploy the scan worker
+        if: vars.AZURE_WORKER_APP_NAME != ''
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ vars.AZURE_WORKER_APP_NAME }}
+          package: .
+
       # A successful upload does not mean the site came back up, so confirm the
       # running app reports itself healthy before the job is allowed to pass.
       - name: Verify deployment health

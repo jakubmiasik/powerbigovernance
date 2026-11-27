@@ -8,6 +8,7 @@ const { MDM_MIGRATIONS } = require('./mdmSchema');
 const { ANALYSIS_MODEL_MIGRATIONS } = require('./analysisModelSchema');
 const { SECURITY_GROUP_MIGRATIONS } = require('./securityGroupSchema');
 const { PERMISSION_MIGRATIONS } = require('./permissionSchema');
+const { AUDIT_MIGRATIONS } = require('./auditSchema');
 const { encryptSecret, isEncryptionConfigured } = require('./secretCryptoService');
 
 const cfg = getConfig();
@@ -32,18 +33,20 @@ function getConnection() {
       if (!SQL_SERVER || !SQL_DATABASE) {
         throw new Error('SQL_SERVER and SQL_DATABASE must be configured.');
       }
-      const token = await getToken();
+      // A SQL login is for the local dev container only (SQL Server in Docker has
+      // no Entra ID). Everywhere else the app signs in with its managed identity.
+      const local = cfg.sql.user && cfg.sql.password;
       const config = {
         server: SQL_SERVER,
-        authentication: {
-          type: 'azure-active-directory-access-token',
-          options: { token },
-        },
+        authentication: local
+          ? { type: 'default', options: { userName: cfg.sql.user, password: cfg.sql.password } }
+          : { type: 'azure-active-directory-access-token', options: { token: await getToken() } },
         options: {
           database: SQL_DATABASE,
           encrypt: true,
-          trustServerCertificate: false,
+          trustServerCertificate: !!(local && cfg.sql.trustServerCertificate),
           requestTimeout: 30000,
+          port: cfg.sql.port || 1433,
         },
       };
       const conn = new Connection(config);
@@ -145,10 +148,24 @@ async function execWithColumnFallback(conn, { required = [], optional = [], extr
 }
 
 // Service Principals CRUD
+// The credential columns added for certificates and expiry. Read when present,
+// so an instance whose migration has not run yet still reads the older columns.
+const SP_BASE_COLUMNS = 'id, name, tenant_id, client_id, client_secret, enterprise_app_object_id, key_vault_name, key_vault_secret_name';
+const SP_CREDENTIAL_COLUMNS = 'auth_method, key_vault_certificate_name, credential_expires_at, credential_expiry_source';
+
+async function selectServicePrincipals(conn, tail, params) {
+  try {
+    return await execSql(conn, `SELECT ${SP_BASE_COLUMNS}, ${SP_CREDENTIAL_COLUMNS}, created_at, updated_at FROM service_principals ${tail}`, params);
+  } catch (err) {
+    if (!/Invalid column name/i.test(err.message || '')) throw err;
+    return execSql(conn, `SELECT ${SP_BASE_COLUMNS}, created_at, updated_at FROM service_principals ${tail}`, params);
+  }
+}
+
 async function getServicePrincipals() {
   const conn = await getConnection();
   try {
-    return await execSql(conn, 'SELECT id, name, tenant_id, client_id, client_secret, enterprise_app_object_id, key_vault_name, key_vault_secret_name, created_at, updated_at FROM service_principals ORDER BY name');
+    return await selectServicePrincipals(conn, 'ORDER BY name');
   } finally {
     conn.close();
   }
@@ -157,7 +174,7 @@ async function getServicePrincipals() {
 async function getServicePrincipalById(id) {
   const conn = await getConnection();
   try {
-    const rows = await execSql(conn, 'SELECT id, name, tenant_id, client_id, client_secret, enterprise_app_object_id, key_vault_name, key_vault_secret_name FROM service_principals WHERE id = @id', [
+    const rows = await selectServicePrincipals(conn, 'WHERE id = @id', [
       { name: 'id', type: TYPES.Int, value: id },
     ]);
     return rows[0] || null;
@@ -166,7 +183,27 @@ async function getServicePrincipalById(id) {
   }
 }
 
-async function saveServicePrincipal({ id, name, tenantId, clientId, clientSecret, enterpriseAppObjectId, keyVaultName, keyVaultSecretName }) {
+/**
+ * When the principal's credential stops working, as far as anyone can tell:
+ * read from Key Vault or the certificate itself when it is used, or entered by
+ * hand. Best-effort — a failure to record it never blocks a sign-in.
+ */
+async function recordCredentialExpiry(id, expiresAt, source) {
+  const parsed = expiresAt ? new Date(expiresAt) : null;
+  const conn = await getConnection();
+  try {
+    await execSql(conn, `UPDATE service_principals SET credential_expires_at=@at, credential_expiry_source=@source
+      WHERE id=@id AND (credential_expires_at IS NULL OR credential_expires_at <> @at OR ISNULL(credential_expiry_source, '') <> @source)`, [
+      { name: 'id', type: TYPES.Int, value: Number.parseInt(id, 10) },
+      { name: 'at', type: TYPES.DateTime2, value: parsed && !Number.isNaN(parsed.getTime()) ? parsed : null },
+      { name: 'source', type: TYPES.NVarChar, value: source || null },
+    ]);
+  } finally {
+    conn.close();
+  }
+}
+
+async function saveServicePrincipal({ id, name, tenantId, clientId, clientSecret, enterpriseAppObjectId, keyVaultName, keyVaultSecretName, authMethod, keyVaultCertificateName, credentialExpiresAt }) {
   // A directly supplied client secret is the fallback for tenants where Key Vault
   // is unreachable. It is encrypted before it ever reaches the database, so no
   // plaintext secret is persisted.
@@ -219,8 +256,32 @@ async function saveServicePrincipal({ id, name, tenantId, clientId, clientSecret
         ]
       );
     }
+    await saveCredentialSettings(conn, { id, name, tenantId, clientId, authMethod, keyVaultCertificateName, credentialExpiresAt });
   } finally {
     conn.close();
+  }
+}
+
+// Written separately, so saving still works on a schema without these columns.
+async function saveCredentialSettings(conn, { id, name, tenantId, clientId, authMethod, keyVaultCertificateName, credentialExpiresAt }) {
+  const method = authMethod === 'certificate' ? 'certificate' : 'secret';
+  const expires = credentialExpiresAt ? new Date(credentialExpiresAt) : null;
+  const manual = expires && !Number.isNaN(expires.getTime());
+  const where = id ? 'WHERE id=@id' : 'WHERE id = (SELECT MAX(id) FROM service_principals WHERE name=@name AND tenant_id=@tenantId AND client_id=@clientId)';
+  try {
+    await execSql(conn, `UPDATE service_principals SET auth_method=@method, key_vault_certificate_name=@cert
+      ${manual ? ", credential_expires_at=@expires, credential_expiry_source='entered'" : ''} ${where}`, [
+      { name: 'id', type: TYPES.Int, value: id ? Number.parseInt(id, 10) : null },
+      { name: 'name', type: TYPES.NVarChar, value: name },
+      { name: 'tenantId', type: TYPES.NVarChar, value: tenantId },
+      { name: 'clientId', type: TYPES.NVarChar, value: clientId },
+      { name: 'method', type: TYPES.NVarChar, value: method },
+      { name: 'cert', type: TYPES.NVarChar, value: method === 'certificate' ? keyVaultCertificateName || null : null },
+      { name: 'expires', type: TYPES.DateTime2, value: manual ? expires : null },
+    ]);
+  } catch (err) {
+    if (!/Invalid column name/i.test(err.message || '')) throw err;
+    if (method === 'certificate') throw new Error('Certificate sign-in needs the latest database migration. Restart the app so it runs, then save again.');
   }
 }
 
@@ -287,7 +348,7 @@ async function assignRunNumber(conn, id) {
 }
 
 // Analysis runs
-async function createAnalysisRun({ spId, spName, tenantId, runBy, scopeKind, scopeWorkspaces, scheduleId }) {
+async function createAnalysisRun({ spId, spName, tenantId, runBy, scopeKind, scopeWorkspaces, scheduleId, status }) {
   const conn = await getConnection();
   try {
     const parsedSpId = Number.parseInt(spId, 10);
@@ -301,7 +362,7 @@ async function createAnalysisRun({ spId, spName, tenantId, runBy, scopeKind, sco
       ],
       optional: [
         { column: 'sp_id', param: { name: 'spId', type: TYPES.Int, value: Number.isFinite(parsedSpId) ? parsedSpId : null } },
-        { column: 'status', param: { name: 'status', type: TYPES.NVarChar, value: 'running' } },
+        { column: 'status', param: { name: 'status', type: TYPES.NVarChar, value: status === 'queued' ? 'queued' : 'running' } },
         // What this run covers, recorded before it starts. A reader must be able to
         // tell a scan of three workspaces from a scan of the tenant even if the run
         // never finishes.
@@ -560,6 +621,84 @@ async function markInterruptedRuns(staleSeconds) {
     return ids;
   } catch (err) {
     if ((err.message || '').includes('Invalid object name')) return [];
+    throw err;
+  } finally {
+    conn.close();
+  }
+}
+
+
+// ── Scan queue, for the external worker ──
+// A queued run waits in analysis_runs until a worker claims it. Claiming is one
+// statement with READPAST, so two workers can never take the same run.
+
+const CLAIM_RUN_SQL = `
+WITH next AS (
+  SELECT TOP (1) * FROM analysis_runs WITH (UPDLOCK, READPAST, ROWLOCK)
+  WHERE status = 'queued'
+  ORDER BY id
+)
+UPDATE next SET status = 'running', worker_id = @worker, attempts = ISNULL(attempts, 0) + 1
+OUTPUT inserted.id, inserted.sp_id, inserted.scope_kind, inserted.scope_workspaces, inserted.run_by, inserted.attempts`;
+
+async function claimQueuedRun(workerId) {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(conn, CLAIM_RUN_SQL, [{ name: 'worker', type: TYPES.NVarChar, value: String(workerId || 'worker').slice(0, 100) }]);
+    return rows[0] || null;
+  } finally {
+    conn.close();
+  }
+}
+
+/** The status of a run as stored — how a worker hears about a cancel request. */
+async function getRunStatus(runId) {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(conn, 'SELECT status FROM analysis_runs WHERE id = @id', [{ name: 'id', type: TYPES.Int, value: runId }]);
+    return rows[0] ? rows[0].status : null;
+  } finally {
+    conn.close();
+  }
+}
+
+/**
+ * Asks whoever runs the scan to stop. A queued run is simply cancelled; a running
+ * one is marked 'cancelling' and its worker stops at its next check.
+ * Returns the new status, or null when the run is not running or queued.
+ */
+async function requestRunCancel(runId) {
+  const conn = await getConnection();
+  try {
+    const id = { name: 'id', type: TYPES.Int, value: runId };
+    const queued = await execSql(conn, `UPDATE analysis_runs SET status='cancelled', completed_at=GETUTCDATE()
+      OUTPUT inserted.status WHERE id=@id AND status='queued'`, [id]);
+    if (queued.length) return 'cancelled';
+    const running = await execSql(conn, `UPDATE analysis_runs SET status='cancelling'
+      OUTPUT inserted.status WHERE id=@id AND status='running'`, [id]);
+    return running.length ? 'cancelling' : null;
+  } finally {
+    conn.close();
+  }
+}
+
+/**
+ * Puts recently interrupted runs back in the queue, once each, so a worker
+ * restart costs a retry rather than the scan. Older ones stay interrupted.
+ */
+async function requeueInterruptedRuns(maxAttempts, withinHours = 6) {
+  const conn = await getConnection();
+  try {
+    const rows = await execSql(conn, `UPDATE analysis_runs SET status='queued', completed_at=NULL, worker_id=NULL
+      OUTPUT inserted.id
+      WHERE status='interrupted' AND ISNULL(attempts, 0) BETWEEN 1 AND @max - 1
+        AND completed_at >= DATEADD(hour, -@within, GETUTCDATE())`, [
+      { name: 'max', type: TYPES.Int, value: Math.max(1, Number(maxAttempts) || 2) },
+      { name: 'within', type: TYPES.Int, value: withinHours },
+    ]);
+    return rows.map(row => row.id);
+  } catch (err) {
+    if (/Invalid column name|Invalid object name/i.test(err.message || '')) return [];
     throw err;
   } finally {
     conn.close();
@@ -1459,6 +1598,18 @@ async function runMigrations() {
     // Add Key Vault columns to service_principals if missing
     await runStatement(conn, 'add service_principals.key_vault_name', `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'key_vault_name') ALTER TABLE service_principals ADD key_vault_name NVARCHAR(255) NULL`);
     await runStatement(conn, 'add service_principals.key_vault_secret_name', `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'key_vault_secret_name') ALTER TABLE service_principals ADD key_vault_secret_name NVARCHAR(255) NULL`);
+    // The scan queue: which worker owns a run, and how many times it was tried
+    await runStatement(conn, 'add analysis_runs.worker_id', `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'analysis_runs') AND name = N'worker_id') ALTER TABLE analysis_runs ADD worker_id NVARCHAR(100) NULL`);
+    await runStatement(conn, 'add analysis_runs.attempts', `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'analysis_runs') AND name = N'attempts') ALTER TABLE analysis_runs ADD attempts INT NULL`);
+    // Certificate sign-in and credential expiry
+    for (const [column, type] of [
+      ['auth_method', 'NVARCHAR(16) NULL'],
+      ['key_vault_certificate_name', 'NVARCHAR(255) NULL'],
+      ['credential_expires_at', 'DATETIME2 NULL'],
+      ['credential_expiry_source', 'NVARCHAR(32) NULL'],
+    ]) {
+      await runStatement(conn, 'add service_principals.' + column, `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'${column}') ALTER TABLE service_principals ADD ${column} ${type}`);
+    }
     // Make client_secret nullable (it may already be)
     await runStatement(conn, 'relax service_principals.client_secret', `IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'service_principals') AND name = N'client_secret' AND is_nullable = 0) ALTER TABLE service_principals ALTER COLUMN client_secret NVARCHAR(MAX) NULL`);
     // Reconciliation engine tables
@@ -1481,6 +1632,10 @@ async function runMigrations() {
     for (const migration of PERMISSION_MIGRATIONS) {
       await runStatement(conn, migration.label, migration.sql);
     }
+    // The application's own audit trail
+    for (const migration of AUDIT_MIGRATIONS) {
+      await runStatement(conn, migration.label, migration.sql);
+    }
 
     console.log('[DB] Migrations complete.');
   } catch (err) {
@@ -1500,6 +1655,7 @@ module.exports = {
   getServicePrincipalById,
   saveServicePrincipal,
   deleteServicePrincipal,
+  recordCredentialExpiry,
   createAnalysisRun,
   updateAnalysisRun,
   getAnalysisRuns,
@@ -1510,6 +1666,10 @@ module.exports = {
   getRunProgress,
   getLiveRunProgress,
   markInterruptedRuns,
+  claimQueuedRun,
+  getRunStatus,
+  requestRunCancel,
+  requeueInterruptedRuns,
   saveRunTotals,
   getRunTotals,
   getComparableRuns,

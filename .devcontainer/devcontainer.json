@@ -1,0 +1,15 @@
+{
+  // Node 20 and a local SQL Server, so the app, its migrations and the full test
+  // suite run without an Azure subscription. Open in VS Code or Codespaces.
+  "name": "Fabric Governance",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/powerbigovernance",
+  "forwardPorts": [3000],
+  "postCreateCommand": "npm ci && node scripts/dev-create-database.js",
+  "customizations": {
+    "vscode": {
+      "extensions": ["dbaeumer.vscode-eslint", "ms-mssql.mssql"]
+    }
+  }
+}

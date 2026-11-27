@@ -7,3 +7,17 @@ services:
     project: .
     language: js
     host: appservice
+
+# After provisioning, create the database users for the managed identities:
+# the Governance Outcome's read-only reader, and the scan worker when deployed.
+# Runs as the signed-in deployer, who must be an Entra admin of the SQL server.
+hooks:
+  postprovision:
+    posix:
+      shell: sh
+      run: npm run setup:sql
+      continueOnError: true
+    windows:
+      shell: pwsh
+      run: npm run setup:sql
+      continueOnError: true

@@ -1,4 +1,5 @@
 const express = require('express');
+const { credentialStatus, reminders } = require('../services/credentialReminderService');
 const router = express.Router();
 const db = require('../services/databaseService');
 const { isEncryptionConfigured } = require('../services/secretCryptoService');
@@ -46,7 +47,10 @@ router.get('/', async (req, res) => {
       title: 'Settings',
       user: req.user,
       // Never hand the stored ciphertext to the template — only whether one exists.
-      servicePrincipals: servicePrincipals.map((sp) => ({ ...sp, client_secret: sp.client_secret ? true : null })),
+      servicePrincipals: servicePrincipals.map((sp) => ({
+        ...sp, client_secret: sp.client_secret ? true : null, credential: credentialStatus(sp),
+      })),
+      credentialReminders: reminders(servicePrincipals),
       secretEncryptionReady: isEncryptionConfigured(),
       success: req.flash('success'),
       error: req.flash('error'),
@@ -56,6 +60,7 @@ router.get('/', async (req, res) => {
       title: 'Settings',
       user: req.user,
       servicePrincipals: [],
+      credentialReminders: [],
       secretEncryptionReady: isEncryptionConfigured(),
       success: [],
       error: [err.message],
@@ -64,19 +69,31 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/sp/save', async (req, res) => {
-  const { id, name, tenantId, clientId, enterpriseAppObjectId, keyVaultName, keyVaultSecretName, clientSecret, secretSource } = req.body;
-  const useKeyVault = secretSource !== 'direct';
+  const { id, name, tenantId, clientId, enterpriseAppObjectId, keyVaultName, keyVaultSecretName, clientSecret, secretSource,
+    keyVaultCertificateName, credentialExpiresAt } = req.body;
+  // Three ways to sign in: a secret in Key Vault, a certificate in Key Vault, or a
+  // secret stored here (encrypted).
+  const source = ['keyvault', 'certificate', 'direct'].includes(secretSource) ? secretSource : 'keyvault';
+  const useKeyVault = source !== 'direct';
 
   if (!name || !tenantId || !clientId) {
     req.flash('error', 'Name, Tenant ID and Client ID are required.');
     return res.redirect('/settings');
   }
-  if (useKeyVault && (!keyVaultName || !keyVaultSecretName)) {
+  if (source === 'keyvault' && (!keyVaultName || !keyVaultSecretName)) {
     req.flash('error', 'Key Vault Name and Secret Name are required when using Key Vault.');
+    return res.redirect('/settings');
+  }
+  if (source === 'certificate' && (!keyVaultName || !keyVaultCertificateName)) {
+    req.flash('error', 'Key Vault Name and Certificate Name are required for certificate sign-in.');
     return res.redirect('/settings');
   }
   if (!useKeyVault && !clientSecret && !id) {
     req.flash('error', 'A client secret is required when Key Vault is not used.');
+    return res.redirect('/settings');
+  }
+  if (credentialExpiresAt && !/^\d{4}-\d{2}-\d{2}$/.test(credentialExpiresAt)) {
+    req.flash('error', 'The expiry date must be a date (YYYY-MM-DD).');
     return res.redirect('/settings');
   }
 
@@ -90,7 +107,10 @@ router.post('/sp/save', async (req, res) => {
       clientSecret: useKeyVault ? null : (clientSecret ? clientSecret : undefined),
       enterpriseAppObjectId: enterpriseAppObjectId || null,
       keyVaultName: useKeyVault ? keyVaultName : null,
-      keyVaultSecretName: useKeyVault ? keyVaultSecretName : null,
+      keyVaultSecretName: source === 'keyvault' ? keyVaultSecretName : null,
+      authMethod: source === 'certificate' ? 'certificate' : 'secret',
+      keyVaultCertificateName: source === 'certificate' ? keyVaultCertificateName : null,
+      credentialExpiresAt: credentialExpiresAt ? credentialExpiresAt + 'T00:00:00Z' : null,
     });
     req.flash('success', 'Service principal saved.');
   } catch (err) {
