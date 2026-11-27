@@ -220,6 +220,45 @@ const SECURITY_GROUP_MIGRATIONS = [
       END
     `,
   },
+  // ── Per tenant ──
+  // A mapping belongs to the tenant whose workspaces it plans: the same stream and
+  // role in two customer tenants are two different groups. Rows from before this
+  // column existed are given the tenant when only one is configured; otherwise
+  // they stay unassigned, show in every tenant, and take the tenant they are next
+  // saved in.
+  {
+    label: 'add sg_assignments.tenant_id',
+    sql: `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'sg_assignments') AND name = N'tenant_id')
+      ALTER TABLE sg_assignments ADD tenant_id NVARCHAR(64) NULL`,
+  },
+  {
+    label: 'add sg_groups.tenant_id',
+    sql: `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'sg_groups') AND name = N'tenant_id')
+      ALTER TABLE sg_groups ADD tenant_id NVARCHAR(64) NULL`,
+  },
+  {
+    label: 'backfill security group tenant when only one tenant exists',
+    sql: `IF OBJECT_ID(N'service_principals', N'U') IS NOT NULL
+        AND (SELECT COUNT(DISTINCT LOWER(tenant_id)) FROM service_principals) = 1
+      BEGIN
+        DECLARE @only NVARCHAR(64) = (SELECT TOP 1 LOWER(tenant_id) FROM service_principals);
+        UPDATE sg_assignments SET tenant_id = @only WHERE tenant_id IS NULL;
+        UPDATE sg_groups SET tenant_id = @only WHERE tenant_id IS NULL;
+      END`,
+  },
+  {
+    label: 'make the group identity per tenant',
+    sql: `IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_sg_groups_identity' AND object_id = OBJECT_ID(N'sg_groups'))
+        AND NOT EXISTS (
+          SELECT 1 FROM sys.index_columns ic
+          JOIN sys.indexes i ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+          JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+          WHERE i.name = N'UX_sg_groups_identity' AND i.object_id = OBJECT_ID(N'sg_groups') AND c.name = N'tenant_id')
+      BEGIN
+        DROP INDEX UX_sg_groups_identity ON sg_groups;
+        CREATE UNIQUE INDEX UX_sg_groups_identity ON sg_groups (tenant_id, stream_id, project_role_id, environment_id);
+      END`,
+  },
 ];
 
 module.exports = { SECURITY_GROUP_MIGRATIONS };

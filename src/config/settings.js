@@ -42,6 +42,20 @@ function getConfig() {
     sql: {
       server: process.env.SQL_SERVER || '',
       database: process.env.SQL_DATABASE || '',
+      // Local development only (the dev container's SQL Server). Production uses
+      // the managed identity and must not set these.
+      user: process.env.SQL_USER || '',
+      password: process.env.SQL_PASSWORD || '',
+      trustServerCertificate: (process.env.SQL_TRUST_SERVER_CERTIFICATE || '').toLowerCase() === 'true',
+      port: parseInt(process.env.SQL_PORT || '1433', 10),
+    },
+    // Where scans run. 'inline' runs them in the web process, as before. 'external'
+    // queues them in SQL for the scan worker (npm run worker), so a web restart or
+    // a deployment no longer kills a scan that takes hours.
+    analysis: {
+      workerMode: (process.env.ANALYSIS_WORKER_MODE || 'inline').trim().toLowerCase() === 'external' ? 'external' : 'inline',
+      workerPollMs: parseInt(process.env.ANALYSIS_WORKER_POLL_MS || '10000', 10),
+      maxAttempts: parseInt(process.env.ANALYSIS_MAX_ATTEMPTS || '2', 10),
     },
     cache: {
       runCacheTtlMs: parseInt(process.env.RUN_CACHE_TTL_MS || '30000', 10),
@@ -78,6 +92,9 @@ function validateConfig({ requireProductionSecrets = false } = {}) {
   }
   if (requireProductionSecrets && (!cfg.sql.server || !cfg.sql.database)) {
     errors.push('SQL_SERVER and SQL_DATABASE must be configured in production.');
+  }
+  if (requireProductionSecrets && cfg.sql.trustServerCertificate) {
+    errors.push('SQL_TRUST_SERVER_CERTIFICATE is for the local dev container only and must not be set in production.');
   }
 
   if (errors.length) {

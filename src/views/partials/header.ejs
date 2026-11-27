@@ -41,8 +41,20 @@
   var groupOrder = (typeof navGroups !== 'undefined' && navGroups && navGroups.length)
     ? navGroups.slice()
     : ['Overview', 'Governance', 'Operations', 'Data Quality', 'Configuration'];
+  // Only the most specific section is active: /quality/security-groups lights up
+  // Security Groups, not Quality Configuration as well.
+  var activeSectionKey = null;
+  var activePrefixLength = -1;
+  navSections.forEach(function(section) {
+    section.prefixes.forEach(function(prefix) {
+      if ((pagePath === prefix || pagePath.indexOf(prefix + '/') === 0) && prefix.length > activePrefixLength) {
+        activePrefixLength = prefix.length;
+        activeSectionKey = section.key;
+      }
+    });
+  });
   function navActive(section) {
-    return section.prefixes.some(function(prefix) { return pagePath === prefix || pagePath.indexOf(prefix + '/') === 0; });
+    return section.key === activeSectionKey;
   }
   var navByGroup = {};
   function addEntry(group, entry) {
@@ -70,6 +82,7 @@
     addEntry('Configuration', { href: '/settings/permissions', label: 'Users & Access', icon: 'user-cog', fallbackClass: 'bi bi-person-badge', active: pagePath.indexOf('/settings/permissions') === 0 });
     addEntry('Configuration', { href: '/settings/access', label: 'Grant Access', icon: 'key-round', fallbackClass: 'bi bi-key', active: pagePath.indexOf('/settings/access') === 0 });
     addEntry('Configuration', { href: '/settings/governance', label: 'Governance Configuration', icon: 'ruler', fallbackClass: 'bi bi-rulers', active: pagePath.indexOf('/settings/governance') === 0 });
+    addEntry('Configuration', { href: '/settings/audit', label: 'Audit Log', icon: 'scroll-text', fallbackClass: 'bi bi-journal-text', active: pagePath.indexOf('/settings/audit') === 0 });
   }
   var navGroupsForSidebar = groupOrder.map(function(group) { return { title: group, items: navByGroup[group] || [] }; });
   var canSearchWorkspaces = navSections.some(function(s) { return s.key === 'workspaces'; });

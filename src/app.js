@@ -127,6 +127,10 @@ app.use(loadRuns);
 // a user cannot reach, but hiding a link is not a restriction — this is.
 app.use(requireSectionAccess);
 
+// Every change made through the application is recorded, after the response,
+// with secrets removed. Read-only requests are not.
+app.use(require('./services/auditLogService').auditTrail());
+
 // API to switch selected run
 app.post('/api/select-run', (req, res) => {
   const selectedRunId = Number.parseInt(req.body.runId, 10);
@@ -178,6 +182,7 @@ app.use('/', indexRoutes);
 app.use('/settings/permissions', permissionRoutes);
 app.use('/settings/access', accessRoutes);
 app.use('/settings/governance', governanceConfigRoutes);
+app.use('/settings/audit', require('./routes/audit'));
 app.use('/settings', configRoutes);
 app.use('/workspaces', workspaceRoutes);
 app.use('/governance', governanceRoutes);

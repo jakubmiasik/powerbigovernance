@@ -1,0 +1,25 @@
+services:
+  app:
+    image: mcr.microsoft.com/devcontainers/javascript-node:20
+    volumes:
+      - ..:/workspaces/powerbigovernance:cached
+    command: sleep infinity
+    environment:
+      # Local development only. Production signs in to Azure SQL with its managed
+      # identity and never sets SQL_USER, SQL_PASSWORD or SQL_TRUST_SERVER_CERTIFICATE.
+      SQL_SERVER: sql
+      SQL_DATABASE: governance
+      SQL_USER: sa
+      SQL_PASSWORD: Local-dev-only-Passw0rd
+      SQL_TRUST_SERVER_CERTIFICATE: "true"
+      SESSION_SECRET: local-dev-session-secret-not-for-production
+      SECRET_ENCRYPTION_KEY: local-dev-encryption-key-not-for-production
+    depends_on:
+      - sql
+  sql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: Local-dev-only-Passw0rd
+    ports:
+      - "1433:1433"

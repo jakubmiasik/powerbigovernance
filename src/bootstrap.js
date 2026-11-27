@@ -28,6 +28,10 @@ async function bootstrap() {
   } catch (err) {
     console.warn('[Bootstrap] Could not reconcile abandoned analysis runs:', err.message);
   }
+  // A credential's expiry, once read from Key Vault or the certificate, is kept so
+  // Settings and Home can warn before sign-in starts failing.
+  require('./services/authService').onCredentialExpiry((id, expiresOn, source) =>
+    require('./services/databaseService').recordCredentialExpiry(id, expiresOn, source));
   startScheduler();
 }
 

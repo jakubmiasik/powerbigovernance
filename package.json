@@ -5,6 +5,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "worker": "node src/worker.js",
+    "setup:sql": "node scripts/setup-sql-identities.js",
     "dev": "node --watch src/server.js",
     "test": "node --test",
     "check": "npm run check:js && npm test",

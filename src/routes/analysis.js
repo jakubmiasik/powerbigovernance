@@ -21,6 +21,7 @@ const { SCHEDULE_TYPES } = require('../services/scheduleDueService');
 const { convertScheduleToUtc } = require('../services/scheduleTimeService');
 const { visibleRuns, tenantsForSection, canUseSectionInTenant } = require('../services/permissionService');
 const { readWorkspaceAccess } = require('../services/workspaceAccessScanService');
+const { getConfig } = require('../config/settings');
 
 /**
  * The tenants this user may act on.
@@ -213,9 +214,10 @@ router.get('/', async (req, res) => {
  * to hours, and a caller that waited for one would be holding a request open or,
  * worse, a scheduler tick.
  */
-async function startRun({ sp, scope, runBy, scheduleId = null, authOptions = {} }) {
+async function startRun({ sp, scope, runBy, scheduleId = null, authOptions = {}, workerMode = getConfig().analysis.workerMode }) {
   const normalized = normalizeScope(scope);
   const stored = scopeToRow(normalized);
+  const queued = workerMode === 'external';
 
   const runId = await db.createAnalysisRun({
     spId: sp.id,
@@ -225,8 +227,14 @@ async function startRun({ sp, scope, runBy, scheduleId = null, authOptions = {} 
     scopeKind: stored.scopeKind,
     scopeWorkspaces: stored.scopeWorkspaces,
     scheduleId,
+    status: queued ? 'queued' : 'running',
   });
   if (!runId) throw new Error('Could not create the analysis run record in the database.');
+
+  // With an external worker the run waits in the queue, and survives this process
+  // restarting. The worker reads the secret itself (managed identity or stored),
+  // so a Key Vault sign-in made in this browser session does not travel with it.
+  if (queued) return { runId, scope: normalized, queued: true };
 
   // Deliberately not awaited: the scan runs on after this returns, and its progress
   // is followed through the progress endpoints.
@@ -266,7 +274,7 @@ router.post('/run', async (req, res) => {
       return res.json({ success: false, message: 'Select at least one workspace, or choose the whole tenant.' });
     }
 
-    const { runId } = await startRun({
+    const started = await startRun({
       sp,
       scope,
       runBy: req.user ? req.user.name : 'anonymous',
@@ -275,7 +283,8 @@ router.post('/run', async (req, res) => {
         keyVaultAuthUrl: `/settings/kv/auth?spId=${encodeURIComponent(String(sp.id))}&returnTo=${encodeURIComponent('/analysis')}`,
       },
     });
-    res.json({ success: true, runId, scope: describeScope(scope) });
+    const { runId } = started;
+    res.json({ success: true, runId, scope: describeScope(scope), queued: !!started.queued });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
@@ -350,21 +359,26 @@ router.get('/workspaces', async (req, res) => {
 router.post('/cancel/:runId', async (req, res) => {
   const runId = parseInt(req.params.runId);
   const progress = activeAnalyses.get(runId);
-  if (!progress || progress.status !== 'running') {
-    // Cancellation is cooperative, so only the worker executing the run can honour
-    // it. Say that plainly rather than reporting a generic failure.
-    return res.json({
-      success: false,
-      message: activeAnalyses.has(runId)
-        ? 'Analysis is not currently running.'
-        : 'This run is not being executed by this application instance, so it cannot be cancelled from here.',
-    });
+  if (progress && progress.status === 'running') {
+    progress.cancelRequested = true;
+    progress.status = 'cancelling';
+    progress.message = 'Cancellation requested...';
+    return res.json({ success: true });
   }
 
-  progress.cancelRequested = true;
-  progress.status = 'cancelling';
-  progress.message = 'Cancellation requested...';
-  res.json({ success: true });
+  // Not running here: it may be queued, or running in the scan worker. Both are
+  // reached through the stored status, which the worker checks as it goes.
+  try {
+    const result = await db.requestRunCancel(runId);
+    if (result === 'cancelled') return res.json({ success: true, message: 'The queued scan was cancelled before it started.' });
+    if (result === 'cancelling') return res.json({ success: true, message: 'Cancellation requested. The worker running this scan stops at its next check.' });
+  } catch (err) {
+    console.warn('[Analysis] Could not request cancellation of run', runId, err.message);
+  }
+  res.json({
+    success: false,
+    message: activeAnalyses.has(runId) ? 'Analysis is not currently running.' : 'This run is not running or queued, so there is nothing to cancel.',
+  });
 });
 
 /**
@@ -391,6 +405,13 @@ router.get('/progress/:runId', async (req, res) => {
   // row has been deleted. Fall back to whatever the run record itself says.
   try {
     const run = await db.getAnalysisRunById(runId);
+    if (run && run.status === 'queued') {
+      return res.json({
+        runId, status: 'queued', progress: 0, phase: 'Queued',
+        message: 'Waiting for the scan worker to pick this run up.',
+        detail: '', phases: [], events: [], counters: null, live: true,
+      });
+    }
     if (run) {
       const finished = runProgress.isTerminal(run.status);
       return res.json({
@@ -1273,3 +1294,7 @@ router.get('/schedules/:id/history', async (req, res) => {
 });
 
 module.exports = router;
+// For the scan worker (src/worker.js), which runs scans outside the web process.
+module.exports._runAnalysis = runAnalysis;
+module.exports._activeAnalyses = activeAnalyses;
+module.exports._startRun = startRun;
