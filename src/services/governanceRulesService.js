@@ -291,7 +291,7 @@ function buildGaps({ run, totals, access, workspaces, trend, connectionMode, kpi
  * `data` is what the repository returned; `run` is Q1's row. Every query was
  * already tied to the tenant, and this function only ever sees that tenant's rows.
  */
-function buildOutcome({ run, data, rules, connectionMode = 'application', generatedAt, trigger = 'on-demand' }) {
+function buildOutcome({ run, data, rules, connectionMode = 'application', generatedAt, trigger = 'on-demand', selected = null }) {
   const t = { ...rules.thresholds };
   for (const key of Object.keys(t)) t[key] = Number(t[key]);
   const totals = data.totals || null;
@@ -344,7 +344,9 @@ function buildOutcome({ run, data, rules, connectionMode = 'application', genera
     access,
     trend,
     deletions: (data.deletions || []).map(row => ({ workspaceName: row.workspace_name || '(unnamed)', state: row.state, deletedAt: iso(row.deleted_at), runId: row.run_id, scan: row.run_id ? runLabel({ ...row, id: row.run_id }) : null })),
-    gaps: buildGaps({ run, totals, access, workspaces, trend, connectionMode, kpis }),
+    gaps: (selected ? [{ id: 'selected-scan-scoped', message: 'The selected scan, ' + runLabel({ ...selected, id: selected.run_id }) + ', covered only some workspaces. The outcome reads whole-tenant scans, so it shows ' + scanRef.label + ', the latest whole-tenant scan of this principal at or before it.' }] : [])
+      .concat(buildGaps({ run, totals, access, workspaces, trend, connectionMode, kpis })),
+    selection: selected ? { selectedRunId: selected.run_id, selectedLabel: runLabel({ ...selected, id: selected.run_id }), shownLabel: scanRef.label } : null,
     meta: { generatedAt: iso(generatedAt), trigger, connectionMode, rulesVersion: rules.version || null, thresholds: t },
   };
 }

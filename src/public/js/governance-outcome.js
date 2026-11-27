@@ -12,6 +12,8 @@
   var tenantSelect = document.getElementById('goTenant');
   var regenerate = document.getElementById('goRegenerate');
   var tenantId = root.getAttribute('data-tenant-id');
+  // The scan selected at the top of the page; another tenant picked here drops it.
+  var runId = root.getAttribute('data-run-id') || '';
 
   // ── tiny DOM helpers ──
   function h(tag, attrs, children) {
@@ -270,7 +272,7 @@
       .forEach(function (part) { if (part) frag.appendChild(part); });
     body.appendChild(frag);
     var how = o.meta.trigger === 'after-scan' ? 'after the scan' : 'on demand';
-    sub.textContent = 'Fixed rules over the latest completed whole-tenant scan · generated ' + how + ' at ' + utc(o.meta.generatedAt) + (o.meta.cached ? ' (cached until the next scan)' : '');
+    sub.textContent = 'Fixed rules over ' + (o.run.label || 'the selected scan') + (o.selection ? ' (shown for ' + o.selection.selectedLabel + ')' : '') + ' · generated ' + how + ' at ' + utc(o.meta.generatedAt) + (o.meta.cached ? ' (cached)' : '');
     if (window.lucide && window.lucide.createIcons) window.lucide.createIcons({ icons: window.lucide.icons, attrs: { 'aria-hidden': 'true', focusable: 'false' }, root: root });
   }
 
@@ -291,14 +293,14 @@
   function load(force) {
     showState('loading', force ? 'Generating the governance outcome…' : 'Loading the governance outcome…');
     if (regenerate) regenerate.disabled = true;
-    var url = '/api/governance/summary' + (force ? '/regenerate' : '') + '?tenantId=' + encodeURIComponent(tenantId);
+    var url = '/api/governance/summary' + (force ? '/regenerate' : '') + '?tenantId=' + encodeURIComponent(tenantId) + (runId ? '&runId=' + encodeURIComponent(runId) : '');
     fetch(url, force ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', credentials: 'same-origin' } : { credentials: 'same-origin' })
       .then(function (res) {
         return res.json().catch(function () { return {}; }).then(function (data) { return { status: res.status, data: data }; });
       })
       .then(function (r) {
         if (r.status === 200) return render(r.data);
-        if (r.status === 404) return showState('empty', 'No completed tenant scan for this tenant yet. Run a whole-tenant analysis and the outcome is generated as its last step.');
+        if (r.status === 404) return showState('empty', (r.data && r.data.error && r.data.error !== 'No completed tenant scan') ? r.data.error + '.' : 'No completed tenant scan for this tenant yet. Run a whole-tenant analysis and the outcome is generated as its last step.');
         if (r.status === 403) return showState('error', 'You do not have access to this tenant.');
         showState('error', (r.data && r.data.error) || 'The governance outcome could not be loaded.');
       })
@@ -306,7 +308,7 @@
       .then(function () { if (regenerate) regenerate.disabled = false; });
   }
 
-  if (tenantSelect) tenantSelect.addEventListener('change', function () { tenantId = tenantSelect.value; load(false); });
+  if (tenantSelect) tenantSelect.addEventListener('change', function () { tenantId = tenantSelect.value; runId = ''; load(false); });
   if (regenerate) regenerate.addEventListener('click', function () { load(true); });
   load(false);
 })();

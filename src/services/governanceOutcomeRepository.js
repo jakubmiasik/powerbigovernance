@@ -73,6 +73,8 @@ const runParam = runId => ({ name: 'RunId', type: TYPES.Int, value: runId });
 // caller passed the wrong one.
 const RUN_BELONGS_TO_TENANT = 'EXISTS (SELECT 1 FROM dbo.analysis_runs AS g WHERE g.id = @RunId AND g.tenant_id = @TenantId)';
 const SAME_PRINCIPAL = '(r.sp_id = @SpId OR (r.sp_id IS NULL AND @SpId IS NULL))';
+// "As of" the scan being shown: nothing from that principal's later scans.
+const UP_TO_SHOWN = '(@UpToNumber IS NULL OR r.sp_run_number <= @UpToNumber)';
 
 const SQL = {
   latestRun: `
@@ -130,6 +132,7 @@ SELECT TOP (1) r.id AS access_run_id, r.sp_id, r.sp_name, r.sp_run_number, r.com
 FROM dbo.analysis_runs AS r
 WHERE r.tenant_id = @TenantId AND r.status = N'completed' AND r.scope_kind = N'tenant'
   AND ${SAME_PRINCIPAL}
+  AND ${UP_TO_SHOWN}
   AND EXISTS (SELECT 1 FROM dbo.analysis_workspace_users AS u WHERE u.run_id = r.id)
 ORDER BY r.sp_run_number DESC, r.completed_at DESC;`,
 
@@ -150,6 +153,7 @@ FROM dbo.analysis_runs AS r
 JOIN dbo.analysis_run_totals AS t ON t.run_id = r.id
 WHERE r.tenant_id = @TenantId AND r.status = N'completed' AND r.scope_kind = N'tenant'
   AND ${SAME_PRINCIPAL}
+  AND ${UP_TO_SHOWN}
 ORDER BY r.sp_run_number, r.completed_at;`,
 
   deletions: `
@@ -157,7 +161,26 @@ SELECT s.workspace_name, s.state, s.deleted_at, s.run_id, r.sp_id, r.sp_name, r.
 FROM dbo.workspace_states AS s
 JOIN dbo.analysis_runs AS r ON r.id = s.run_id
 WHERE r.tenant_id = @TenantId AND s.state = N'Deleted'
+  AND (@AsOf IS NULL OR s.deleted_at <= @AsOf)
 ORDER BY s.deleted_at DESC;`,
+
+  // The scan the reader selected, if it is a completed scan of this tenant.
+  selectedRun: `
+SELECT TOP (1) r.id AS run_id, r.sp_id, r.sp_run_number, r.tenant_id, r.sp_name, r.status,
+       r.started_at, r.completed_at, r.run_by, r.scope_kind
+FROM dbo.analysis_runs AS r
+WHERE r.id = @RunId AND r.tenant_id = @TenantId AND r.status = N'completed';`,
+
+  // The outcome reads whole-tenant scans. For a selected scoped scan: that
+  // principal's latest whole-tenant scan at or before it.
+  tenantRunUpTo: `
+SELECT TOP (1) r.id AS run_id, r.sp_id, r.sp_run_number, r.tenant_id, r.sp_name, r.status,
+       r.started_at, r.completed_at, r.run_by, r.scope_kind
+FROM dbo.analysis_runs AS r
+WHERE r.tenant_id = @TenantId AND r.status = N'completed' AND r.scope_kind = N'tenant'
+  AND ${SAME_PRINCIPAL}
+  AND ${UP_TO_SHOWN}
+ORDER BY r.sp_run_number DESC, r.completed_at DESC;`,
 };
 
 async function withConnection(fn) {
@@ -182,23 +205,51 @@ async function latestRun(tenantId) {
  * is only the join key; its principal decides which scans the access fallback and
  * the trend may use.
  */
+function spParamOf(run) {
+  return { name: 'SpId', type: TYPES.Int, value: run.sp_id === null || run.sp_id === undefined ? null : Number(run.sp_id) };
+}
+function upToParamOf(run) {
+  const n = Number.parseInt(run.sp_run_number, 10);
+  return { name: 'UpToNumber', type: TYPES.Int, value: Number.isInteger(n) ? n : null };
+}
+
+/**
+ * The scan the outcome shows for a selected scan: the scan itself when it covered
+ * the whole tenant, otherwise its principal's latest whole-tenant scan at or before
+ * it. Returns { run, selected } or null when the selected scan is not a completed
+ * scan of this tenant.
+ */
+async function runForSelected(tenantId, runId) {
+  return withConnection(async conn => {
+    const selected = (await _sql.execSql(conn, SQL.selectedRun, [tenantParam(tenantId), runParam(runId)]))[0] || null;
+    if (!selected) return null;
+    if (selected.scope_kind === 'tenant' || selected.scope_kind === null || selected.scope_kind === undefined) {
+      return { run: selected, selected };
+    }
+    const run = (await _sql.execSql(conn, SQL.tenantRunUpTo, [tenantParam(tenantId), spParamOf(selected), upToParamOf(selected)]))[0] || null;
+    return { run, selected };
+  });
+}
+
 async function readOutcomeData(tenantId, latest) {
   const runId = latest.run_id;
-  const spParam = { name: 'SpId', type: TYPES.Int, value: latest.sp_id === null || latest.sp_id === undefined ? null : Number(latest.sp_id) };
+  const spParam = spParamOf(latest);
+  const upTo = upToParamOf(latest);
+  const asOf = { name: 'AsOf', type: TYPES.DateTime2, value: latest.completed_at ? new Date(latest.completed_at) : null };
   return withConnection(async conn => {
     const run = [tenantParam(tenantId), runParam(runId)];
     const totals = (await _sql.execSql(conn, SQL.totals, run))[0] || null;
     const workspacesByType = await _sql.execSql(conn, SQL.workspacesByType, run);
     const skus = await _sql.execSql(conn, SQL.skuDistribution, run);
     const workspaces = await _sql.execSql(conn, SQL.workspaceFlags, run);
-    const accessRun = (await _sql.execSql(conn, SQL.accessRun, [tenantParam(tenantId), spParam]))[0] || null;
+    const accessRun = (await _sql.execSql(conn, SQL.accessRun, [tenantParam(tenantId), spParam, upTo]))[0] || null;
     const access = accessRun
       ? await _sql.execSql(conn, SQL.accessSummary, [tenantParam(tenantId), { name: 'AccessRunId', type: TYPES.Int, value: accessRun.access_run_id }])
       : [];
-    const trend = await _sql.execSql(conn, SQL.trend, [tenantParam(tenantId), spParam]);
-    const deletions = await _sql.execSql(conn, SQL.deletions, [tenantParam(tenantId)]);
+    const trend = await _sql.execSql(conn, SQL.trend, [tenantParam(tenantId), spParam, upTo]);
+    const deletions = await _sql.execSql(conn, SQL.deletions, [tenantParam(tenantId), asOf]);
     return { totals, workspacesByType, skus, workspaces, accessRun, access, trend, deletions };
   });
 }
 
-module.exports = { SQL, connectionMode, latestRun, readOutcomeData };
+module.exports = { SQL, connectionMode, latestRun, runForSelected, readOutcomeData };

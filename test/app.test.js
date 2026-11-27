@@ -8133,3 +8133,90 @@ test('Home is the governance outcome; onboarding has its own page', async () => 
   assert.match(page, /Before You Start/);
   assert.match(page, /id="prerequisitesModal"/);
 });
+
+// ── Governance outcome follows the selected scan ──
+
+test('governance outcome shows the selected scan, and for a scoped one the whole-tenant scan before it', async () => {
+  const service = require('../src/services/governanceOutcomeService');
+  service.clearCache();
+  const fx = outcomeFixture();
+  const wide36 = { ...fx.run, run_id: 36, sp_run_number: 11, completed_at: new Date('2026-11-25T18:10:00Z') };
+  const scoped38 = { ...fx.run, run_id: 38, sp_run_number: 13, scope_kind: 'workspaces' };
+  const shown = [];
+  const repo = {
+    latestRun: async () => fx.run,
+    runForSelected: async (tenantId, runId) => {
+      assert.equal(tenantId, SOFTWAREONE);
+      if (runId === 36) return { run: wide36, selected: wide36 };
+      if (runId === 38) return { run: fx.run, selected: scoped38 };
+      return null;
+    },
+    readOutcomeData: async (tenantId, run) => { shown.push(run.run_id); return fx.data; },
+  };
+
+  const picked = await service.getOutcome(SOFTWAREONE, { runId: 36, repo });
+  assert.equal(picked.outcome.run.label, 'SoftwareOne #11', 'the selected scan, not the latest');
+  assert.equal(picked.outcome.selection, null);
+
+  const latest = await service.getOutcome(SOFTWAREONE, { repo });
+  assert.equal(latest.outcome.run.label, 'SoftwareOne #12', 'with nothing selected: the latest');
+  assert.equal((await service.getOutcome(SOFTWAREONE, { runId: 36, repo })).cached, true, 'each scan is cached on its own');
+
+  const forScoped = await service.getOutcome(SOFTWAREONE, { runId: 38, repo });
+  assert.equal(forScoped.outcome.run.label, 'SoftwareOne #12');
+  assert.deepEqual(forScoped.outcome.selection, { selectedRunId: 38, selectedLabel: 'SoftwareOne #13', shownLabel: 'SoftwareOne #12' });
+  assert.match(forScoped.outcome.gaps[0].message, /^The selected scan, SoftwareOne #13, covered only some workspaces\. The outcome reads whole-tenant scans, so it shows SoftwareOne #12/);
+
+  assert.equal((await service.getOutcome(SOFTWAREONE, { runId: 999, repo })).status, 404);
+  assert.deepEqual(shown, [36, 37, 37]);
+  service.clearCache();
+});
+
+test('the selected scan\'s tenant comes before the configured tenant', () => {
+  const { pickTenant } = require('../src/services/governanceOutcomeService');
+  const allowed = [{ id: SOFTWAREONE, name: 'SoftwareOne' }, { id: OTHER_TENANT, name: 'Other' }];
+  assert.deepEqual(pickTenant(undefined, allowed, { defaultTenantId: SOFTWAREONE, selectedRun: { tenant_id: OTHER_TENANT } }), { tenantId: OTHER_TENANT });
+  assert.deepEqual(pickTenant(undefined, allowed, { defaultTenantId: SOFTWAREONE, selectedRun: null }), { tenantId: SOFTWAREONE });
+});
+
+test('the outcome endpoint takes the selected scan only from the reader\'s list and this tenant', async () => {
+  const express = require('express');
+  const { createRouter } = require('../src/routes/governanceOutcome');
+  const real = require('../src/services/governanceOutcomeService');
+  const calls = [];
+  const fake = { ...real, getOutcome: async (tenantId, options) => { calls.push([tenantId, options.runId]); return { status: 200, outcome: { tenant: { id: tenantId }, meta: {} }, cached: false }; } };
+  const runs = [
+    { id: 37, tenant_id: SOFTWAREONE, sp_id: 1, sp_name: 'SoftwareOne' },
+    { id: 36, tenant_id: SOFTWAREONE, sp_id: 1, sp_name: 'SoftwareOne' },
+    { id: 60, tenant_id: OTHER_TENANT, sp_id: 2, sp_name: 'Other' },
+  ];
+  const app = express();
+  app.use((req, res, next) => { req.permissions = { isAdmin: true }; res.locals.availableRuns = runs; res.locals.globalRun = runs[1]; next(); });
+  app.use('/api/governance', createRouter({ service: fake }));
+  const server = app.listen(0);
+  const base = 'http://127.0.0.1:' + server.address().port + '/api/governance/summary?tenantId=' + SOFTWAREONE;
+  try {
+    assert.equal((await fetch(base)).status, 200);
+    assert.equal((await fetch(base + '&runId=37')).status, 200);
+    assert.equal((await fetch(base + '&runId=999')).status, 403, 'not in the reader\'s list');
+    assert.equal((await fetch(base + '&runId=60')).status, 400, 'another tenant\'s scan');
+    assert.deepEqual(calls, [[SOFTWAREONE, 36], [SOFTWAREONE, 37]], 'without runId, the scan selected at the top');
+  } finally {
+    server.close();
+  }
+});
+
+test('Home hands the selected scan to the outcome, and Getting Started sits above Home', async () => {
+  const ejs = require('ejs');
+  const sections = require('../src/services/appSectionService');
+  const html = await ejs.renderFile('src/views/home.ejs', {
+    title: 'Home', user: { name: 'T' }, currentUser: { name: 'T', email: 't@example.com' }, currentPath: '/', pagePath: '/', breadcrumb: [],
+    availableRuns: [], globalRun: null, hideRunSelector: true, prerequisites: [], visibleSections: sections.APP_SECTIONS, permissions: { isAdmin: true },
+    outcomeTenants: [{ id: SOFTWAREONE, name: 'SoftwareOne' }], outcomeTenantId: SOFTWAREONE, outcomeRunId: 36,
+  });
+  assert.match(html, new RegExp('data-tenant-id="' + SOFTWAREONE + '" data-run-id="36"'));
+  // Menu entries carry title="..."; the logo link to "/" does not.
+  const gs = html.indexOf('title="Getting Started" data-nav-group="Overview"');
+  const home = html.indexOf('title="Home" data-nav-group="Overview"');
+  assert.ok(gs > -1 && home > -1 && gs < home, 'Getting Started comes before Home in the menu');
+});
