@@ -8,6 +8,17 @@
     'unreadable': { color: 'secondary', icon: 'eye-slash', label: 'Could not be read' },
   };
   var linkedGroups = (groups || []).filter(function(g) { return g.entraGroupId; }).length;
+  var sgSp = typeof tenantSp !== 'undefined' ? tenantSp : null;
+  var peopleList = typeof people !== 'undefined' && people ? people : [];
+  var peopleStats = typeof peopleSummary !== 'undefined' ? peopleSummary : null;
+  var overview = typeof groupOverview !== 'undefined' && groupOverview ? groupOverview : [];
+  var streamSuggestion = (assignments || []).length ? assignments[0].stream : '';
+  var overviewStatus = {
+    'verified': { color: 'success', label: 'In its workspaces' },
+    'problem': { color: 'danger', label: 'Missing or wrong role' },
+    'not-verified': { color: 'secondary', label: 'Attached, not checked' },
+    'not-attached': { color: 'warning', label: 'Not assigned to any workspace' },
+  };
   var attachmentCount = (groups || []).reduce(function(sum, g) { return sum + g.workspaces.length; }, 0);
 %>
 
@@ -18,7 +29,17 @@
       Who belongs in which group, which directory group that really is, and whether the workspaces agree.
     </p>
   </div>
-  <div class="d-flex gap-2 flex-wrap">
+  <div class="d-flex gap-2 flex-wrap align-items-center">
+    <% if ((servicePrincipals || []).length) { %>
+      <%# Everything on this page belongs to one tenant: its people, its groups, its workspaces. %>
+      <label class="small text-muted" for="sgTenantSelect">Tenant</label>
+      <select class="form-select form-select-sm" id="sgTenantSelect" style="max-width:240px;"
+              onchange="window.location = '/quality/security-groups?spId=' + encodeURIComponent(this.value)">
+        <% servicePrincipals.forEach(function(sp) { %>
+          <option value="<%= sp.id %>" <%= sgSp && Number(sgSp.id) === Number(sp.id) ? 'selected' : '' %>><%= sp.name %></option>
+        <% }) %>
+      </select>
+    <% } %>
     <a href="/settings/access/roles" class="btn btn-sm btn-outline-primary">
       <i class="bi bi-person-plus me-1"></i>Grant a group a role
     </a>
@@ -78,6 +99,83 @@
         <div class="h4 mb-0" id="verifyActionable">—</div>
         <div class="small text-muted" id="verifyCheckedAt">Not verified yet</div>
       </div></div>
+    </div>
+  </div>
+
+  <!-- ── People in this tenant, from the scan ── -->
+  <div class="card mb-4" id="sgPeopleCard">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span>
+        <i class="bi bi-person-lines-fill me-2"></i>People in <%= sgSp ? sgSp.name : 'this tenant' %>
+        <% if (peopleStats) { %>
+          <span class="text-muted small ms-2"><%= peopleStats.total %> people · <%= peopleStats.mapped %> mapped · <%= peopleStats.other %> treated as Other</span>
+        <% } %>
+      </span>
+      <div class="d-flex gap-2 align-items-center flex-wrap">
+        <input class="form-control form-control-sm text-uppercase" id="peopleStream" style="max-width:130px;" placeholder="Stream" value="<%= streamSuggestion %>" maxlength="32" title="The stream new rows are saved under">
+        <% environments.forEach(function(environment) { %>
+          <div class="form-check form-check-inline mb-0">
+            <input class="form-check-input people-env" type="checkbox" value="<%= environment.code %>" id="pEnv<%= environment.code %>" <%= environment.code === 'DEV' ? 'checked' : '' %>>
+            <label class="form-check-label small" for="pEnv<%= environment.code %>"><%= environment.code %></label>
+          </div>
+        <% }) %>
+        <input class="form-control form-control-sm" style="max-width:200px;" id="peopleSearch" placeholder="Name, e-mail or workspace" oninput="filterPeople()">
+        <button class="btn btn-sm btn-outline-primary" id="addAllOtherBtn" onclick="addAllAsOther()" <%= peopleStats && peopleStats.other ? '' : 'disabled' %>>
+          <i class="bi bi-people me-1"></i>Add everyone unmapped as Other
+        </button>
+      </div>
+    </div>
+    <div class="table-responsive" style="max-height:480px;">
+      <table class="table table-sm table-hover mb-0" id="peopleTable">
+        <thead class="sticky-top"><tr>
+          <th>Person</th><th class="text-end">Workspaces</th><th>Strongest workspace role</th><th>Mapping</th><th style="width:220px;">Project role</th><th></th>
+        </tr></thead>
+        <tbody>
+          <% if (!peopleList.length) { %>
+            <tr><td colspan="6" class="text-muted small py-3">
+              <%= typeof peopleRun !== 'undefined' && peopleRun ? 'The latest whole-tenant scan of this tenant recorded no people with workspace access.' : 'No whole-tenant scan of this tenant yet. Run one, and everyone holding a workspace role shows here.' %>
+            </td></tr>
+          <% } %>
+          <% peopleList.forEach(function(person, index) { %>
+            <tr data-search="<%= [person.name || '', person.email || ''].concat(person.workspaces.map(function(w) { return w.name; })).join(' ').toLowerCase() %>">
+              <td class="small">
+                <strong><%= person.name %></strong>
+                <% if (person.email) { %><div class="text-muted"><%= person.email %></div><% } %>
+                <% if (person.notInScan) { %><span class="badge bg-light text-muted border">not in the scan</span><% } %>
+              </td>
+              <td class="text-end small">
+                <span class="badge bg-light text-dark border" title="<%= person.workspaces.map(function(w) { return w.name + ' (' + (w.role || 'unknown') + ')'; }).join(', ') %>"><%= person.workspaces.length %></span>
+              </td>
+              <td class="small"><%= person.strongest || '-' %></td>
+              <td class="small">
+                <% if (person.mapped) { %>
+                  <% person.assignments.forEach(function(a) { %>
+                    <span class="badge bg-primary-subtle text-primary-emphasis border"><%= a.stream %> · <%= a.projectRole %> · <%= a.environments.join('/') %></span>
+                  <% }) %>
+                <% } else { %>
+                  <span class="badge bg-light text-dark border" title="Not mapped yet, so treated as Other — the role that grants least">Other · not mapped</span>
+                <% } %>
+              </td>
+              <td>
+                <select class="form-select form-select-sm person-role" id="personRole<%= index %>">
+                  <% projectRoles.forEach(function(role) { %>
+                    <option value="<%= role.code %>" <%= role.code === person.projectRole ? 'selected' : '' %>><%= role.code %> — <%= role.label %></option>
+                  <% }) %>
+                </select>
+              </td>
+              <td>
+                <button class="btn btn-sm btn-outline-primary py-0 px-2" title="Save this person's role"
+                        onclick="savePersonRole(<%= index %>)"><i class="bi bi-check2"></i></button>
+              </td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+    <div class="card-footer small text-muted">
+      Everyone who holds a role in a workspace of this tenant<% if (typeof peopleRun !== 'undefined' && peopleRun) { %>, from <%- include('../partials/scan-name', { run: peopleRun }).trim() %><% } %>.
+      By design a person nobody has mapped is treated as <strong>Other</strong>, the role that grants least, until you set
+      their project role here. The workspace role they hold today is shown for context only: it does not decide the mapping.
     </div>
   </div>
 
@@ -150,7 +248,7 @@
             <code>;</code>. A row that cannot be read is named rather than dropped quietly.
           </div>
           <div class="small mt-2" id="importResult"></div>
-          <a href="/quality/security-groups/export.csv" class="btn btn-sm btn-outline-secondary mt-2">
+          <a href="/quality/security-groups/export.csv<%= sgSp ? "?spId=" + sgSp.id : "" %>" class="btn btn-sm btn-outline-secondary mt-2">
             <i class="bi bi-download me-1"></i>Export the mapping
           </a>
         </div>
@@ -245,12 +343,7 @@
         <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
           <span><i class="bi bi-shield-lock me-2"></i>Groups, their Entra ID link and their workspaces</span>
           <div class="d-flex gap-2 align-items-center flex-wrap">
-            <% if ((servicePrincipals || []).length) { %>
-              <select class="form-select form-select-sm" id="sgSpSelect" style="max-width:220px;">
-                <% servicePrincipals.forEach(function(sp) { %>
-                  <option value="<%= sp.id %>"><%= sp.name %></option>
-                <% }) %>
-              </select>
+            <% if (sgSp) { %>
               <button class="btn btn-sm btn-primary" id="verifyBtn" onclick="verifyGroups()">
                 <i class="bi bi-check2-square me-1"></i>Check the tenant
               </button>
@@ -351,6 +444,42 @@
           unreadable — the last two are not the tenant disagreeing with you.
         </div>
       </div>
+    </div>
+  </div>
+  <!-- ── Where it ends: each group, who is in it, and whether its workspaces have it ── -->
+  <div class="card mt-4" id="sgOverviewCard">
+    <div class="card-header"><i class="bi bi-diagram-3 me-2"></i>Security groups, participants and workspaces</div>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0" id="sgOverviewTable">
+        <thead><tr><th>Security group</th><th>Participants</th><th class="text-end">Workspaces</th><th>Status</th></tr></thead>
+        <tbody>
+          <% if (!overview.length) { %>
+            <tr><td colspan="4" class="text-muted small py-3">No groups yet. Set people's roles above and their groups appear here.</td></tr>
+          <% } %>
+          <% overview.forEach(function(group) { var st = overviewStatus[group.status]; %>
+            <tr>
+              <td class="small">
+                <strong><%= group.name %></strong>
+                <% if (!group.linked) { %><div class="text-muted">Suggested name, not linked to Entra ID</div><% } %>
+              </td>
+              <td class="small">
+                <% if (!group.participants.length) { %><span class="text-muted">Nobody</span><% } %>
+                <%= group.participants.slice(0, 8).join(', ') %><% if (group.participants.length > 8) { %>
+                  <span class="text-muted" title="<%= group.participants.slice(8).join(', ') %>"> and <%= group.participants.length - 8 %> more</span><% } %>
+              </td>
+              <td class="text-end small">
+                <%= group.workspaceCount %>
+                <% if (group.workspaceCount) { %><div class="text-muted"><%= group.verified %> verified<%= group.problems ? ' · ' + group.problems + ' problem(s)' : '' %><%= group.unchecked ? ' · ' + group.unchecked + ' not checked' : '' %></div><% } %>
+              </td>
+              <td class="small"><span class="badge bg-<%= st.color %><%= st.color === 'warning' ? ' text-dark' : '' %>"><%= st.label %></span></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+    <div class="card-footer small text-muted">
+      <strong>Verified</strong> means the last <em>Check the tenant</em> found the linked group in the workspace with the intended role.
+      Attach groups to workspaces in the table above, then check the tenant.
     </div>
   </div>
 </div>
@@ -594,17 +723,63 @@ var linkSearchTimer = null;
 
 function esc(value) { var d = document.createElement('div'); d.textContent = value == null ? '' : value; return d.innerHTML; }
 function sgSpId() {
-  var select = document.getElementById('sgSpSelect');
+  var select = document.getElementById('sgTenantSelect');
   return select ? select.value : '';
 }
 
+// Every change names the tenant it is for; the server checks the user holds it.
 async function postJsonTo(url, payload) {
+  var body = Object.assign({ spId: sgSpId() }, payload || {});
   var resp = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload || {}),
+    body: JSON.stringify(body),
   });
   return resp.json();
+}
+
+// ── People from the scan ──
+var peopleRows = <%- JSON.stringify(peopleList.map(function(p) { return { name: p.name, email: p.email, stream: p.stream }; })).replace(/</g, '\\u003c') %>;
+
+function peopleEnvironments() {
+  var list = [];
+  document.querySelectorAll('.people-env').forEach(function(box) { if (box.checked) list.push(box.value); });
+  return list;
+}
+
+async function savePersonRole(index) {
+  var person = peopleRows[index];
+  if (!person) return;
+  var stream = person.stream || document.getElementById('peopleStream').value.trim();
+  if (!stream) { showToast('Enter the stream at the top of the list first.', 'error'); return; }
+  var data = await postJsonTo('/quality/security-groups/assignments', {
+    stream: stream,
+    projectRole: document.getElementById('personRole' + index).value,
+    name: person.name,
+    email: person.email || '',
+    environments: peopleEnvironments(),
+  });
+  if (!data.success) { showToast(data.message, 'error'); return; }
+  window.location.reload();
+}
+
+async function addAllAsOther() {
+  var stream = document.getElementById('peopleStream').value.trim();
+  if (!stream) { showToast('Enter the stream these people belong to first.', 'error'); return; }
+  var button = document.getElementById('addAllOtherBtn');
+  button.disabled = true;
+  var data = await postJsonTo('/quality/security-groups/people/other', { stream: stream, environments: peopleEnvironments() });
+  if (!data.success) { showToast(data.message, 'error'); button.disabled = false; return; }
+  showToast('Added ' + data.added + ' as Other' + (data.failed.length ? ', ' + data.failed.length + ' failed' : '') + '.', data.failed.length ? 'info' : 'success');
+  setTimeout(function() { window.location.reload(); }, 700);
+}
+
+function filterPeople() {
+  var needle = document.getElementById('peopleSearch').value.trim().toLowerCase();
+  document.querySelectorAll('#peopleTable tbody tr').forEach(function(row) {
+    if (!row.hasAttribute('data-search')) return;
+    row.style.display = !needle || row.getAttribute('data-search').indexOf(needle) !== -1 ? '' : 'none';
+  });
 }
 
 // ── People ──
@@ -799,7 +974,7 @@ async function openAttachModal(groupId, suggestedName, defaultRole) {
   bootstrap.Modal.getOrCreateInstance(document.getElementById('attachModal')).show();
 
   try {
-    var resp = await fetch('/quality/security-groups/workspaces');
+    var resp = await fetch('/quality/security-groups/workspaces?spId=' + encodeURIComponent(sgSpId()));
     var data = await resp.json();
     if (!data.success) {
       document.getElementById('attachList').innerHTML = '<div class="small text-danger">' + esc(data.message) + '</div>';

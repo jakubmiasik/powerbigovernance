@@ -3,8 +3,9 @@ const router = express.Router();
 const { PREREQUISITES } = require('../services/qualityGuideService');
 const { getConfig } = require('../config/settings');
 const outcomes = require('../services/governanceOutcomeService');
+const { reminders } = require('../services/credentialReminderService');
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   if (!req.user) {
     return res.render('landing', { title: 'Power BI Governance' });
   }
@@ -18,9 +19,19 @@ router.get('/', (req, res) => {
   });
   const selected = res.locals.globalRun;
   const outcomeRunId = selected && picked.tenantId && outcomes.normalizeTenantId(selected.tenant_id) === picked.tenantId ? selected.id : null;
+  // Administrators are told on their first page when a tenant's credential is about
+  // to stop working. Never blocks Home: a failure here shows nothing.
+  let credentialReminders = [];
+  const perms = req.permissions || res.locals.permissions;
+  if (perms && perms.isAdmin) {
+    try {
+      credentialReminders = reminders(await require('../services/databaseService').getServicePrincipals());
+    } catch { credentialReminders = []; }
+  }
   res.render('home', {
     title: 'Home', user: req.user, breadcrumb: [{ label: 'Home', href: '/' }],
     prerequisites: PREREQUISITES,
+    credentialReminders,
     outcomeTenants,
     outcomeTenantId: picked.tenantId || null,
     outcomeRunId,

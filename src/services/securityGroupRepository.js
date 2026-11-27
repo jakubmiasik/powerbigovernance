@@ -86,7 +86,7 @@ async function personId(conn, name, email) {
  * can be attached to one before anybody has been assigned to it — planning access
  * before the people arrive is the normal order, not the exception.
  */
-async function saveAssignment(input, actor) {
+async function saveAssignment(input, actor, tenantId) {
   const stream = mapping.normalizeStream(input.stream);
   const projectRole = mapping.normalizeProjectRole(input.projectRole);
   const environments = mapping.normalizeEnvironments(input.environments);
@@ -94,6 +94,7 @@ async function saveAssignment(input, actor) {
 
   if (!stream) throw new Error('A stream is required.');
   if (!name) throw new Error('A name is required.');
+  const tenant = requireTenant(tenantId);
 
   return withConnection(async conn => {
     const roleDef = mapping.PROJECT_ROLE_BY_CODE.get(projectRole) || { label: projectRole, isAdmin: false, sortOrder: 99 };
@@ -103,23 +104,26 @@ async function saveAssignment(input, actor) {
     });
     const person = await personId(conn, name, input.email);
 
+    // This tenant's row first; an unassigned one from before tenants is taken over.
     const existing = await execSql(conn,
-      'SELECT id FROM sg_assignments WHERE person_id=@person AND stream_id=@stream AND project_role_id=@role',
-      [int('person', person), int('stream', streamId), int('role', roleId)]);
+      `SELECT TOP 1 id FROM sg_assignments WHERE person_id=@person AND stream_id=@stream AND project_role_id=@role
+         AND (tenant_id=@tenant OR tenant_id IS NULL)
+       ORDER BY CASE WHEN tenant_id IS NULL THEN 1 ELSE 0 END`,
+      [int('person', person), int('stream', streamId), int('role', roleId), str('tenant', tenant)]);
 
     let assignmentId;
     let created = false;
     if (existing.length) {
       assignmentId = existing[0].id;
       await execSql(conn,
-        'UPDATE sg_assignments SET note=@note, updated_at=SYSUTCDATETIME(), updated_by=@actor WHERE id=@id',
-        [str('note', input.note || null), str('actor', actor || null), int('id', assignmentId)]);
+        'UPDATE sg_assignments SET note=@note, tenant_id=@tenant, updated_at=SYSUTCDATETIME(), updated_by=@actor WHERE id=@id',
+        [str('note', input.note || null), str('tenant', tenant), str('actor', actor || null), int('id', assignmentId)]);
     } else {
       const inserted = await execSql(conn,
-        `INSERT INTO sg_assignments (person_id, stream_id, project_role_id, note, created_by)
-         OUTPUT INSERTED.id VALUES (@person, @stream, @role, @note, @actor)`,
+        `INSERT INTO sg_assignments (person_id, stream_id, project_role_id, note, created_by, tenant_id)
+         OUTPUT INSERTED.id VALUES (@person, @stream, @role, @note, @actor, @tenant)`,
         [int('person', person), int('stream', streamId), int('role', roleId),
-          str('note', input.note || null), str('actor', actor || null)]);
+          str('note', input.note || null), str('actor', actor || null), str('tenant', tenant)]);
       assignmentId = inserted.length ? inserted[0].id : null;
       created = true;
     }
@@ -132,7 +136,7 @@ async function saveAssignment(input, actor) {
       await execSql(conn,
         'INSERT INTO sg_assignment_environments (assignment_id, environment_id) VALUES (@a, @e)',
         [int('a', assignmentId), int('e', environmentId)]);
-      await ensureGroup(conn, streamId, roleId, environmentId);
+      await ensureGroup(conn, streamId, roleId, environmentId, tenant);
     }
 
     return { id: assignmentId, created };
@@ -147,31 +151,68 @@ async function ensureEnvironment(conn, code) {
   });
 }
 
-async function ensureGroup(conn, streamId, roleId, environmentId) {
+async function ensureGroup(conn, streamId, roleId, environmentId, tenant) {
   const existing = await execSql(conn,
-    'SELECT id FROM sg_groups WHERE stream_id=@s AND project_role_id=@r AND environment_id=@e',
-    [int('s', streamId), int('r', roleId), int('e', environmentId)]);
-  if (existing.length) return existing[0].id;
+    `SELECT TOP 1 id, tenant_id FROM sg_groups WHERE stream_id=@s AND project_role_id=@r AND environment_id=@e
+       AND (tenant_id=@t OR tenant_id IS NULL)
+     ORDER BY CASE WHEN tenant_id IS NULL THEN 1 ELSE 0 END`,
+    [int('s', streamId), int('r', roleId), int('e', environmentId), str('t', tenant)]);
+  if (existing.length) {
+    if (!existing[0].tenant_id) {
+      await execSql(conn, 'UPDATE sg_groups SET tenant_id=@t WHERE id=@id', [str('t', tenant), int('id', existing[0].id)]);
+    }
+    return existing[0].id;
+  }
 
   const inserted = await execSql(conn,
-    `INSERT INTO sg_groups (stream_id, project_role_id, environment_id)
-     OUTPUT INSERTED.id VALUES (@s, @r, @e)`,
-    [int('s', streamId), int('r', roleId), int('e', environmentId)]);
+    `INSERT INTO sg_groups (stream_id, project_role_id, environment_id, tenant_id)
+     OUTPUT INSERTED.id VALUES (@s, @r, @e, @t)`,
+    [int('s', streamId), int('r', roleId), int('e', environmentId), str('t', tenant)]);
   return inserted.length ? inserted[0].id : null;
 }
 
-/** Every assignment, with the person and the environments it covers. */
-async function listAssignments() {
+function requireTenant(tenantId) {
+  const tenant = String(tenantId || '').trim().toLowerCase();
+  if (!tenant) throw new Error('A tenant is required: security groups are planned per tenant.');
+  return tenant;
+}
+
+// The tables an id-based change may touch, and how each reaches its tenant. A
+// change is refused when the row belongs to another tenant, so a tenant someone
+// was not granted cannot be edited by guessing an id.
+const TENANT_OF = {
+  assignment: 'SELECT tenant_id FROM sg_assignments WHERE id=@id',
+  group: 'SELECT tenant_id FROM sg_groups WHERE id=@id',
+  attachment: 'SELECT g.tenant_id FROM sg_group_workspaces gw JOIN sg_groups g ON g.id = gw.group_id WHERE gw.id=@id',
+};
+
+async function assertInTenant(kind, id, tenantId) {
+  const tenant = requireTenant(tenantId);
+  const rows = await withConnection(conn => execSql(conn, TENANT_OF[kind], [int('id', id)]));
+  if (!rows.length) throw new Error('Not found.');
+  const owner = rows[0].tenant_id ? String(rows[0].tenant_id).toLowerCase() : null;
+  if (owner && owner !== tenant) {
+    const err = new Error('That belongs to another tenant.');
+    err.status = 403;
+    throw err;
+  }
+  return true;
+}
+
+/** This tenant's assignments (and unassigned old ones), with people and environments. */
+async function listAssignments(tenantId) {
+  const tenant = requireTenant(tenantId);
   return withConnection(async conn => {
     const rows = await execSql(conn, `
-      SELECT a.id, a.note, a.created_at, a.updated_at,
+      SELECT a.id, a.note, a.created_at, a.updated_at, a.tenant_id,
              p.id AS person_id, p.display_name, p.email, p.entra_object_id,
              s.code AS stream, r.code AS project_role
       FROM sg_assignments a
       JOIN sg_people p ON p.id = a.person_id
       JOIN sg_streams s ON s.id = a.stream_id
       JOIN sg_project_roles r ON r.id = a.project_role_id
-      ORDER BY s.code, r.sort_order, p.display_name`);
+      WHERE a.tenant_id = @tenant OR a.tenant_id IS NULL
+      ORDER BY s.code, r.sort_order, p.display_name`, [str('tenant', tenant)]);
 
     const environments = await execSql(conn, `
       SELECT ae.assignment_id, e.code, e.sort_order
@@ -195,6 +236,7 @@ async function listAssignments() {
       projectRole: row.project_role,
       environments: byAssignment.get(row.id) || [],
       note: row.note || null,
+      unassignedTenant: !row.tenant_id,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }));
@@ -225,30 +267,33 @@ async function deleteAssignment(id) {
   });
 }
 
-/** Every group, with its directory link and the workspaces attached to it. */
-async function listGroups() {
+/** This tenant's groups, with their directory link and attached workspaces. */
+async function listGroups(tenantId) {
+  const tenant = requireTenant(tenantId);
   return withConnection(async conn => {
     const groups = await execSql(conn, `
-      SELECT g.id, g.entra_group_id, g.entra_group_name, g.entra_group_type, g.linked_at, g.linked_by,
+      SELECT g.id, g.entra_group_id, g.entra_group_name, g.entra_group_type, g.linked_at, g.linked_by, g.tenant_id,
              s.code AS stream, r.code AS project_role, e.code AS environment, e.sort_order
       FROM sg_groups g
       JOIN sg_streams s ON s.id = g.stream_id
       JOIN sg_project_roles r ON r.id = g.project_role_id
       JOIN sg_environments e ON e.id = g.environment_id
-      ORDER BY s.code, r.sort_order, e.sort_order`);
+      WHERE g.tenant_id = @tenant OR g.tenant_id IS NULL
+      ORDER BY s.code, r.sort_order, e.sort_order`, [str('tenant', tenant)]);
 
     const attachments = await execSql(conn, `
       SELECT gw.id, gw.group_id, gw.workspace_id, gw.workspace_name, gw.intended_role,
              gw.attached_at, gw.attached_by,
              c.state, c.actual_role, c.message, c.checked_at
       FROM sg_group_workspaces gw
+      JOIN sg_groups g ON g.id = gw.group_id AND (g.tenant_id = @tenant OR g.tenant_id IS NULL)
       OUTER APPLY (
         SELECT TOP 1 state, actual_role, message, checked_at
         FROM sg_group_workspace_checks
         WHERE group_workspace_id = gw.id
         ORDER BY checked_at DESC, id DESC
       ) c
-      ORDER BY gw.workspace_name`);
+      ORDER BY gw.workspace_name`, [str('tenant', tenant)]);
 
     const byGroup = new Map();
     for (const row of attachments) {
@@ -279,6 +324,7 @@ async function listGroups() {
       entraGroupType: row.entra_group_type || null,
       linkedAt: row.linked_at,
       linkedBy: row.linked_by || null,
+      unassignedTenant: !row.tenant_id,
       workspaces: byGroup.get(row.id) || [],
     }));
   });
@@ -359,11 +405,11 @@ async function recordChecks(results, actor) {
 }
 
 /** Everything the page needs, in one call. */
-async function loadMapping() {
+async function loadMapping(tenantId) {
   // Sequential: each of these opens its own connection, and running them together
   // doubles the connections a page load costs for no gain worth having.
-  const assignments = await listAssignments();
-  const groups = await listGroups();
+  const assignments = await listAssignments(tenantId);
+  const groups = await listGroups(tenantId);
   return { assignments, groups };
 }
 
@@ -378,5 +424,6 @@ module.exports = {
   detachWorkspace,
   recordChecks,
   loadMapping,
+  assertInTenant,
   _private: { lookupId, personId, ensureGroup },
 };

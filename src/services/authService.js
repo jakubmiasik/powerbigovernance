@@ -1,6 +1,7 @@
 const msal = require('@azure/msal-node');
 const { DefaultAzureCredential } = require('@azure/identity');
 const { SecretClient } = require('@azure/keyvault-secrets');
+const crypto = require('crypto');
 const { decryptSecret } = require('./secretCryptoService');
 
 // ── Key Vault: resolve SP client secret at runtime ──
@@ -46,21 +47,34 @@ function createKeyVaultAuthRequiredError(keyVaultName, authUrl) {
   return err;
 }
 
-async function getSecretFromKeyVault(keyVaultName, secretName, options = {}) {
+function secretRecord(secret) {
+  return {
+    value: secret.value,
+    expiresOn: secret.properties && secret.properties.expiresOn ? secret.properties.expiresOn : null,
+    contentType: secret.properties && secret.properties.contentType ? secret.properties.contentType : null,
+  };
+}
+
+// The secret and what Key Vault knows about it: its expiry and content type.
+async function getKeyVaultSecretRecord(keyVaultName, secretName, options = {}) {
   const cacheKey = `${keyVaultName}|${secretName}`;
   const cached = kvSecretCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
-    return cached.value;
+    return cached.record;
   }
 
-  try {
-    const client = getKvClient(keyVaultName);
+  const read = async (client) => {
     const secret = await client.getSecret(secretName);
     if (!secret || !secret.value) {
       throw new Error(`Secret '${secretName}' not found in Key Vault '${keyVaultName}'.`);
     }
-    kvSecretCache.set(cacheKey, { value: secret.value, expiresAt: Date.now() + KV_SECRET_TTL });
-    return secret.value;
+    const record = secretRecord(secret);
+    kvSecretCache.set(cacheKey, { record, expiresAt: Date.now() + KV_SECRET_TTL });
+    return record;
+  };
+
+  try {
+    return await read(getKvClient(keyVaultName));
   } catch (miError) {
     if (!isKeyVaultAuthorizationError(miError)) {
       throw miError;
@@ -68,16 +82,10 @@ async function getSecretFromKeyVault(keyVaultName, secretName, options = {}) {
 
     if (options.keyVaultDelegatedToken) {
       try {
-        const delegatedClient = new SecretClient(
+        return await read(new SecretClient(
           `https://${keyVaultName}.vault.azure.net`,
           createDelegatedTokenCredential(options.keyVaultDelegatedToken)
-        );
-        const secret = await delegatedClient.getSecret(secretName);
-        if (!secret || !secret.value) {
-          throw new Error(`Secret '${secretName}' not found in Key Vault '${keyVaultName}'.`);
-        }
-        kvSecretCache.set(cacheKey, { value: secret.value, expiresAt: Date.now() + KV_SECRET_TTL });
-        return secret.value;
+        ));
       } catch (delegatedError) {
         if (isKeyVaultAuthorizationError(delegatedError)) {
           throw createKeyVaultAuthRequiredError(keyVaultName, options.keyVaultAuthUrl);
@@ -90,6 +98,59 @@ async function getSecretFromKeyVault(keyVaultName, secretName, options = {}) {
   }
 }
 
+async function getSecretFromKeyVault(keyVaultName, secretName, options = {}) {
+  return (await getKeyVaultSecretRecord(keyVaultName, secretName, options)).value;
+}
+
+// Told when a credential's expiry becomes known, so it can be stored and shown.
+// Set by whoever wants to know (the database layer at start-up); never required.
+let expiryListener = null;
+function onCredentialExpiry(fn) { expiryListener = typeof fn === 'function' ? fn : null; }
+const reportedExpiry = new Map(); // sp id → what was last reported
+function reportExpiry(spConfig, expiresOn, source) {
+  if (!expiryListener || !spConfig || !spConfig.id || !expiresOn) return;
+  const key = new Date(expiresOn).toISOString() + '|' + source;
+  if (reportedExpiry.get(spConfig.id) === key) return;
+  reportedExpiry.set(spConfig.id, key);
+  Promise.resolve().then(() => expiryListener(spConfig.id, expiresOn, source)).catch(() => {});
+}
+
+/**
+ * A certificate kept in Key Vault, read as the PEM its secret holds: the private
+ * key and the certificate chain. Key Vault certificates created with the PKCS#12
+ * content type cannot be read this way, and the error says so.
+ */
+function parseCertificatePem(pem) {
+  const text = String(pem || '');
+  const keyMatch = text.match(/-----BEGIN (?:RSA |EC |ENCRYPTED )?PRIVATE KEY-----[\s\S]+?-----END (?:RSA |EC |ENCRYPTED )?PRIVATE KEY-----/);
+  const certs = text.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) || [];
+  if (!keyMatch || !certs.length) {
+    throw new Error('The certificate in Key Vault is not readable as PEM. Create it with the PEM content type (application/x-pem-file), so the app can read its private key.');
+  }
+  const x509 = new crypto.X509Certificate(certs[0]);
+  return {
+    privateKey: keyMatch[0],
+    certificate: certs[0],
+    x5c: certs.join('\n'),
+    thumbprintSha256: x509.fingerprint256.replace(/:/g, '').toLowerCase(),
+    thumbprint: x509.fingerprint.replace(/:/g, '').toLowerCase(),
+    validTo: new Date(x509.validTo),
+  };
+}
+
+async function resolveClientCertificate(spConfig, options = {}) {
+  if (!spConfig.key_vault_name || !spConfig.key_vault_certificate_name) {
+    throw new Error('Certificate sign-in needs a Key Vault name and the certificate name. Open Settings and add them.');
+  }
+  const record = await getKeyVaultSecretRecord(spConfig.key_vault_name, spConfig.key_vault_certificate_name, options);
+  if (record.contentType && /pkcs12/i.test(record.contentType)) {
+    throw new Error(`Certificate '${spConfig.key_vault_certificate_name}' is stored as PKCS#12. Re-create it in Key Vault with the PEM content type.`);
+  }
+  const certificate = parseCertificatePem(record.value);
+  reportExpiry(spConfig, certificate.validTo, 'certificate');
+  return certificate;
+}
+
 // Resolve the client secret for a SP config.
 // Key Vault is preferred. A directly stored secret (encrypted at rest) is the
 // fallback for tenants where the vault cannot be reached at all.
@@ -99,7 +160,9 @@ async function resolveClientSecret(spConfig, options = {}) {
 
   if (hasKeyVault) {
     try {
-      return await getSecretFromKeyVault(spConfig.key_vault_name, spConfig.key_vault_secret_name, options);
+      const record = await getKeyVaultSecretRecord(spConfig.key_vault_name, spConfig.key_vault_secret_name, options);
+      if (record.expiresOn) reportExpiry(spConfig, record.expiresOn, 'key-vault');
+      return record.value;
     } catch (err) {
       if (!hasStoredSecret) throw err;
       // The vault is configured but unusable (cross-tenant, network, or policy).
@@ -131,6 +194,27 @@ async function getConfidentialClient(spConfig, options = {}) {
     throw new Error('Service principal is not configured. Go to Settings to add one.');
   }
 
+  const authority = `https://login.microsoftonline.com/${spConfig.tenant_id}`;
+
+  if (spConfig.auth_method === 'certificate') {
+    const certificate = await resolveClientCertificate(spConfig, options);
+    const hash = `cert|${spConfig.client_id}|${spConfig.tenant_id}|${certificate.thumbprintSha256}`;
+    if (appCache.has(hash)) return appCache.get(hash);
+    const app = new msal.ConfidentialClientApplication({
+      auth: {
+        clientId: spConfig.client_id,
+        authority,
+        clientCertificate: {
+          thumbprintSha256: certificate.thumbprintSha256,
+          privateKey: certificate.privateKey,
+          x5c: certificate.x5c,
+        },
+      },
+    });
+    appCache.set(hash, app);
+    return app;
+  }
+
   const clientSecret = await resolveClientSecret(spConfig, options);
   const hash = getConfigHash({ clientId: spConfig.client_id, clientSecret, tenantId: spConfig.tenant_id });
 
@@ -142,7 +226,7 @@ async function getConfidentialClient(spConfig, options = {}) {
     auth: {
       clientId: spConfig.client_id,
       clientSecret,
-      authority: `https://login.microsoftonline.com/${spConfig.tenant_id}`,
+      authority,
     },
   });
   appCache.set(hash, app);
@@ -274,5 +358,6 @@ module.exports = {
   getDelegatedAuthUrl, acquireDelegatedToken,
   getKeyVaultDelegatedAuthUrl, acquireKeyVaultDelegatedToken,
   getSecretFromKeyVault,
-  _private: { resolveClientSecret },
+  onCredentialExpiry,
+  _private: { resolveClientSecret, parseCertificatePem, resolveClientCertificate, getConfidentialClient, kvSecretCache },
 };

@@ -1,0 +1,105 @@
+<%- include('../partials/header') %>
+<%
+  var q = query || {};
+  var exportQuery = ['actor', 'category', 'outcome', 'from', 'to']
+    .filter(function(key) { return q[key]; })
+    .map(function(key) { return key + '=' + encodeURIComponent(q[key]); }).join('&');
+  function when(value) {
+    if (!value) return '';
+    var d = value instanceof Date ? value : new Date(value);
+    return isNaN(d.getTime()) ? String(value) : d.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  }
+%>
+<div class="row">
+  <div class="col-xxl-10 mx-auto">
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+      <div>
+        <h2><i class="bi bi-journal-text me-2"></i>Audit Log</h2>
+        <p class="text-muted mb-0">
+          Every change made through this application: who made it, what it was and whether it worked. Rows are only
+          ever added. Secrets in a request are replaced before anything is stored.
+        </p>
+      </div>
+      <a class="btn btn-sm btn-outline-primary" id="auditExport" href="/settings/audit/export.csv<%= exportQuery ? '?' + exportQuery : '' %>">
+        <i class="bi bi-download me-1"></i>Export CSV
+      </a>
+    </div>
+
+    <% if (error) { %>
+      <div class="alert alert-danger"><i class="bi bi-exclamation-triangle me-2"></i><%= error %></div>
+    <% } %>
+
+    <form class="card mb-3" method="GET" action="/settings/audit">
+      <div class="card-body py-3">
+        <div class="row g-2 align-items-end">
+          <div class="col-md-3">
+            <label class="form-label small" for="auditActor">Who</label>
+            <input class="form-control form-control-sm" id="auditActor" name="actor" value="<%= q.actor || '' %>" placeholder="Email contains">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small" for="auditCategory">Area</label>
+            <select class="form-select form-select-sm" id="auditCategory" name="category">
+              <option value="">Any</option>
+              <% categories.forEach(function(category) { %>
+                <option value="<%= category %>" <%= q.category === category ? 'selected' : '' %>><%= category %></option>
+              <% }) %>
+            </select>
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small" for="auditOutcome">Outcome</label>
+            <select class="form-select form-select-sm" id="auditOutcome" name="outcome">
+              <option value="">Any</option>
+              <option value="succeeded" <%= q.outcome === 'succeeded' ? 'selected' : '' %>>Succeeded</option>
+              <option value="failed" <%= q.outcome === 'failed' ? 'selected' : '' %>>Failed</option>
+            </select>
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small" for="auditFrom">From</label>
+            <input type="date" class="form-control form-control-sm" id="auditFrom" name="from" value="<%= q.from || '' %>">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small" for="auditTo">To</label>
+            <input type="date" class="form-control form-control-sm" id="auditTo" name="to" value="<%= q.to || '' %>">
+          </div>
+          <div class="col-md-1">
+            <button class="btn btn-sm btn-primary w-100" type="submit">Filter</button>
+          </div>
+        </div>
+      </div>
+    </form>
+
+    <div class="card">
+      <div class="table-responsive" style="max-height:70vh;">
+        <table class="table table-sm table-hover mb-0" id="auditTable">
+          <thead class="sticky-top"><tr>
+            <th>When</th><th>Who</th><th>Action</th><th>Target</th><th>Outcome</th><th>Details</th>
+          </tr></thead>
+          <tbody>
+            <% if (!rows.length) { %>
+              <tr><td colspan="6" class="text-muted small py-3">Nothing recorded<%= exportQuery ? ' for these filters' : ' yet' %>.</td></tr>
+            <% } %>
+            <% rows.forEach(function(row) { %>
+              <tr>
+                <td class="small text-nowrap"><%= when(row.occurred_at) %></td>
+                <td class="small"><%= row.actor_name || row.actor_email || 'Unknown' %><% if (row.actor_name && row.actor_email) { %><div class="text-muted"><%= row.actor_email %></div><% } %></td>
+                <td class="small"><strong><%= row.action %></strong><div class="text-muted"><code><%= row.method %> <%= row.path %></code></div></td>
+                <td class="small"><%= row.target || '-' %><% if (row.tenant_id) { %><div class="text-muted font-monospace"><%= row.tenant_id %></div><% } %></td>
+                <td class="small">
+                  <span class="badge bg-<%= row.outcome === 'failed' ? 'danger' : 'success' %>"><%= row.outcome === 'failed' ? 'Failed' : 'Succeeded' %></span>
+                  <% if (row.message) { %><div class="text-muted"><%= row.message %></div><% } %>
+                </td>
+                <td class="small">
+                  <% if (row.detail_json) { %>
+                    <details><summary>Request</summary><pre class="small mb-0" style="white-space:pre-wrap; max-width:360px;"><%= row.detail_json %></pre></details>
+                  <% } else { %>-<% } %>
+                </td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+      <div class="card-footer small text-muted">Showing up to 500 rows, newest first. The export holds up to 5,000.</div>
+    </div>
+  </div>
+</div>
+<%- include('../partials/footer') %>
